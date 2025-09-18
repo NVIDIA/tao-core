@@ -1,0 +1,191 @@
+{
+    "api_params": {
+        "dataset_type":"bevfusion",
+        "actions": ["dataset_convert","train","evaluate","inference"],
+        "formats":["default"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "dataset_convert":"pyt_odconvert",
+            "train":"train",
+            "evaluate":"evaluate",
+            "inference":"inference"
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "default": [
+                {
+                    "all_of": [
+                        {"path": "ImageSets.tar.gz", "type": "file"},
+                        {"path": "training.tar.gz", "type": "file"},
+                        {"path": "testing.tar.gz", "type": "file"}
+                    ]
+                }
+            ]
+        }
+    },
+
+    "data_sources": {
+        "dataset_convert": {
+            "root_dir": {
+                "source": "id",
+                "path": ""
+            }
+        },
+        "train": {
+            "dataset.root_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value": ""
+            },
+            "dataset.train_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "mapping": {
+                    "ann_file": {
+                        "path": "results/{dataset_convert_job_id}/kitti_person_infos_train.pkl",
+                        "transform": "use_dataset_convert_job"
+                    },
+                    "data_prefix": {
+                        "pts": {
+                            "path": "results/{dataset_convert_job_id}/training/velodyne_reduced",
+                            "transform": "use_dataset_convert_job"
+                        },
+                        "img": {
+                            "path": "training/image_2.tar.gz"
+                        }
+                    }
+                }
+            },
+            "dataset.val_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "mapping": {
+                    "ann_file": {
+                        "path": "results/{dataset_convert_job_id}/kitti_person_infos_val.pkl",
+                        "transform": "use_dataset_convert_job"
+                    },
+                    "data_prefix": {
+                        "pts": {
+                            "path": "results/{dataset_convert_job_id}/training/velodyne_reduced",
+                            "transform": "use_dataset_convert_job"
+                        },
+                        "img": {
+                            "path": "training/image_2.tar.gz"
+                        }
+                    }
+                }
+            },
+            "dataset.test_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "mapping": {
+                    "ann_file": {
+                        "path": "results/{dataset_convert_job_id}/kitti_person_infos_val.pkl",
+                        "transform": "use_dataset_convert_job"
+                    },
+                    "data_prefix": {
+                        "pts": {
+                            "path": "results/{dataset_convert_job_id}/training/velodyne_reduced",
+                            "transform": "use_dataset_convert_job"
+                        },
+                        "img": {
+                            "path": "training/image_2.tar.gz"
+                        }
+                    }
+                }
+            }
+        },
+        "evaluate": {
+            "dataset.root_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value": ""
+            },
+            "dataset.test_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "mapping": {
+                    "ann_file": {
+                        "path": "results/{dataset_convert_job_id}/kitti_person_infos_val.pkl",
+                        "transform": "use_dataset_convert_job"
+                    },
+                    "data_prefix": {
+                        "pts": {
+                            "path": "results/{dataset_convert_job_id}/training/velodyne_reduced",
+                            "transform": "use_dataset_convert_job"
+                        },
+                        "img": {
+                            "path": "training/image_2.tar.gz"
+                        }
+                    }
+                }
+            }
+        },
+        "inference": {
+            "dataset.root_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
+            },
+            "dataset.test_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "mapping": {
+                    "ann_file": {
+                        "path": "results/{dataset_convert_job_id}/kitti_person_infos_val.pkl",
+                        "transform": "use_dataset_convert_job"
+                    },
+                    "data_prefix": {
+                        "pts": {
+                            "path": "results/{dataset_convert_job_id}/training/velodyne_reduced",
+                            "transform": "use_dataset_convert_job"
+                        },
+                        "img": {
+                            "path": "training/image_2.tar.gz"
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    "spec_params":{
+        "dataset_convert": {
+            "results_dir":"output_dir"
+        },
+        "train": {
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "train.pretrained_checkpoint": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model",
+            "encryption_key":"key"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model",
+            "encryption_key":"key"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "train.pretrained_checkpoint":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    },
+
+    "metrics": {
+        "available_metrics": ["AP11"],
+        "monitoring_metric": "AP11"
+    }
+}

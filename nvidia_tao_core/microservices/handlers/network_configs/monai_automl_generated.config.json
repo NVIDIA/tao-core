@@ -1,0 +1,25 @@
+{
+    "api_params": {
+        "dataset_type": "segmentation",
+        "formats": [
+            "monai"
+        ],
+        "actions": [
+            "batchinfer"
+        ],
+        "image": "MONAI",
+        "version": "0.0.1",
+        "spec_backend": "yaml",
+        "chaining_rules": "cvaction",
+        "realtime_infer_support": false,
+        "actions_pipe": {
+            "batchinfer": "batchinfer"
+        }
+    },
+    "cli_params": {},
+    "spec_params": {
+        "batchinfer": {
+            "num_gpu": 1
+        }
+    }
+}

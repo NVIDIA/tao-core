@@ -1,0 +1,35 @@
+{
+    "api_params": {
+        "dataset_type":"not_restricted",
+        "actions": ["validate_images"],
+        "formats":["default"],
+        "accepted_ds_intents": ["testing"],
+        "image":"TAO_DS",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "validate":"data_services"
+        }
+    },
+    
+    "actions_mapping": {
+        "validate_images": {
+            "network": "image",
+            "action": "validate"
+        }
+    },
+    "data_sources": {
+        "validate": {
+            "data.image_dir": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": ""
+            }
+        }
+    },
+    
+    "spec_params":{
+        "validate": {
+            "results_dir":"output_dir"
+        }
+    }
+}

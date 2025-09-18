@@ -1,0 +1,77 @@
+{
+    "api_params": {
+        "actions": ["convert"],
+        "formats":["default","unet","coco","raw","odvg","coco_panoptic"],
+        "accepted_ds_intents": ["training", "evaluation"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "unet": [
+                {
+                    "all_of": [
+                        {"path": "images/train.tar.gz", "type": "file"},
+                        {"path": "images/test.tar.gz", "type": "file"},
+                        {"path": "images/val.tar.gz", "type": "file"},
+                        {"path": "masks/train.tar.gz", "type": "file"},
+                        {"path": "masks/val.tar.gz", "type": "file"}
+                    ]
+                }
+            ],
+            "odvg": [
+                {
+                    "all_of": [
+                        {"path": "annotations_odvg.jsonl", "type": "file"},
+                        {"path": "annotations_odvg_labelmap.json", "type": "file"}
+                    ]
+                }
+            ],
+            "default": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.json", "type": "file"}
+                    ]
+                }
+            ],
+            "coco": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.json", "type": "file"},
+                        {"path": "label_map.json", "type": "file"}
+                    ]
+                }
+            ],
+            "coco_panoptic": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.json", "type": "file"},
+                        {"path": "images_panoptic.tar.gz", "type": "file"},
+                        {"path": "annotations_panoptic.json", "type": "file"},
+                        {"path": "label_map_panoptic.json", "type": "file"}
+                    ]
+                }
+            ],
+            "coco_raw": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.json", "type": "file"},
+                        {"path": "label_map.txt", "type": "file"}
+                    ]
+                },
+                {"intent_restriction": ["testing"]}
+            ],
+            "raw": [
+                {"path": "images.tar.gz", "type": "file"},
+                {"intent_restriction": ["testing"]}
+            ]
+        }
+    }
+}

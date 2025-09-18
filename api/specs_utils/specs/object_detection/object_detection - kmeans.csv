@@ -1,7 +1,0 @@
-parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular
-size_x,,integer,,,,,,,yes,,
-size_y,,integer,,,,,,,yes,,
-num_clusters,,integer,,9,,,,,,,
-max_steps,,integer,,10000,,,,,,,
-min_x,,integer,,0,,,,,,,
-min_y,,integer,,0,,,,,,,

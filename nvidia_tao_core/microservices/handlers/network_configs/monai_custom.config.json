@@ -1,0 +1,34 @@
+{
+    "api_params": {
+        "dataset_type": "user_custom",
+        "formats": [
+            "monai"
+        ],
+        "actions": [
+            "train",
+            "inference",
+            "batchinfer"
+        ],
+        "image": "MONAI",
+        "version": "0.0.1",
+        "spec_backend": "yaml",
+        "chaining_rules": "cvaction",
+        "realtime_infer_support": true,
+        "actions_pipe": {
+            "train": "train",
+            "batchinfer": "batchinfer"
+        }
+    },
+    "cli_params": {},
+    "spec_params":{
+        "train": {
+            "num_gpu": 1
+        },
+        "inference": {
+            "num_gpu": 1
+        },
+        "batchinfer": {
+            "num_gpu": 1
+        }
+    }
+}

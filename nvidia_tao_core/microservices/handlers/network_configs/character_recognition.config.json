@@ -1,0 +1,10 @@
+{
+    "api_params": {
+        "actions": [],
+        "formats":["lprnet","raw"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"protobuf",
+        "actions_pipe":{
+        }
+    }
+}

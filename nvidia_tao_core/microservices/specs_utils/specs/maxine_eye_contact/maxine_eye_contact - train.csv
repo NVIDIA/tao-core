@@ -1,0 +1,12 @@
+parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular,CLI,automl_enabled,math_cond,parent_param,depends_on
+train_dataset_path,h5py training path,hidden,,,,,,,,,,,FALSE,,,
+val_dataset_path,h5py val path,hidden,,,,,,,,,,,FALSE,,,
+logger_name,logger name,string,,eye_contact,,,,,,,,,FALSE,,,
+logger_version,logger version,string,,eye_contact,,,,,,,,,FALSE,,,
+num_epochs,num epochs,integer,,1,,,,,,,,,FALSE,,,
+learning_rate,learning rate,float,,0.0001,,,,,,,,,FALSE,,,
+batch_size,batch size,integer,,5,,,,,,,,,FALSE,,,
+num_data_threads,num data threads,integer,,2,,,,,,,,,FALSE,,,
+results_dir,tb log dir,hidden,,,,,,,,,,,FALSE,,,
+use_wandb,use wandb,bool,,FALSE,,,,,,,,,FALSE,,,
+checkpoint_path,pretrained model,hidden,,,,,,,,,,,FALSE,,,

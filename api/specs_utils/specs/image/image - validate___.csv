@@ -1,5 +1,0 @@
-parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,automl_enabled,math_cond,parent_param,depends_on
-data,,collection,Input data parameters,,,,,,,,,FALSE,,,
-data.image_dir,,string,Output image path,images,,,,,,,,FALSE,,,
-in_place,,bool,If correction needs to be done inplace,FALSE,,,,,,,,FALSE,,,
-results_dir,,hidden,,,,,,,,,,FALSE,,,

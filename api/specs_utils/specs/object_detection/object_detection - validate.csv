@@ -1,9 +1,0 @@
-parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,automl_enabled,math_cond,parent_param,depends_on
-data,,collection,Input data parameters,,,,,,,,,FALSE,,,
-data.input_format,,string,Input data format,COCO,,,,,,,,FALSE,,,
-data.output_dir,,hidden,Output directory path,,,,,,,,,FALSE,,,
-data.image_dir,,hidden,Output image path,,,,,,,,,FALSE,,,
-data.ann_path,,hidden,Output annotation path,,,,,,,,,FALSE,,,
-workers,,int,No of worker threads,36,,,,,,,,FALSE,,,
-apply_correction,,bool,Is correction enabled,TRUE,,,,,,,,FALSE,,,
-results_dir,,hidden,,,,,,,,,,FALSE,,,

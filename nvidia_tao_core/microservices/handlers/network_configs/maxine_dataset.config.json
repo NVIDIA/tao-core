@@ -1,0 +1,54 @@
+{
+    "api_params": {
+        "actions": ["dataset_convert_gaze"],
+        "formats":["raw", "maxine_gaze"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"MAXINE_DLDK",
+        "spec_backend":"yaml",
+        "classwise":"False",
+        "actions_pipe":{
+            "dataset_convert_gaze":"odconvert"
+        }
+    },
+
+    "actions_mapping": {
+        "dataset_convert_gaze": {
+            "network": "maxine_eye_contact",
+            "action": "dataset_convert"
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "raw": [
+                {
+                    "path": ".",
+                    "type": "regex",
+                    "regex": "mp4"
+                }
+            ],
+            "maxine_gaze": [
+                {
+                    "path": "data.h5",
+                    "type": "file"
+                }
+            ]
+        }
+    },
+ 
+    "data_sources": {
+        "dataset_convert_gaze": {
+            "input_dir": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": ""
+            }
+        }
+    },
+
+    "spec_params":{
+        "dataset_convert_gaze":{
+            "results_dir":"output_dir"
+        }
+    }
+}

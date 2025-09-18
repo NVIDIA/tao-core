@@ -1,9 +1,0 @@
-parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,notes
-dataset_convert,,collection,,,,,,,,,,
-dataset_convert.image_dir,,string,List of image directories correspoding to each partition,"images",,,,,,,,The order of image directories must match annotation_files based on partitions
-dataset_convert.annotations_file,,string,List of JSON files with COCO dataset format,"annotations.json",,,,,,,,
-dataset_convert.output_dir,,hidden,"Directory where tfrecords are written",,,,,,,,,
-dataset_convert.tag,,string,,,,,,,,,,
-dataset_convert.num_shards,,int,,256,,,,,,,,
-dataset_convert.include_masks,,bool,,FALSE,,,,,,,,
-results_dir,,hidden,,,,,,,,,,

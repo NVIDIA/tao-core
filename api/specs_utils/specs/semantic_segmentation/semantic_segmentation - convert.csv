@@ -1,3 +1,0 @@
-parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex
-num_files,num_files,integer,Number of images to convert from COCO json to VOC.,,,,,,,,
-results_dir,results_dir,string,Where it will be stored inside the root,masks,,,,,,,

@@ -1,0 +1,40 @@
+// Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+//
+// Original source taken from https://github.com/NVIDIA/NeMo
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+message DataSource
+{
+    string label_directory_path = 1;
+    string image_directory_path = 2;
+    string root_path = 3;
+    string tfrecords_path = 4;
+}
+
+message DatasetConfig {
+    // Datasources
+    // Note that paths should be relative to the DATA_ROOT path
+    repeated DataSource data_sources = 1;
+
+    map<string, string> target_class_mapping = 2;
+
+    repeated DataSource validation_data_sources = 3;
+
+    bool include_difficult_in_training = 4;
+
+    // data loader type: kitti or coco
+    string type = 5;
+}
