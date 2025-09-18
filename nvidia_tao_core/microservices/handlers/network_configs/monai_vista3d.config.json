@@ -1,0 +1,42 @@
+{
+    "api_params": {
+        "dataset_type": "segmentation",
+        "formats": [
+            "monai"
+        ],
+        "actions": [
+            "train",
+            "inference",
+            "annotation",
+            "batchinfer"
+        ],
+        "image": "MONAI",
+        "version": "0.3.5",
+        "spec_backend": "yaml",
+        "realtime_infer_support": true,
+        "actions_pipe": {
+            "train": "train",
+            "annotation": "annotation",
+            "batchinfer": "batchinfer"
+        }
+    },
+    "cli_params": {},
+    "spec_params":{
+        "train": {
+            "num_gpu": 1
+        },
+        "inference": {
+            "num_gpu": 1
+        },
+        "batchinfer": {
+            "num_gpu": 1,
+            "config_file": ["configs/inference.json", "configs/batch_inference.json"]
+        },
+        "annotation": {
+            "train_spec": {
+                "config_file": ["configs/train.json", "configs/train_continual.json"],
+                "label_mappings": "$default_monai_label_mapping"
+            }
+        }
+    }
+}

@@ -1,0 +1,163 @@
+{
+    "api_params": {
+        "dataset_type":"segmentation",
+        "actions": ["train","evaluate","export","inference","gen_trt_engine"],
+        "formats":["odvg", "coco", "coco_raw"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference",
+            "gen_trt_engine":"gen_trt_engine"
+        }
+    },
+
+    "upload_strategy": {
+        "inference": "tarball_after_completion"
+    },
+
+    "data_sources": {
+        "train": {
+            "dataset.train_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "handle_tar_path"
+                    },
+                    "json_file": {
+                        "path": "annotations_odvg.jsonl"
+                    },
+                    "label_map": {
+                        "path": "annotations_odvg_labelmap.json"
+                    }
+                }
+            },
+            "dataset.val_data_sources": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "handle_tar_path"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            }
+        },
+        "evaluate": {
+            "dataset.test_data_sources": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "handle_tar_path"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            }
+        },
+        "inference": {
+            "dataset.infer_data_sources": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": ["handle_tar_path", "wrap_in_list"]
+                    },
+                    "classmap": {
+                        "path": "label_map.txt"
+                    }
+                }
+            }
+        }
+    },
+
+    "dynamic_config": {
+        "action_rules": {
+            "evaluate": {
+                "remove": [
+                    "model.pretrained_backbone_path",
+                    "train.resume_training_checkpoint_path"
+                ]
+            },
+            "inference": {
+                "remove": [
+                    "model.pretrained_backbone_path",
+                    "train.resume_training_checkpoint_path"
+                ]
+            },
+            "export": {
+                "remove": [
+                    "model.pretrained_backbone_path",
+                    "train.resume_training_checkpoint_path"
+                ]
+            },
+            "gen_trt_engine": {
+                "remove": [
+                    "model.pretrained_backbone_path",
+                    "train.resume_training_checkpoint_path"
+                ]
+            }
+        }
+    },
+
+    "spec_params":{
+        "train": {
+            "results_dir":"output_dir",
+            "model.pretrained_backbone_path":"ptm_if_no_resume_model",
+            "train.pretrained_model_path":"ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
+            "encryption_key":"key"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model",
+            "evaluate.trt_engine":"parent_model",
+            "encryption_key":"key"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model",
+            "inference.trt_engine":"parent_model",
+            "encryption_key":"key"
+        },
+        "export":{
+            "results_dir":"output_dir",
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key"
+        },
+        "gen_trt_engine":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "gen_trt_engine.onnx_file":"parent_model",
+            "gen_trt_engine.trt_engine":"create_engine_file"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "model.pretrained_backbone_path":"automl_assign_ptm",
+        "train.pretrained_model_path":"ptm_if_no_resume_model",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    },
+
+    "metrics": {
+        "available_metrics": ["bbox_val_mAP50"],
+        "monitoring_metric": "bbox_val_mAP50"
+    }
+}

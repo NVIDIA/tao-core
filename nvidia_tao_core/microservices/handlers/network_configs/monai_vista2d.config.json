@@ -1,0 +1,34 @@
+{
+    "api_params": {
+        "dataset_type": "segmentation",
+        "formats": [
+            "monai"
+        ],
+        "actions": [
+            "train",
+            "batchinfer"
+        ],
+        "image": "MONAI",
+        "version": "0.1.7",
+        "spec_backend": "yaml",
+        "realtime_infer_support": false,
+        "actions_pipe": {
+            "train": "train",
+            "batchinfer": "batchinfer"
+        }
+    },
+    "cli_params": {},
+    "spec_params":{
+        "train": {
+            "num_gpu": 1,
+            "config_file": "configs/hyper_parameters.yaml",
+            "workflow_name": "scripts.workflow.VistaCell"
+        },
+        "batchinfer": {
+            "num_gpu": 1,
+            "config_file": "configs/hyper_parameters.yaml",
+            "workflow_name": "scripts.workflow.VistaCell",
+            "mode": "infer"
+        }
+    }
+}

@@ -1,0 +1,65 @@
+{
+    "api_params": {
+        "actions": [],
+        "formats":["default","custom","raw","classification_pyt", "ssl"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"protobuf",
+        "actions_pipe":{
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "default": [
+                {
+                    "any_of": [
+                        {"path": "images_train.tar.gz", "type": "file"},
+                        {"path": "images_val.tar.gz", "type": "file"},
+                        {"path": "images_test.tar.gz", "type": "file"}
+                    ]
+                }
+            ],
+            "custom": [
+                {
+                    "any_of": [
+                        {"path": "images_train.tar.gz", "type": "file"},
+                        {"path": "images_val.tar.gz", "type": "file"},
+                        {"path": "images_test.tar.gz", "type": "file"}
+                    ]
+                },
+                {"path": "val.csv", "type": "file"}
+            ],
+            "classification_pyt": [
+                {
+                    "any_of": [
+                        {"path": "images_train.tar.gz", "type": "file"},
+                        {"path": "images_val.tar.gz", "type": "file"},
+                        {"path": "images_test.tar.gz", "type": "file"}
+                    ]
+                },
+                {"path": "classes.txt", "type": "file"}
+            ],
+            "raw": [
+                {
+                    "any_of": [
+                        {"path": "images_train.tar.gz", "type": "file"},
+                        {"path": "images_val.tar.gz", "type": "file"},
+                        {"path": "images_test.tar.gz", "type": "file"}
+                    ]
+                },
+                {"intent_restriction": ["testing"]}
+            ],
+            "ssl": [
+                {
+                    "any_of": [
+                        {"path": "images_train.tar.gz", "type": "file"},
+                        {"path": "images_val.tar.gz", "type": "file"},
+                        {"path": "images_test.tar.gz", "type": "file"}
+                    ]
+                }
+            ]
+        }
+    }
+}
+

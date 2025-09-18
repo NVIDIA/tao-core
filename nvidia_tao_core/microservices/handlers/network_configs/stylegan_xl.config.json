@@ -1,0 +1,168 @@
+{
+    "api_params": {
+        "dataset_type":"stylegan_xl",
+        "actions": ["dataset_convert","train","evaluate","export","inference"],
+        "formats":["default"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "dataset_convert":"pyt_odconvert",
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "default": [
+                {"path": "images.tar.gz", "type": "file"}
+            ]
+        }
+    },
+
+    "data_sources": {
+        "dataset_convert": {
+            "source": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            }
+        },
+        "train": {
+            "dataset.stylegan.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.validation_dataset.images_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.test_dataset.images_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            }
+        },
+        "evaluate": {
+            "dataset.stylegan.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.validation_dataset.images_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.test_dataset.images_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            }
+        },
+        "export": {
+            "dataset.stylegan.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.validation_dataset.images_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.test_dataset.images_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            }
+        },
+        "inference": {
+            "dataset.stylegan.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.validation_dataset.images_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.stylegan.test_dataset.images_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/ds_convert.zip",
+                "transform": "use_dataset_convert_job"
+            }
+        }
+    },
+
+    "spec_params":{
+        "dataset_convert": {
+            "results_dir":"output_dir",
+            "dest_file_name":"stylegan_dsconvert_output"
+        },
+        "train": {
+            "results_dir":"output_dir",
+            "model.input_embeddings_path":"ptm_if_no_resume_model",
+            "model.stylegan.metrics.inception_fid_path":"ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
+            "encryption_key":"key"
+        },
+        "evaluate":{
+            "model.input_embeddings_path":"ptm_if_no_resume_model",
+            "model.stylegan.metrics.inception_fid_path":"ptm_if_no_resume_model",
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model",
+            "evaluate.trt_engine":"parent_model",
+            "encryption_key":"key"
+        },
+        "inference":{
+            "model.input_embeddings_path":"ptm_if_no_resume_model",
+            "model.stylegan.metrics.inception_fid_path":"ptm_if_no_resume_model",
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model",
+            "inference.trt_engine":"parent_model",
+            "encryption_key":"key"
+        },
+        "export":{
+            "model.input_embeddings_path":"ptm_if_no_resume_model",
+            "model.stylegan.metrics.inception_fid_path":"ptm_if_no_resume_model",
+            "results_dir":"output_dir",
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "model.input_embeddings_path":"automl_assign_ptm",
+        "model.stylegan.metrics.inception_fid_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    },
+
+    "metrics": {
+        "available_metrics": ["fid50k_full", "seen_images", "epoch"],
+        "monitoring_metric": "fid50k_full"
+    }
+}

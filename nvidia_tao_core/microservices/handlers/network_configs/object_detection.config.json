@@ -1,0 +1,266 @@
+{
+    "api_params": {
+        "actions": ["convert", "annotation_format_convert", "augment", "analyze", "validate_annotations", "auto_label"],
+        "formats":["kitti","raw","coco", "coco_raw","odvg"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "convert":"odconvert",
+            "annotation_format_convert":"data_services",
+            "augment":"data_services",
+            "analyze":"data_services",
+            "validate_annotations":"data_services",
+            "auto_label":"data_services"
+        }
+    },
+
+    "actions_mapping": {
+        "annotation_format_convert": {
+            "network": "annotations",
+            "action": "convert"
+        },
+        "auto_label": {
+            "network": "auto_label",
+            "action": "generate"
+        },
+        "auto_labeling": {
+            "network": "auto_label",
+            "action": "generate"
+        },
+        "augment": {
+            "network": "augmentation",
+            "action": "generate"
+        },
+        "analyze": {
+            "network": "analytics"
+        },
+        "validate_annotations": {
+            "network": "analytics",
+            "action": "validate"
+        }
+    },
+
+    "dynamic_config": {
+        "parent_action_rules": {
+            "annotation_format_convert": {
+                "check_parent_specs": {
+                    "data.output_format": "COCO",
+                    "if_match": {
+                        "set_value": {
+                            "data.ann_path": "results/{parent_id}/annotations.json",
+                            "mal.inference.ann_path": "results/{parent_id}/annotations.json"
+                        }
+                    }
+                },
+                "action_restriction": {
+                    "data.ann_path": ["analyze", "validate_annotations"],
+                    "mal.inference.ann_path": ["auto_label"]
+                }
+            },
+            "auto_label": {
+                "set_value": {
+                    "data.ann_path": "results/{parent_id}/label.json",
+                    "spatial_aug.rotation.refine_box.gt_cache": "results/{parent_id}/label.json"
+                },
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "coco"
+                },
+                "action_restriction": ["augment"]
+            }
+        }
+    },
+    "data_sources": {
+        "annotation_format_convert": {
+            "coco": {
+                "source": "id",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "coco"
+                },
+                "mapping": {
+                    "ann_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            },
+            "kitti": {
+                "source": "id",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "kitti"
+                },
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz"
+                    },
+                    "label_dir": {
+                        "path": "labels.tar.gz"
+                    }
+                }
+            }
+        },
+        "augment": {
+            "data.image_dir": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            },
+            "data.dataset_type": {
+                "source": "id",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": "coco",
+                    "mapping": {
+                        "kitti": "kitti",
+                        "coco": "coco",
+                        "*": "coco"
+                    }
+                }
+            },
+            "data.ann_path": {
+                "source": "id",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "kitti": "labels.tar.gz",
+                    "coco": "annotations.json"
+                }
+            },
+            "spatial_aug.rotation.refine_box.gt_cache": {
+                "source": "id",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "kitti": "label.json",
+                    "coco": "annotations.json"
+                }
+            },
+            "spatial_aug.rotation.refine_box.enabled": {
+                "source": "id",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "kitti"
+                },
+                "value": false
+            }
+        },
+        "auto_label": {
+            "mal.inference.img_dir": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            },
+            "mal.inference.ann_path": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "mal.inference.label_dump_path": {
+                "source": "id",
+                "multiple_sources": false,
+                "value": "/results/{job_id}/label.json"
+            }
+        },
+        "analyze": {
+            "data.image_dir": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            },
+            "data.ann_path": {
+                "source": "id",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "kitti": "labels.tar.gz",
+                    "coco": "annotations.json"
+                }
+            }
+        },
+        "validate_annotations": {
+            "data.image_dir": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            },
+            "data.ann_path": {
+                "source": "id",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "kitti": "labels.tar.gz",
+                    "coco": "annotations.json"
+                }
+            }
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "default": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.json", "type": "file"}
+                    ]
+                }
+            ],
+            "kitti": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "labels.tar.gz", "type": "file"}
+                    ]
+                }
+            ],
+            "odvg": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations_odvg.jsonl", "type": "file"},
+                        {"path": "annotations_odvg_labelmap.json", "type": "file"}
+                    ]
+                }
+            ],
+            "coco": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.json", "type": "file"}
+                    ]
+                }
+            ],
+            "coco_raw": [
+                {"path": "images.tar.gz", "type": "file"},
+                {"path": "label_map.txt", "type": "file"},
+                {"intent_restriction": ["testing"]}
+            ],
+            "raw": [
+                {"path": "images.tar.gz", "type": "file"},
+                {"intent_restriction": ["testing"]}
+            ]
+        }
+    },
+
+    "spec_params":{
+        "annotation_format_convert": {
+            "results_dir":"output_dir"
+        },
+        "augment": {
+            "results_dir":"output_dir"
+        },
+        "analyze": {
+            "results_dir":"output_dir"
+        },
+        "validate_annotations": {
+            "results_dir":"output_dir"
+        },
+        "auto_label": {
+            "results_dir":"output_dir",
+            "mal.checkpoint":"resume_model_or_ptm",
+            "grounding_dino.checkpoint":"resume_model_or_ptm"
+        }
+    }
+}

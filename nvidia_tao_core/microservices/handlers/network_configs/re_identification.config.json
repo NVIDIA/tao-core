@@ -1,0 +1,120 @@
+{
+    "api_params": {
+        "dataset_type":"re_identification",
+        "actions": ["train","evaluate","export","inference"],
+        "formats":["default"],
+        "accepted_ds_intents": ["training"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "upload_strategy": {
+        "inference": "tarball_after_completion"
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "default": [
+                {
+                    "all_of": [
+                        {"path": "sample_train.tar.gz", "type": "file"},
+                        {"path": "sample_test.tar.gz", "type": "file"},
+                        {"path": "sample_query.tar.gz", "type": "file"}
+                    ]
+                }
+            ]
+        }
+    },
+
+    "data_sources": {
+        "train": {
+            "dataset.train_dataset_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_train.tar.gz"
+            },
+            "dataset.test_dataset_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_test.tar.gz"
+            },
+            "dataset.query_dataset_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_query.tar.gz"
+            }
+        },
+        "evaluate": {
+            "evaluate.test_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_test.tar.gz"
+            },
+            "evaluate.query_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_query.tar.gz"
+            }
+        },
+        "inference": {
+            "inference.test_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_test.tar.gz"
+            },
+            "inference.query_dataset": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "sample_query.tar.gz"
+            }
+        }
+    },
+
+    "spec_params":{
+        "train":{
+            "results_dir":"output_dir",
+            "model.pretrained_model_path":"ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
+            "encryption_key":"key"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model",
+            "evaluate.output_sampled_matches_plot":"create_evaluate_matches_plot_reid",
+            "encryption_key":"key",
+            "evaluate.output_cmc_curve_plot":"create_evaluate_cmc_plot_reid"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model",
+            "encryption_key":"key",
+            "inference.output_file":"create_inference_result_file_reid"
+        },
+        "export":{
+            "results_dir":"output_dir",
+            "export.checkpoint":"parent_model",
+            "encryption_key":"key",
+            "export.onnx_file":"create_onnx_file"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "model.pretrained_model_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    },
+
+    "metrics": {
+        "available_metrics": ["cmc_rank_1"],
+        "monitoring_metric": "cmc_rank_1"
+    }
+}

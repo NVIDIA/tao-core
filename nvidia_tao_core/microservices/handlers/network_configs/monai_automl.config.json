@@ -1,0 +1,25 @@
+{
+    "api_params": {
+        "dataset_type": "segmentation",
+        "formats": [
+            "monai"
+        ],
+        "actions": [
+            "auto3dseg"
+        ],
+        "image": "MONAI",
+        "version": "0.0.8",
+        "spec_backend": "yaml",
+        "chaining_rules": "cvaction",
+        "realtime_infer_support": false,
+        "actions_pipe": {
+            "auto3dseg": "auto3dseg"
+        }
+    },
+    "cli_params": {},
+    "spec_params": {
+        "auto3dseg": {
+            "num_gpu": 1
+        }
+    }
+}

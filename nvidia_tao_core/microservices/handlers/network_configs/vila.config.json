@@ -1,0 +1,67 @@
+{
+    "api_params": {
+        "dataset_type":"vlm",
+        "recursive_dataset_file_download": true,
+        "actions": ["train","evaluate","inference"],
+        "formats":["default", "raw"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"VILA",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "inference":"inference"
+        }
+    },
+
+    "data_sources": {
+        "train": {
+            "train.dataset.dataset_yaml_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "dataset.yaml"
+            }
+        },
+        "evaluate": {
+            "eval.dataset_yaml_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "dataset.yaml"
+            }
+        },
+        "inference": {
+            "inference.media": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": ""
+            }
+        }
+    },
+
+    "spec_params":{
+        "train": {
+            "results_dir":"output_dir",
+            "model_path":"ptm_if_no_resume_model"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "model_path":"parent_model",
+            "model_base":"ptm_if_no_resume_model"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "model_path":"parent_model",
+            "model_base":"ptm_if_no_resume_model"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "model_path":"automl_assign_ptm"
+    },
+
+    "metrics": {
+        "available_metrics": ["grad_norm", "train_runtime", "train_samples_per_second", "train_steps_per_second", "val_acc"],
+        "monitoring_metric": "val_acc"
+    }
+}

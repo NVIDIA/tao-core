@@ -1,0 +1,314 @@
+{
+    "api_params": {
+        "dataset_type": "sparse4d",
+        "actions": ["dataset_convert", "train", "evaluate", "export", "inference"],
+        "formats": ["ovpkl"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image": "TAO_PYTORCH",
+        "image_override_per_action": {
+            "dataset_convert": "TAO_DS"
+        },
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "dataset_convert": "pyt_odconvert",
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference"
+        }
+    },
+
+    "actions_mapping": {
+        "dataset_convert": {
+            "network": "annotations",
+            "action": "convert"
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "ovpkl": [
+                {
+                    "all_of": [
+                        {"path": ".", "type": "regex","regex": "train/*/videos/*.mp4"},
+                        {"path": ".", "type": "regex","regex": "train/*/calibration.json"},
+                        {"path": ".", "type": "regex","regex": "train/*/ground_truth.json"}
+                    ]
+                }
+            ]
+        }
+    },
+
+    "upload_strategy": {
+        "dataset_convert": "tarball_after_completion",
+        "inference": "tarball_after_completion"
+    },
+
+    "data_sources": {
+        "dataset_convert": {
+            "aicity.root": {
+                "source": "id",
+                "multiple_sources": false,
+                "path": ""
+            }
+        },
+        "train": {
+            "dataset.data_root": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                }
+            },
+            "model.head.instance_bank.anchor": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "/results/{dataset_convert_job_id}/anchor_init.npy",
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.train_dataset.ann_file": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.val_dataset.ann_file": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.test_dataset.ann_file": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            }
+        },
+        "evaluate": {
+            "dataset.data_root": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                }
+            },
+            "model.head.instance_bank.anchor": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "/results/{dataset_convert_job_id}/anchor_init.npy",
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.train_dataset.ann_file": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.val_dataset.ann_file": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.test_dataset.ann_file": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            }
+        },
+        "export": {
+            "model.head.instance_bank.anchor": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "/results/{dataset_convert_job_id}/anchor_init.npy",
+                "transform": ["use_dataset_convert_job"]
+            }
+        },
+        "inference": {
+            "dataset.data_root": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                }
+            },
+            "model.head.instance_bank.anchor": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "/results/{dataset_convert_job_id}/anchor_init.npy",
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.train_dataset.ann_file": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.val_dataset.ann_file": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.test_dataset.ann_file": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "test"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            }
+        }
+    },
+
+    "spec_params": {
+        "dataset_convert": {
+            "results_dir": "output_dir"
+        },
+        "train": {
+            "results_dir": "output_dir",
+            "train.pretrained_model_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
+        },
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "encryption_key": "key"
+        },
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "encryption_key": "key"
+        },
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
+        }
+    },
+
+    "automl_spec_params": {
+        "results_dir": "automl_output_dir",
+        "train.pretrained_model_path": "automl_assign_ptm",
+        "train.resume_training_checkpoint_path": "automl_resume_model",
+        "train.checkpoint_interval": "assign_const_value,train.num_epochs",
+        "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key": "key"
+    },
+
+    "metrics": {
+        "available_metrics": ["val_hota", "val_mAP"],
+        "monitoring_metric": "val_mAP",
+        "dynamic_metric_patterns": [
+            "^lr$",
+            "^loss_cls_\\d+$",
+            "^loss_box_\\d+$",
+            "^loss_cns_\\d+$",
+            "^img_bbox_NuScenes/\\w+_AP_dist_[0-9.]+$",
+            "^img_bbox_NuScenes/\\w+_trans_err$",
+            "^img_bbox_NuScenes/\\w+_scale_err$",
+            "^img_bbox_NuScenes/\\w+_orient_err$",
+            "^img_bbox_NuScenes/\\w+_vel_err$",
+            "^img_bbox_NuScenes/\\w+_attr_err$",
+            "^img_bbox_NuScenes/mATE$",
+            "^img_bbox_NuScenes/mASE$",
+            "^img_bbox_NuScenes/mAOE$",
+            "^img_bbox_NuScenes/mAVE$",
+            "^img_bbox_NuScenes/mAAE$",
+            "^img_bbox_NuScenes/NDS$",
+            "^img_bbox_NuScenes/mAP$"
+        ]
+    }
+}

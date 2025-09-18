@@ -1,0 +1,172 @@
+{
+    "api_params": {
+        "dataset_type":"pose_classification",
+        "actions": ["train","evaluate","export","inference"],
+        "formats":["default"],
+        "accepted_ds_intents": ["training"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "upload_strategy": {
+        "inference": "tarball_after_completion"
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "default": [
+                {
+                    "any_of": [
+                        {
+                            "all_of": [
+                                {"path": "kinetics", "type": "folder"},
+                                {"path": "kinetics/train_data.npy", "type": "file"},
+                                {"path": "kinetics/train_label.pkl", "type": "file"},
+                                {"path": "kinetics/val_data.npy", "type": "file"},
+                                {"path": "kinetics/val_label.pkl", "type": "file"}
+                            ]
+                        },
+                        {
+                            "all_of": [
+                                {"path": "nvidia", "type": "folder"},
+                                {"path": "nvidia/train_data.npy", "type": "file"},
+                                {"path": "nvidia/train_label.pkl", "type": "file"},
+                                {"path": "nvidia/val_data.npy", "type": "file"},
+                                {"path": "nvidia/val_label.pkl", "type": "file"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    },
+
+    "dynamic_config": {
+        "model_type_key": "model.graph_layout",
+        "rules": {
+            "nvidia": {
+                "remove": [
+                    "dataset.random_choose",
+                    "dataset.random_move",
+                    "dataset.window_size"
+                ]
+            },
+            "openpose": {
+                "remove": [
+                    "model.pretrained_model_path"
+                ]
+            }
+        }
+    },
+
+    "data_sources": {
+        "train": {
+            "dataset.train_dataset.data_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/train_data.npy",
+                    "openpose": "kinetics/train_data.npy"
+                }
+            },
+            "dataset.train_dataset.label_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/train_label.pkl",
+                    "openpose": "kinetics/train_label.pkl"
+                }
+            },
+            "dataset.val_dataset.data_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/val_data.npy",
+                    "openpose": "kinetics/val_data.npy"
+                }
+            },
+            "dataset.val_dataset.label_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/val_label.pkl",
+                    "openpose": "kinetics/val_label.pkl"
+                }
+            }
+        },
+        "evaluate": {
+            "evaluate.test_dataset.data_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/val_data.npy",
+                    "openpose": "kinetics/val_data.npy"
+                }
+            },
+            "evaluate.test_dataset.label_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/val_label.pkl",
+                    "openpose": "kinetics/val_label.pkl"
+                }
+            }
+        },
+        "inference": {
+            "inference.test_dataset.data_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_model_type": {
+                    "nvidia": "nvidia/val_data.npy",
+                    "openpose": "kinetics/val_data.npy"
+                }
+            }
+        }
+    },
+
+    "spec_params":{
+        "train":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "train.resume_training_checkpoint_path":"resume_model",
+            "model.pretrained_model_path":"ptm_if_no_resume_model"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "evaluate.checkpoint":"parent_model"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "inference.checkpoint":"parent_model",
+            "inference.output_file":"create_inference_result_file_pose"
+        },
+        "export":{
+            "results_dir":"output_dir",
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "model.pretrained_model_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    },
+
+    "metrics": {
+        "available_metrics": ["val_acc"],
+        "monitoring_metric": "val_acc"
+    }
+}

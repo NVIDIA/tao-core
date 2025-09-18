@@ -1,8 +1,0 @@
-parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular
-engine_file,engine file path,hidden,,,,,,,,,
-batch_size,batch_size,integer,"TensorRT engine batch size (default 1). If meet with out-of-memory issue, please decrease the batch size accordingly.",4,,,,,,,yes
-max_batch_size,max_batch_size,integer,"maximum TensorRT engine batch size (default 1). If meet with out-of-memory issue, please decrease the batch size accordingly.",64,,,,,,,yes
-batches,Number of calibration batches,integer,Number of batches to calibrate the model when run in INT8 mode,10,,,,,,,yes
-data_type,data_type,string,TensorRT data type,fp32,,,,"fp32,fp16,int8",,,yes
-max_workspace_size,max_workspace_size,integer,"maximum workspace size of TensorRT engine (default 1<<30). If meet with out-of-memory issue, please increase the workspace size accordingly.",,,,,,,,
-model_path,onnx model from export,hidden,,,,,,,,,

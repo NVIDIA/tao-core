@@ -1,0 +1,79 @@
+{
+    "api_params": {
+        "dataset_type":"image_classification",
+        "actions": ["train","distill","export","inference"],
+        "formats":["ssl"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "distill":"train",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "upload_strategy": {
+        "inference": "tarball_after_completion"
+    },
+
+    "data_sources": {
+        "train": {
+            "dataset.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_train.tar.gz"
+            }
+        },
+        "distill": {
+            "dataset.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_train.tar.gz"
+            }
+        },
+        "inference": {
+            "dataset.test_dataset.images_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "images_test.tar.gz"
+            }
+        }
+    },
+
+    "spec_params":{
+        "train": {
+            "results_dir":"output_dir",
+            "train.pretrained_model_path":"ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
+            "encryption_key":"key"
+        },
+        "distill": {
+            "results_dir":"output_dir",
+            "model.distill.pretrained_non_distill_pl_model_path":"parent_model",
+            "encryption_key":"key"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model",
+            "inference.trt_engine":"parent_model",
+            "encryption_key":"key"
+        },
+        "export":{
+            "results_dir":"output_dir",
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "train.pretrained_model_path":"ptm_if_no_resume_model",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    }
+}
