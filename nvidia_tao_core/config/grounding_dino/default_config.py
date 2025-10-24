@@ -153,3 +153,8 @@ class ExperimentConfig(CommonExperimentConfig):
         GDINOGenTrtEngineExpConfig(),
         description="Configurable parameters to construct the TensorRT engine builder for a Grounding DINO experiment.",
     )
+
+    def __post_init__(self):
+        """Set default model name for Grounding DINO."""
+        if self.model_name is None:
+            self.model_name = "grounding_dino"

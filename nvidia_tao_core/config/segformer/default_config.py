@@ -571,3 +571,8 @@ class ExperimentConfig(CommonExperimentConfig):
     inference: SFInferenceExpConfig = DATACLASS_FIELD(SFInferenceExpConfig())
     export: SFExportExpConfig = DATACLASS_FIELD(SFExportExpConfig())
     gen_trt_engine: SFGenTrtEngineExpConfig = DATACLASS_FIELD(SFGenTrtEngineExpConfig())
+
+    def __post_init__(self):
+        """Set default model name for SegFormer."""
+        if self.model_name is None:
+            self.model_name = "segformer"

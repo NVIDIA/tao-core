@@ -145,6 +145,9 @@ def execute_job(job_context):
                 name=f'tao-job-thread-{job_context.id}'
             )
             job_run_thread.start()
+        else:
+            logger.error("Action pipeline couldn't be found: %s %s %s", network_config, network, job_context)
+            return False
     else:
         # AUTOML Job
         # TODO: At test time, sequentially run it and not as a thread to catch errors
@@ -210,6 +213,10 @@ def scan_for_jobs():
     """Scans for new jobs and queues them if dependencies are met"""
     while True:
         report_healthy("Workflow has waken up", clear=True)
+
+        # Check for inference microservice auto-deletion requests
+        process_inference_microservice_auto_deletions()
+
         # Create global queue
         queue = PriorityQueue()
         for j in get_all_queued_jobs():
@@ -248,10 +255,112 @@ def scan_for_jobs():
                 if execute_job(job):
                     # dequeue job
                     jobs_to_dequeue.append(job)
+                else:
+                    report_healthy(f"{job.id} with action {job.action}: Job execution failed")
         for job in jobs_to_dequeue:
             Workflow.dequeue(job)
         report_healthy("Workflow going to sleep")
         time.sleep(15)
+
+
+def process_inference_microservice_auto_deletions():
+    """Process pending inference microservice auto-deletion requests
+
+    This function monitors job_statuses for AUTO_DELETION_REQUESTED status from
+    inference microservice pods and handles the actual deletion (requires DB access).
+    """
+    try:
+        # Check job_statuses collection for AUTO_DELETION_REQUESTED status
+        mongo_status_table = MongoHandler("tao", "job_statuses")
+
+        # Find all jobs with AUTO_DELETION_REQUESTED in their status array
+        all_status_records = mongo_status_table.find({})
+
+        # Import here to avoid circular dependency
+        from nvidia_tao_core.microservices.handlers.inference_microservice_handler import (
+            InferenceMicroserviceHandler
+        )
+
+        jobs_to_delete = []
+
+        for status_record in all_status_records:
+            job_id = status_record.get("id", "")
+            status_list = status_record.get("status", [])
+
+            # Check if any status entry has AUTO_DELETION_REQUESTED
+            for status_entry in status_list:
+                if isinstance(status_entry, dict) and status_entry.get("status") == "AUTO_DELETION_REQUESTED":
+                    # Check if we haven't processed this yet
+                    if not status_entry.get("auto_deletion_processed", False):
+                        jobs_to_delete.append({
+                            "job_id": job_id,
+                            "idle_time_minutes": status_entry.get("idle_time_minutes", 0),
+                            "reason": status_entry.get("reason", "unknown")
+                        })
+                        break
+
+        if not jobs_to_delete:
+            return
+
+        logger.info(f"Found {len(jobs_to_delete)} inference microservices requesting auto-deletion")
+
+        for job_info in jobs_to_delete:
+            job_id = job_info["job_id"]
+            try:
+                logger.info(
+                    f"Processing auto-deletion for inference microservice job {job_id}. "
+                    f"Reason: {job_info.get('reason', 'unknown')}, "
+                    f"Idle time: {job_info.get('idle_time_minutes', 0):.2f} minutes"
+                )
+
+                # Call the actual deletion (has DB access here in workflow)
+                result = InferenceMicroserviceHandler.stop_inference_microservice(
+                    job_id, auto_deletion=True
+                )
+
+                if result.code == 200:
+                    logger.info(f"Auto-deletion successful for job {job_id}")
+                    # Note: Job status is already updated to Done in stop_inference_microservice
+
+                    # Mark status as processed to avoid re-processing
+                    status_record = mongo_status_table.find_one({"id": job_id})
+                    if status_record:
+                        status_list = status_record.get("status", [])
+                        for status_entry in status_list:
+                            if (isinstance(status_entry, dict) and
+                                    status_entry.get("status") == "AUTO_DELETION_REQUESTED"):
+                                status_entry["auto_deletion_processed"] = True
+                                status_entry["processed_at"] = datetime.now(tz=timezone.utc).isoformat()
+                        mongo_status_table.upsert({"id": job_id}, {"id": job_id, "status": status_list})
+                else:
+                    logger.error(f"Auto-deletion failed for job {job_id}: {result.data}")
+                    # Mark as processed even on failure to avoid retry loops
+                    status_record = mongo_status_table.find_one({"id": job_id})
+                    if status_record:
+                        status_list = status_record.get("status", [])
+                        for status_entry in status_list:
+                            if (isinstance(status_entry, dict) and
+                                    status_entry.get("status") == "AUTO_DELETION_REQUESTED"):
+                                status_entry["auto_deletion_processed"] = True
+                                status_entry["failed"] = True
+                                status_entry["error"] = str(result.data)
+                        mongo_status_table.upsert({"id": job_id}, {"id": job_id, "status": status_list})
+
+            except Exception as e:
+                logger.error(f"Error processing auto-deletion for job {job_id}: {e}")
+                # Mark as processed with error to avoid retry loops
+                status_record = mongo_status_table.find_one({"id": job_id})
+                if status_record:
+                    status_list = status_record.get("status", [])
+                    for status_entry in status_list:
+                        if isinstance(status_entry, dict) and status_entry.get("status") == "AUTO_DELETION_REQUESTED":
+                            status_entry["auto_deletion_processed"] = True
+                            status_entry["failed"] = True
+                            status_entry["error"] = str(e)
+                    mongo_status_table.upsert({"id": job_id}, {"id": job_id, "status": status_list})
+
+    except Exception as e:
+        logger.error(f"Error in process_inference_microservice_auto_deletions: {e}")
 
 
 class Workflow:

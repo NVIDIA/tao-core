@@ -15,7 +15,7 @@ if [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] && [ -n "$5" ]; then
     ## Clear users session cache of expired tokens
     python3 $PYTHON_LIB_PATH/nvidia_tao_core/microservices/mongo_users_cleanup.py
     echo "AWS credentials found, performing MongoDB backup..."
-    python3 $PYTHON_LIB_PATH/nvidia_tao_core/microservices/mongodb_backup.py --access-key "$2" --secret-key "$3" --s3-bucket-name "$4" --region "$5"
+    python3 $PYTHON_LIB_PATH/nvidia_tao_core/microservices/app_handlers/mongo_handler.py --access-key "$2" --secret-key "$3" --s3-bucket-name "$4" --region "$5"
 else
     echo "AWS credentials not provided, skipping MongoDB backup"
 fi

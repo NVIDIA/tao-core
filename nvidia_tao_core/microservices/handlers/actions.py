@@ -95,9 +95,13 @@ from nvidia_tao_core.microservices.utils import (
 )
 from nvidia_tao_core.microservices.job_utils import executor as jobDriver
 from nvidia_tao_core.microservices.network_utils.network_constants import ptm_mapper
-from nvidia_tao_core.microservices.specs_utils import json_to_kitti, json_to_yaml
+from nvidia_tao_core.microservices.specs_utils import json_to_kitti, json_to_yaml, json_to_toml
 
-SPEC_BACKEND_TO_FUNCTIONS = {"protobuf": json_to_kitti.kitti, "yaml": json_to_yaml.yml}
+SPEC_BACKEND_TO_FUNCTIONS = {
+    "protobuf": json_to_kitti.kitti,
+    "yaml": json_to_yaml.yml,
+    "toml": json_to_toml.toml_format
+}
 HOST_PLATFORM = os.getenv("HOST_PLATFORM", "local-k8s")
 
 # Configure logging
@@ -226,7 +230,7 @@ class ActionPipeline:
             self.job_context.specs.get("num_gpu", self.job_context.num_gpu)
             if self.job_context.specs else self.job_context.num_gpu
         )
-        self.num_nodes = get_num_nodes_from_spec(self.job_context.specs, self.action)
+        self.num_nodes = get_num_nodes_from_spec(self.job_context.specs, self.action, network=self.network)
         self.recursive_dataset_file_download = self.api_params.get("recursive_dataset_file_download", False)
         # add an entry on the docker image mapper for trt engine generation MAXINE DEPLOY
         # if action is trt engine generation and network is a maxine network, override image from docker image mapper
@@ -395,7 +399,7 @@ class ActionPipeline:
         if self.network in MONAI_NETWORKS or BACKEND in ("local-k8s", "local-docker"):
             get_cloud_metadata(self.workspace_ids, self.cloud_metadata)
 
-    def handle_multiple_ptm_fields(self):
+    def handle_ptm_anomalies(self):
         """Remove one of end-end or backbone related PTM field based on the Handler metadata info"""
         for base_experiment_id in self.handler_metadata.get("base_experiment", []):
             base_experiment_metadata = get_base_experiment_metadata(base_experiment_id)
@@ -408,6 +412,17 @@ class ActionPipeline:
             if parameter_to_remove:
                 remove_key_by_flattened_string(self.spec, parameter_to_remove)
                 remove_key_by_flattened_string(self.config, parameter_to_remove)
+
+        if not self.handler_metadata.get("base_experiment", []):
+            parameters_to_remove = [
+                ptm_mapper.get("end_to_end", {}).get(self.network),
+                ptm_mapper.get("backbone", {}).get(self.network),
+                ptm_mapper.get("default", {}).get(self.network),
+            ]
+            for parameter_to_remove in parameters_to_remove:
+                if parameter_to_remove:
+                    remove_key_by_flattened_string(self.spec, parameter_to_remove)
+                    remove_key_by_flattened_string(self.config, parameter_to_remove)
 
     def detailed_print(self, *args, **kwargs):
         """Print with job context"""
@@ -603,14 +618,20 @@ class ActionPipeline:
             # Generate config
             self.spec, self.config = self.generate_config()
             self.cs_instance, _ = create_cs_instance(self.workspace_metadata)
-            self.handle_multiple_ptm_fields()
+            self.handle_ptm_anomalies()
             # Populate the cloud metadata for the job
             self.get_handler_cloud_details()
             # Generate run command
             self.run_command, outdir = self.generate_run_command()
             if self.network not in MONAI_NETWORKS and self.spec:
-                self.num_gpu = get_num_gpus_from_spec(self.spec, self.job_context.action, default=self.num_gpu)
-                self.num_nodes = get_num_nodes_from_spec(self.spec, self.job_context.action, default=self.num_nodes)
+                self.num_gpu = get_num_gpus_from_spec(
+                    self.spec, self.job_context.action, network=self.network, default=self.num_gpu
+                )
+                self.num_nodes = get_num_nodes_from_spec(
+                    self.spec,
+                    self.job_context.action,
+                    network=self.network,
+                    default=self.num_nodes)
                 self.detailed_print(f"Job {self.job_name} running with {self.num_gpu} GPUs and {self.num_nodes} nodes")
             if not outdir:
                 outdir = f"/results/{self.job_name}"
@@ -996,8 +1017,8 @@ class AutoMLPipeline(ActionPipeline):
 
         for param_name, param_value in recommended_values.items():
             write_nested_dict(spec, param_name, param_value)
-        self.num_gpu = get_num_gpus_from_spec(spec, "train", default=self.num_gpu)
-        self.num_nodes = get_num_nodes_from_spec(spec, "train", default=self.num_nodes)
+        self.num_gpu = get_num_gpus_from_spec(spec, "train", network=self.network, default=self.num_gpu)
+        self.num_nodes = get_num_nodes_from_spec(spec, "train", network=self.network, default=self.num_nodes)
 
         return spec
 
@@ -1028,7 +1049,7 @@ class AutoMLPipeline(ActionPipeline):
         if not self.spec:
             recommended_values = self.recs_dict[self.rec_number].get("specs", {})
             self.spec = self.generate_config(recommended_values)
-            self.handle_multiple_ptm_fields()
+            self.handle_ptm_anomalies()
             self.get_handler_cloud_details()
             self.save_recommendation_specs()
 
@@ -1117,7 +1138,7 @@ class AutoMLPipeline(ActionPipeline):
             self.add_ptm_dependency(recommended_values)
 
             self.spec = self.generate_config(recommended_values)
-            self.handle_multiple_ptm_fields()
+            self.handle_ptm_anomalies()
             self.get_handler_cloud_details()
             self.save_recommendation_specs()
             run_command = self.generate_run_command()

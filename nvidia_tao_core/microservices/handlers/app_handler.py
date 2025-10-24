@@ -60,7 +60,6 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     check_write_access,
     get_base_experiment_metadata,
     get_job_specs,
-    get_root,
     infer_action_from_job,
     is_valid_uuid4,
     printc,
@@ -85,7 +84,6 @@ from nvidia_tao_core.microservices.handlers.utilities import (
     Code,
     download_log_from_cloud,
     download_dataset,
-    get_monai_bundle_path,
     get_files_from_cloud,
     prep_tis_model_repository,
     resolve_checkpoint_root_and_search,
@@ -96,14 +94,12 @@ from nvidia_tao_core.microservices.handlers.utilities import (
 if os.getenv("BACKEND"):  # To see if the container is going to be used for Service pods or network jobs
     from nvidia_tao_core.microservices.handlers.mongo_handler import (
         MongoHandler,
-        mongo_connection_string,
     )
 from nvidia_tao_core.microservices.job_utils import executor as jobDriver
 from nvidia_tao_core.microservices.job_utils.workflow_driver import create_job_context, on_delete_job, on_new_job
 from nvidia_tao_core.microservices.job_utils.automl_job_utils import on_delete_automl_job
 from nvidia_tao_core.microservices.specs_utils import csv_to_json_schema
 from nvidia_tao_core.microservices.utils import (
-    run_system_command,
     read_network_config,
     merge_nested_dicts,
     override_dicts,
@@ -114,7 +110,7 @@ from nvidia_tao_core.microservices.utils import (
     DataMonitorLogTypeEnum,
 )
 
-from nvidia_tao_core.scripts.generate_schema import generate_schema
+from nvidia_tao_core.scripts.generate_schema import generate_schema, validate_and_clean_merged_spec
 
 # Configure logging
 logging.basicConfig(
@@ -1303,7 +1299,11 @@ class AppHandler:
             json_schema = csv_to_json_schema.convert(CSV_PATH)
 
         if "default" in json_schema and base_experiment_spec:
-            json_schema["default"] = merge_nested_dicts(json_schema["default"], base_experiment_spec)
+            # Merge the base experiment spec with the default schema
+            merged_default = merge_nested_dicts(json_schema["default"], base_experiment_spec)
+            # Validate and clean the merged spec to remove any invalid keys from corrupt base_experiment_spec
+            logger.info("Validating merged base_experiment_spec")
+            json_schema["default"] = validate_and_clean_merged_spec(json_schema, merged_default)
         return Code(200, json_schema, "Schema retrieved")
 
     @staticmethod
@@ -1453,12 +1453,22 @@ class AppHandler:
                 Code(404, {}, "Default specs do not exist for action")
             json_schema = csv_to_json_schema.convert(CSV_PATH)
         if "default" in json_schema and base_experiment_spec:
-            json_schema["default"] = merge_nested_dicts(json_schema["default"], base_experiment_spec)
+            # Merge the base experiment spec with the default schema
+            merged_default = merge_nested_dicts(json_schema["default"], base_experiment_spec)
+            # Validate and clean the merged spec to remove any invalid keys from corrupt base_experiment_spec
+            logger.info("Validating merged base_experiment_spec for base_experiment_id: %s, action: %s",
+                        experiment_id, action)
+            json_schema["default"] = validate_and_clean_merged_spec(json_schema, merged_default)
             if (base_experiment_network == "visual_changenet_segment" and
                     "train" in json_schema["default"]):
                 json_schema["default"]["train"].pop("tensorboard", None)
         if "popular" in json_schema and base_experiment_spec:
-            json_schema["popular"] = override_dicts(json_schema["popular"], base_experiment_spec)
+            # Merge the base experiment spec with the popular schema
+            merged_popular = override_dicts(json_schema["popular"], base_experiment_spec)
+            # Validate and clean the merged spec to remove any invalid keys from corrupt base_experiment_spec
+            logger.info("Validating merged base_experiment_spec (popular) for base_experiment_id: %s, action: %s",
+                        experiment_id, action)
+            json_schema["popular"] = validate_and_clean_merged_spec(json_schema, merged_popular)
             if (base_experiment_network == "visual_changenet_segment" and
                     "train" in json_schema["popular"]):
                 json_schema["popular"]["train"].pop("tensorboard", None)
@@ -1660,7 +1670,7 @@ class AppHandler:
 
                     num_gpu = 1
                     if specs:
-                        num_gpu = get_num_gpus_from_spec(specs, action, default=1)
+                        num_gpu = get_num_gpus_from_spec(specs, action, network=network_arch, default=1)
                     gpu_based_subset = {}
                     valid_gpu_counts = get_powers_of_2(num_gpu)
                     for nvcf_instance_id, nvcf_instance_info in available_nvcf_instances.items():
@@ -2519,18 +2529,6 @@ class AppHandler:
             if export_type not in VALID_MODEL_DOWNLOAD_TYPE:
                 return Code(404, None, f"Export format {export_type} not found.")
             root = stateless_handlers.get_jobs_root(user_id, org_name)
-            if export_type == "monai_bundle":
-                job_root = os.path.join(root, job_id)
-                path_status_code = get_monai_bundle_path(job_root)
-                if path_status_code.code != 200:
-                    return path_status_code
-                bundle_path = path_status_code.data
-                command = f"cd {root} ; tar -zcvf {job_id}.tar.gz {job_id}/{bundle_path}; cd -"
-                run_system_command(command)
-                out_tar = os.path.join(root, job_id + ".tar.gz")
-                if os.path.exists(out_tar):
-                    return Code(200, out_tar, "job deleted")
-                return Code(404, None, "job output not found")
 
             # Following is for `if export_type == "tao":`
             # Copy job logs from root/logs/<job_id>.txt to root/<job_id>/logs_from_toolkit.txt
@@ -3734,87 +3732,3 @@ class AppHandler:
             logger.error("Exception thrown in automl_details fetch is %s", str(e))
             logger.error(traceback.format_exc())
             return Code(400, [], "Error in constructing AutoML results")
-
-    @staticmethod
-    def mongo_backup(workspace_id, backup_file_name=None):
-        """Backup MongoDB data for a specific workspace.
-
-        Args:
-            workspace_id (str): ID of the workspace to backup.
-
-        Returns:
-            Response: A response indicating the outcome of the operation (200 for success, error responses for failure).
-        """
-        try:
-            # Get the workspace metadata
-            workspace_metadata = get_workspace(workspace_id)
-            if not workspace_metadata:
-                return Code(404, {}, "Workspace not found")
-            cloud_type = workspace_metadata.get("cloud_type")
-            if cloud_type not in ["aws", "azure"]:
-                return Code(400, {}, "MongoDB backup is only supported for AWS and Azure workspaces")
-            cs_instance, _ = create_cs_instance(workspace_metadata)
-            if not cs_instance:
-                return Code(404, {}, "Unable to create cloud storage instance for MongoDB backup")
-
-            logger.info("Starting MongoDB backup for workspace %s", workspace_id)
-
-            # Create dump directory if it doesn't exist
-            root = get_root()
-            dump_dir = os.path.join(root, "dump", "archive")
-            os.makedirs(dump_dir, exist_ok=True)
-
-            backup_file = backup_file_name if backup_file_name else "mongodb_backup.gz"
-            backup_file = os.path.join(dump_dir, backup_file)
-            backup_command = f'mongodump --uri="{mongo_connection_string}" --archive="{backup_file}" --gzip'
-            run_system_command(backup_command)
-
-            cs_instance.upload_file(backup_file, backup_file)
-
-            logger.info("Successfully backed up MongoDB to S3")
-            return Code(200, {"message": "MongoDB backup successful"}, "MongoDB backup successful")
-
-        except Exception as e:
-            logger.error("Exception thrown in mongo_backup is %s", str(e))
-            logger.error(traceback.format_exc())
-            return Code(400, {}, "Error in MongoDB backup")
-
-    @staticmethod
-    def mongo_restore(workspace_id, backup_file_name=None):
-        """Restore MongoDB data for a specific workspace.
-
-        Args:
-            workspace_id (str): ID of the workspace to restore.
-
-        Returns:
-            Response: A response indicating the outcome of the operation (200 for success, error responses for failure).
-        """
-        try:
-            # Get the workspace metadata
-            workspace_metadata = get_workspace(workspace_id)
-            if not workspace_metadata:
-                return Code(404, {}, "Workspace not found")
-
-            cloud_type = workspace_metadata.get("cloud_type")
-            if cloud_type not in ["aws", "azure"]:
-                return Code(400, {}, "MongoDB restore is only supported for AWS and Azure workspaces")
-            cs_instance, _ = create_cs_instance(workspace_metadata)
-            if not cs_instance:
-                return Code(404, {}, "Unable to create cloud storage instance for MongoDB restore")
-
-            root = get_root()
-            dump_dir = os.path.join(root, "dump", "archive")
-            backup_file = backup_file_name if backup_file_name else "mongodb_backup.gz"
-            backup_file = os.path.join(dump_dir, backup_file)
-            cs_instance.download_file(backup_file, backup_file)
-            logger.info(f"Downloaded backup file to {backup_file}")
-            restore_command = f'mongorestore --uri="{mongo_connection_string}" --archive="{backup_file}" --gzip'
-            run_system_command(restore_command)
-            logger.info("Restored DB from backup file")
-            os.remove(backup_file)
-            return Code(200, {"message": "MongoDB restore successful"}, "MongoDB restore successful")
-
-        except Exception as e:
-            logger.error("Exception thrown in mongo_restore is %s", str(e))
-            logger.error(traceback.format_exc())
-            return Code(400, {}, "Error in MongoDB restore")

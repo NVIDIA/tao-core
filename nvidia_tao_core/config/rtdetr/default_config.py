@@ -222,3 +222,8 @@ class ExperimentConfig(CommonExperimentConfig):
         ModelQuantizationConfig(),
         description="Configurable parameters to run model quantization for a RT-DETR experiment.",
     )
+
+    def __post_init__(self):
+        """Set default model name for RT-DETR."""
+        if self.model_name is None:
+            self.model_name = "rtdetr"

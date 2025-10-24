@@ -14,7 +14,7 @@
 
 """Default config file."""
 
-from typing import List, Optional
+from typing import Optional
 from dataclasses import dataclass
 
 from nvidia_tao_core.config.utils.types import (
@@ -22,33 +22,19 @@ from nvidia_tao_core.config.utils.types import (
     FLOAT_FIELD,
     INT_FIELD,
     BOOL_FIELD,
-    STR_FIELD,
-    LIST_FIELD
 )
 
 from nvidia_tao_core.config.common.common_config import (
     CommonExperimentConfig,
     EvaluateConfig,
-    InferenceConfig
+    InferenceConfig,
+    ExportConfig
 )
 from nvidia_tao_core.config.depth_net.dataset import DepthNetDatasetConfig
 from nvidia_tao_core.config.depth_net.model import DepthNetModelConfig
 from nvidia_tao_core.config.depth_net.train import DepthNetTrainExpConfig
-
-
-@dataclass
-class WandBConfig:
-    """Configuration element wandb client."""
-
-    enable: bool = BOOL_FIELD(value=True)
-    project: str = STR_FIELD(value="TAO Toolkit")
-    entity: Optional[str] = STR_FIELD(value="")
-    tags: List[str] = LIST_FIELD(arrList=["tao-toolkit"])
-    reinit: bool = BOOL_FIELD(value=False)
-    sync_tensorboard: bool = BOOL_FIELD(value=False)
-    save_code: bool = BOOL_FIELD(value=False)
-    name: str = BOOL_FIELD(value="TAO Toolkit Training")
-    run_id: str = STR_FIELD(value="")
+from nvidia_tao_core.config.depth_net.deploy import DepthNetGenTrtEngineExpConfig
+from nvidia_tao_core.config.common.mlops import WandBConfig
 
 
 @dataclass
@@ -74,6 +60,12 @@ class DepthNetInferenceExpConfig(InferenceConfig):
         display_name="input height",
         valid_min=1,
     )
+    save_raw_pfm: Optional[bool] = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Whether to save the raw pfm output during inference.",
+        display_name="Save PFM Output"
+    )
 
 
 @dataclass
@@ -81,15 +73,30 @@ class DepthNetEvalExpConfig(EvaluateConfig):
     """Evaluation experiment config."""
 
     input_width: Optional[int] = INT_FIELD(
-        value=736,
+        value=None,
+        default_value=736,
         description="Width of the input image tensor.",
         display_name="input width",
         valid_min=1,
     )
     input_height: Optional[int] = INT_FIELD(
-        value=320,
+        value=None,
+        default_value=320,
         description="Height of the input image tensor.",
         display_name="input height",
+        valid_min=1,
+    )
+
+
+@dataclass
+class DepthNetExportExpConfig(ExportConfig):
+    """Inference experiment config."""
+
+    valid_iters: Optional[int] = INT_FIELD(
+        value=22,
+        default_value=22,
+        description="Number of GRU iterations to export the model.",
+        display_name="Valid Iterations",
         valid_min=1,
     )
 
@@ -116,9 +123,22 @@ class ExperimentConfig(CommonExperimentConfig):
     )
     train: DepthNetTrainExpConfig = DATACLASS_FIELD(
         DepthNetTrainExpConfig(),
-        description="Configurable parameters to construct the trainer for a RT-DETR experiment.",
+        description="Configurable parameters to construct the trainer for a DepthNet experiment.",
     )
     wandb: WandBConfig = DATACLASS_FIELD(
         WandBConfig(),
         description="Configurable parameters to construct the wandb client for a DepthNet experiment.",
     )
+    export: DepthNetExportExpConfig = DATACLASS_FIELD(
+        DepthNetExportExpConfig(),
+        description="Configurable parameters to construct the onnx export for a DepthNet experiment."
+    )
+    gen_trt_engine: DepthNetGenTrtEngineExpConfig = DATACLASS_FIELD(
+        DepthNetGenTrtEngineExpConfig(),
+        description="Configurable parameters to construct the TensorRT engine builder for a DepthNet experiment.",
+    )
+
+    def __post_init__(self):
+        """Set default model name for DepthNet."""
+        if self.model_name is None:
+            self.model_name = "depth_net"

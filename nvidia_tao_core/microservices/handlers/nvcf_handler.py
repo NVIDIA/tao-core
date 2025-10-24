@@ -162,7 +162,7 @@ def invoke_function(
             if not function_tao_api:
                 raise ValueError("FUNCTION_TAO_API should be present for NVCF as host platform")
 
-    num_nodes = get_num_nodes_from_spec(specs, action)
+    num_nodes = get_num_nodes_from_spec(specs, action, network=network)
     if num_nodes > 1:
         request_metadata["request_body"]["statefulset_replicas"] = num_nodes
 

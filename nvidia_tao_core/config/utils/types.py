@@ -28,6 +28,8 @@ Functions:
     DICT_FIELD(hashMap, **meta_args) - Returns a dataclass field for a dictionary with customizable metadata.
     DATACLASS_FIELD(hashMap, **meta_args) - Returns a dataclass field for dataclass instances with customizable
         metadata.
+    UNION_FIELD(value, union_types, **meta_args) - Returns a dataclass field for Union types with customizable
+        metadata.
 
 Each function supports an extensive range of metadata options to define attributes like display name,
 description, default values, examples, validation constraints, and dependency relationships among fields.
@@ -218,6 +220,79 @@ def LIST_FIELD(arrList, **meta_args):
     return field(default_factory=lambda: arrList, metadata=metadata)  # noqa pylint: disable=E3701
 
 
+def SUBSET_LIST_FIELD(arrList, **meta_args):
+    """Create a field for subset list types that generates random subsets from valid_options.
+
+    This field type is designed for AutoML scenarios where you want to generate random subsets
+    of items from a predefined list of valid options. It's particularly useful for parameters
+    like LoRA modules_to_save, target layers, etc.
+
+    Args:
+        arrList (list): Default list value for the field.
+        **meta_args: Arbitrary keyword arguments for additional metadata attributes such as display
+            name, description, etc.
+
+    Returns:
+        dataclasses.Field: Configured dataclass field with specified metadata and default value.
+    """
+    metadata = {
+        "display_name": "",
+        "value_type": "subset_list",
+        "description": "",
+        "default_value": arrList,
+        "examples": "",
+        "valid_min": "",
+        "valid_max": "",
+        "valid_options": "",
+        "required": "",
+        "popular": "",
+        "regex": "",
+        "automl_enabled": "FALSE",
+        "math_cond": "",
+        "parent_param": "",
+        "depends_on": "",
+    }
+    for k, v in meta_args.items():
+        metadata[k] = v
+    return field(default_factory=lambda: arrList, metadata=metadata)  # noqa pylint: disable=E3701
+
+
+def OPTIONAL_LIST_FIELD(arrList, **meta_args):
+    """Create a field for optional list types that generates either None or a list from valid_options.
+
+    This field type generates either None or a list containing items from valid_options.
+    Useful for parameters that can be either disabled (None) or enabled with specific values.
+
+    Args:
+        arrList (list): Default list value for the field.
+        **meta_args: Arbitrary keyword arguments for additional metadata attributes such as display
+            name, description, etc.
+
+    Returns:
+        dataclasses.Field: Configured dataclass field with specified metadata and default value.
+    """
+    metadata = {
+        "display_name": "",
+        "value_type": "optional_list",
+        "description": "",
+        "default_value": arrList,
+        "examples": "",
+        "valid_min": "",
+        "valid_max": "",
+        "valid_options": "",
+        "required": "",
+        "popular": "",
+        "regex": "",
+        "automl_enabled": "FALSE",
+        "math_cond": "",
+        "parent_param": "",
+        "depends_on": "",
+    }
+    for k, v in meta_args.items():
+        metadata[k] = v
+    return field(default_factory=lambda: arrList, metadata=metadata)  # noqa pylint: disable=E3701
+
+
 def DICT_FIELD(hashMap, **meta_args):
     """Create a field for a dictionary, initializing with default settings that can be overridden by kwargs.
 
@@ -284,3 +359,52 @@ def DATACLASS_FIELD(hashMap, **meta_args):
     for k, v in meta_args.items():
         metadata[k] = v
     return field(default_factory=lambda: hashMap, metadata=metadata)  # noqa pylint: disable=E3701
+
+
+def UNION_FIELD(value, union_types, literal_values=None, **meta_args):
+    """Create a field for Union types, initializing with default settings that can be overridden by kwargs.
+
+    Args:
+        value (any): Default value for the field.
+        union_types (list): List of type names that this Union field can accept (e.g., ['bool', 'string']).
+        literal_values (list, optional): List of specific literal string values allowed (for Literal types).
+        **meta_args: Arbitrary keyword arguments for additional metadata attributes such as display
+            name, description, etc.
+
+    Returns:
+        dataclasses.Field: Configured dataclass field with specified metadata and default value.
+    """
+    metadata = {
+        "display_name": "",
+        "value_type": "union",
+        "union_types": union_types,
+        "literal_values": literal_values,
+        "description": "",
+        "default_value": "",
+        "examples": "",
+        "valid_min": "",
+        "valid_max": "",
+        "valid_options": "",
+        "required": "",
+        "popular": "",
+        "regex": "",
+        "automl_enabled": "",
+        "math_cond": "",
+        "parent_param": "",
+        "depends_on": "",
+    }
+    for k, v in meta_args.items():
+        metadata[k] = v
+    if metadata["default_value"] in (None, "") and value not in (None, ""):
+        metadata["default_value"] = value
+
+    # If literal_values are provided, add them to valid_options for validation
+    if literal_values and not metadata.get("valid_options"):
+        # Combine boolean options with literal values
+        bool_options = []
+        if "bool" in union_types or "boolean" in union_types:
+            bool_options = ["true", "false"]
+        all_options = bool_options + literal_values
+        metadata["valid_options"] = ",".join(all_options)
+
+    return field(default=value, metadata=metadata)  # noqa pylint: disable=E3701

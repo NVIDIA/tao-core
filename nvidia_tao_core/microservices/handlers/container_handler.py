@@ -40,7 +40,13 @@ from nvidia_tao_core.cloud_handlers.utils import (
 )
 import nvidia_tao_core.loggers.logging as status_logging
 from nvidia_tao_core.api_utils.module_utils import entrypoint_paths, entry_points
-from nvidia_tao_core.microservices.utils import safe_load_file, safe_dump_file, read_network_config
+from nvidia_tao_core.microservices.utils import (
+    safe_load_file,
+    safe_dump_file,
+    read_network_config,
+    get_spec_backend_info
+)
+from nvidia_tao_core.microservices.specs_utils import json_to_kitti, json_to_yaml, json_to_toml
 
 # Configure logging
 logging.basicConfig(
@@ -49,9 +55,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Spec backend to conversion functions mapping
+SPEC_BACKEND_TO_FUNCTIONS = {
+    "protobuf": json_to_kitti.kitti,
+    "yaml": json_to_yaml.yml,
+    "toml": json_to_toml.toml_format
+}
+
+IS_MASTER = int(os.environ.get("NODE_RANK", 0)) == 0
+
 
 def prepare_data_before_job_run(job, docker_env_vars):
     """Prepare data before job run"""
+    if docker_env_vars:
+        os.environ.update(docker_env_vars)
+
     cloud_storage, specs = get_results_cloud_data(
         job.get("cloud_metadata"),
         job["specs"],
@@ -78,20 +96,41 @@ def prepare_data_before_job_run(job, docker_env_vars):
             ngc_key,
         )
 
-    logger.info("Downloading files from normal spec")
+    # Extract preserve_source_path_params if specified
+    preserve_source_path_params = specs.pop("preserve_source_path_params", set())
+    if isinstance(preserve_source_path_params, list):
+        preserve_source_path_params = set(preserve_source_path_params)
+    logger.info("Downloading files from normal spec (preserve_source_path_params=%s)", preserve_source_path_params)
     download_files_from_spec(
         cloud_data=job.get("cloud_metadata"),
         data=specs,
         job_id=job["job_id"],
         network_arch=job["neural_network_name"],
         ngc_key=ngc_key,
-        reprocess_files=reprocess_files
+        reprocess_files=reprocess_files,
+        preserve_source_path_params=preserve_source_path_params
     )
 
-    # Save spec file
-    spec_path = os.path.join(specs["results_dir"], "spec.yaml")
-    with open(spec_path, 'w+', encoding='utf-8') as yaml_file:
-        yaml.dump(specs, yaml_file, default_flow_style=False)
+    # Save spec file with dynamic backend
+    network_arch = job["neural_network_name"]
+    spec_backend, file_extension = get_spec_backend_info(network_arch)
+    spec_path = os.path.join(specs["results_dir"], f"spec.{file_extension}")
+
+    if spec_backend == "yaml":
+        # Use yaml format
+        with open(spec_path, 'w+', encoding='utf-8') as spec_file:
+            yaml.dump(specs, spec_file, default_flow_style=False)
+    elif spec_backend in SPEC_BACKEND_TO_FUNCTIONS:
+        # Use appropriate conversion function
+        conversion_func = SPEC_BACKEND_TO_FUNCTIONS[spec_backend]
+        converted_specs = conversion_func(specs)
+        with open(spec_path, 'w+', encoding='utf-8') as spec_file:
+            spec_file.write(converted_specs)
+    else:
+        # Fallback to yaml if unknown backend
+        logger.warning(f"Unknown spec backend '{spec_backend}', falling back to yaml")
+        with open(spec_path, 'w+', encoding='utf-8') as spec_file:
+            yaml.dump(specs, spec_file, default_flow_style=False)
 
     if docker_env_vars.get("RECURSIVE_DATASET_FILE_DOWNLOAD", "False") == "True":
         logger.info("reprocess_files: %s", reprocess_files)
@@ -153,7 +192,8 @@ class ContainerJobHandler:
             return set()
 
     @staticmethod
-    def create_and_upload_tarball(results_dir, cloud_storage, job_id, action_name, exclude_snapshot=None):
+    def create_and_upload_tarball(results_dir, cloud_storage, job_id, action_name,
+                                  exclude_snapshot=None, exclude_patterns=None):
         """Create a tarball of the results directory and upload it.
 
         Args:
@@ -162,13 +202,14 @@ class ContainerJobHandler:
             job_id (str): Job ID for naming the tarball
             action_name (str): Action name for naming the tarball
             exclude_snapshot (set, optional): Set of relative paths to exclude from tarball
+            exclude_patterns (list, optional): List of regex patterns to exclude files from tarball
         """
         try:
             tarball_name = f"{action_name}_results.tar.gz"
             tarball_path = os.path.join(results_dir, tarball_name)
 
             # Create tarball using utility function
-            if create_tarball(results_dir, tarball_path, exclude_snapshot):
+            if create_tarball(results_dir, tarball_path, exclude_snapshot, exclude_patterns):
                 # Upload tarball using utility function
                 if cloud_storage and os.path.exists(tarball_path):
                     upload_tarball_to_cloud(cloud_storage, tarball_path, remove_after_upload=True)
@@ -193,8 +234,6 @@ class ContainerJobHandler:
         """
         try:
             docker_env_vars = job.get('docker_env_vars', {})
-            if docker_env_vars:
-                os.environ.update(docker_env_vars)
 
             def async_setup_and_run():
                 cloud_storage = None
@@ -205,17 +244,20 @@ class ContainerJobHandler:
 
                 try:
                     # Setup cloud storage and specs
-
                     cloud_storage, specs, spec_path = prepare_data_before_job_run(job, docker_env_vars)
 
                     # Capture snapshot of results directory after downloads but before job execution
                     results_dir_snapshot = ContainerJobHandler.capture_directory_snapshot(specs["results_dir"])
 
-                    # Get upload strategy by reading network config directly
-                    network = docker_env_vars.get("ORCHESTRATION_API_NETWORK", job.get("neural_network_name", ""))
+                    # Get upload strategy and exclude patterns by reading network config directly
+                    network = docker_env_vars.get("ORCHESTRATION_API_NETWORK",
+                                                  job.get("neural_network_name", ""))
                     action = docker_env_vars.get("ORCHESTRATION_API_ACTION", job.get("action_name", ""))
-                    upload_strategy = ContainerJobHandler.get_upload_strategy_from_config(network, action)
+                    upload_strategy, exclude_patterns = ContainerJobHandler.get_upload_strategy_from_config(
+                        network, action)
                     logger.info("Using upload strategy for %s %s: %s", network, action, upload_strategy)
+                    if exclude_patterns:
+                        logger.info("Excluding patterns for %s %s: %s", network, action, exclude_patterns)
 
                     # Determine if we should start continuous monitoring
                     should_start_continuous = True
@@ -239,7 +281,8 @@ class ContainerJobHandler:
                         exit_event = threading.Event()
                         upload_thread = threading.Thread(
                             target=monitor_and_upload,
-                            args=(specs["results_dir"], cloud_storage, exit_event, 0, selective_tarball_config),
+                            args=(specs["results_dir"], cloud_storage, exit_event, 0,
+                                  selective_tarball_config, exclude_patterns),
                             daemon=True
                         )
                         upload_thread.start()
@@ -269,7 +312,7 @@ class ContainerJobHandler:
                             if not status_logger:
                                 status_logger = status_logging.StatusLogger(
                                     filename=status_file,
-                                    is_master=True,
+                                    is_master=IS_MASTER,
                                     verbosity=1,
                                     append=True
                                 )
@@ -289,7 +332,8 @@ class ContainerJobHandler:
                                 is_completed = vlm_entrypoint.vlm_launch(
                                     job["neural_network_name"],
                                     job["action_name"],
-                                    specs
+                                    specs,
+                                    job["job_id"]
                                 )
 
                         except Exception:
@@ -315,7 +359,8 @@ class ContainerJobHandler:
                                 upload_strategy,
                                 specs["results_dir"],
                                 selective_tarball_config,
-                                results_dir_snapshot
+                                results_dir_snapshot,
+                                exclude_patterns
                             )
 
                     # Launch job asynchronously
@@ -357,7 +402,7 @@ class ContainerJobHandler:
             try:
                 status_logger = status_logging.StatusLogger(
                     filename=status_file,
-                    is_master=True,
+                    is_master=IS_MASTER,
                     verbosity=1,
                     append=True
                 )
@@ -381,7 +426,8 @@ class ContainerJobHandler:
         upload_strategy="continuous",
         results_dir=None,
         selective_tarball_config=None,
-        results_dir_snapshot=None
+        results_dir_snapshot=None,
+        exclude_patterns=None
     ):
         """Clean up resources and log final status."""
         if exit_event:
@@ -398,7 +444,8 @@ class ContainerJobHandler:
                 cloud_storage,
                 job["job_id"],
                 job["action_name"],
-                results_dir_snapshot
+                results_dir_snapshot,
+                exclude_patterns
             )
 
         # Handle selective tarball creation if needed
@@ -423,7 +470,7 @@ class ContainerJobHandler:
                 try:
                     status_logger = status_logging.StatusLogger(
                         filename=status_file,
-                        is_master=True,
+                        is_master=IS_MASTER,
                         verbosity=1,
                         append=True
                     )
@@ -608,21 +655,24 @@ class ContainerJobHandler:
 
     @staticmethod
     def get_upload_strategy_from_config(network, action):
-        """Get upload strategy by reading network config directly.
+        """Get upload strategy and exclude patterns by reading network config directly.
 
         Args:
             network (str): Network name
             action (str): Action name
 
         Returns:
-            dict or str: Upload strategy configuration
+            tuple: (upload_strategy, exclude_patterns) where upload_strategy is dict or str,
+                   and exclude_patterns is list or None
         """
         try:
             network_config = read_network_config(network)
-            if network_config and "upload_strategy" in network_config:
-                strategy = network_config["upload_strategy"].get(action, "continuous")
-                return strategy
-            return "continuous"  # Default to continuous if not specified
+            if network_config and "cloud_upload" in network_config:
+                cloud_upload_config = network_config["cloud_upload"]
+                strategy = cloud_upload_config.get("upload_strategy", {}).get(action, "continuous")
+                exclude_patterns = cloud_upload_config.get("exclude_patterns", {}).get(action)
+                return strategy, exclude_patterns
+            return "continuous", None  # Default to continuous if not specified
         except Exception as e:
             logger.error("Error reading upload strategy from network config: %s", str(e))
-            return "continuous"
+            return "continuous", None

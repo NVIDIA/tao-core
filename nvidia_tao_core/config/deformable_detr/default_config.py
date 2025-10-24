@@ -156,3 +156,8 @@ class ExperimentConfig(CommonExperimentConfig):
             "for a Deformable DETR experiment."
         ),
     )
+
+    def __post_init__(self):
+        """Set default model name for Deformable DETR."""
+        if self.model_name is None:
+            self.model_name = "deformable_detr"

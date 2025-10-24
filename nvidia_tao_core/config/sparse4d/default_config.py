@@ -77,3 +77,8 @@ class ExperimentConfig(CommonExperimentConfig):
         description="Visualize config",
         display_name="Visualize config"
     )
+
+    def __post_init__(self):
+        """Set default model name for Sparse4D."""
+        if self.model_name is None:
+            self.model_name = "sparse4d"

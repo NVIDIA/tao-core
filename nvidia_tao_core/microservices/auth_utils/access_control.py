@@ -16,7 +16,7 @@
 # ['', '<namespace', 'api', 'v1', 'orgs', '<org_name>', 'experiments']
 
 """Authentication utils access control modeules"""
-import os
+from nvidia_tao_core.microservices.utils import get_admin_key
 # import re
 # from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
 
@@ -27,14 +27,15 @@ class AccessControlError(Exception):
     pass
 
 
-def validate(user_id, org_name, url):
+def validate(user_id, org_name, url, token):
     """Validate org_name requested is accessible to the provided user"""
     user_id = str(user_id)
-    if url.endswith(":status_update") or url.endswith(":log_update"):
-        if user_id != os.environ.get("CALLBACK_UUID"):
-            err = AccessControlError("This endpoint is not accessible " + user_id)
-            return err
     err = None
+    if url.endswith(":status_update") or url.endswith(":log_update"):
+        admin_key = get_admin_key()
+        if admin_key != token:
+            err = AccessControlError("Invalid token")
+            return err
     if not org_name:
         err = AccessControlError("Invalid Org requested")
     # if err is None:

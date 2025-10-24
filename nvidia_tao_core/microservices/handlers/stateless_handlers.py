@@ -140,6 +140,17 @@ def get_job_specs(job_id, automl=False, automl_experiment_id="0"):
 
 def save_job_specs(job_id, specs, automl=False, automl_experiment_id="0"):
     """Save specs used to run the job"""
+    if isinstance(specs, str):
+        try:
+            import toml
+            specs = toml.loads(specs)
+        except Exception as e:
+            logger.error(f"Failed to parse TOML spec: {e}")
+
+    # Ensure spec is a dictionary
+    if not isinstance(specs, dict):
+        raise ValueError(f"Spec is not a dictionary or parseable string: {type(specs)}")
+
     if automl:
         mongo_jobs = MongoHandler("tao", "automl_jobs")
         job_query = {'id': job_id}

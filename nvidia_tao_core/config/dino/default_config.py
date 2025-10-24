@@ -203,3 +203,8 @@ class ExperimentConfig(CommonExperimentConfig):
         None,
         description="Configurable parameters to construct the distiller for a DINO experiment.",
     )
+
+    def __post_init__(self):
+        """Set default model name for DINO."""
+        if self.model_name is None:
+            self.model_name = "dino"

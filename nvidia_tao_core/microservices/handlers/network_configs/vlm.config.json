@@ -1,7 +1,7 @@
 {
     "api_params": {
         "actions": [],
-        "formats":["default", "raw"],
+        "formats":["default", "raw", "llava"],
         "accepted_ds_intents": ["training", "evaluation", "testing"],
         "image":"TAO_VILA",
         "spec_backend":"yaml",
@@ -23,6 +23,24 @@
                         {"path": "**/*.mp4", "type": "glob"},
                         {"path": "**/*.mkv", "type": "glob"},
                         {"path": "**/*.webm", "type": "glob"}
+                    ]
+                }
+            ],
+            "llava": [
+                {
+                    "any_of": [
+                        {
+                            "all_of": [
+                                {"path": "images.tar.gz", "type": "file"},
+                                {"path": "annotations.json", "type": "file"}
+                            ]
+                        },
+                        {
+                            "all_of": [
+                                {"path": "videos.tar.gz", "type": "file"},
+                                {"path": "annotations.json", "type": "file"}
+                            ]
+                        }
                     ]
                 }
             ]

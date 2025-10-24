@@ -15,6 +15,7 @@
 """Utilties to send data to the TAO Toolkit Telemetry Remote Service."""
 
 import os
+from typing import Any, Dict, List, Optional
 
 import logging as _logging
 _logging.basicConfig(
@@ -30,21 +31,29 @@ except Exception as e:
     logging.warning(f"Telemetry reporting script cannot import with [Error]: {e}")
     METRICS_MODULE_EXISTS = False
 
-
 TAO_SERVER_URL = "https://api.tao.ngc.nvidia.com"
 TELEMETRY_TIMEOUT = int(os.getenv("TELEMETRY_TIMEOUT", "30"))
 
 
-def send_telemetry_data(network, action, gpu_data, num_gpus=1, time_lapsed=None, pass_status=False):
+def send_telemetry_data(
+    network: str,
+    action: str,
+    gpu_data: List[Dict[str, Any]],
+    num_gpus: int = 1,
+    time_lapsed: Optional[int] = None,
+    pass_status: bool = False,
+    user_error: bool = False
+) -> None:
     """Wrapper to send TAO telemetry data.
 
     Args:
         network (str): Name of the network being run.
         action (str): Subtask of the network called.
-        gpu_data (dict): Dictionary containing data about the GPU's in the machine.
+        gpu_data (list of dict): List of dictionaries containing data about the GPU's in the machine.
         num_gpus (int): Number of GPUs used in the job.
         time_lapsed (int): Time lapsed.
         pass_status (bool): Job passed or failed.
+        user_error (bool): Whether the error is a user error.
 
     Environment variables:
         TELEMETRY_OPT_OUT (str): Whether to opt out of telemetry reporting, default: no.
@@ -64,7 +73,8 @@ def send_telemetry_data(network, action, gpu_data, num_gpus=1, time_lapsed=None,
             "action": action,
             "network": network,
             "gpu": [device["name"] for device in gpu_data[:num_gpus]],
-            "success": pass_status
+            "success": pass_status,
+            "user_error": user_error
         }
         if time_lapsed is not None:
             data["time_lapsed"] = time_lapsed

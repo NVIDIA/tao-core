@@ -750,3 +750,8 @@ class ExperimentConfig(CommonExperimentConfig):
             "Configurable parameters to generate TensorRT engine for a NVDINOv2 experiment."
         ),
     )
+
+    def __post_init__(self):
+        """Set default model name for NVDINOv2."""
+        if self.model_name is None:
+            self.model_name = "nvdinov2"

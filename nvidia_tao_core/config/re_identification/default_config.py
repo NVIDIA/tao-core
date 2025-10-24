@@ -734,3 +734,8 @@ class ExperimentConfig(CommonExperimentConfig):
             "Re-Identification experiment."
         ),
     )
+
+    def __post_init__(self):
+        """Set default model name for Re-Identification."""
+        if self.model_name is None:
+            self.model_name = "re_identification"

@@ -660,9 +660,12 @@ def create_statefulset(job_id, num_gpu_per_node, num_nodes, image, api_port=8000
                 "NCCL_IBEXT_DISABLE",
                 value=os.getenv("NCCL_IBEXT_DISABLE", default="0")
             )
+            service_prefix_env_var = client.V1EnvVar(name="JOB_SERVICE_PREFIX", value=statefulset_name)
+            service_name_env_var = client.V1EnvVar(name="JOB_SERVICE_NAME", value=service_name)
             env_vars = [namespace_env_var, num_gpu_env_var, world_size_env_var, node_rank_env_var,
                         master_address_env_var, master_port_env_var, save_on_each_node_env_var,
-                        nccl_ib_disable_env_var, nccl_ib_ext_disable_env_var, release_name_env_var]
+                        nccl_ib_disable_env_var, nccl_ib_ext_disable_env_var, release_name_env_var,
+                        service_prefix_env_var, service_name_env_var]
         elif statefulset_type == "inference_microservice":
             # Automatic environment variables for inference microservice
             env_vars = [client.V1EnvVar(name="JOB_ID", value=job_id or "")]
@@ -696,7 +699,9 @@ def create_statefulset(job_id, num_gpu_per_node, num_nodes, image, api_port=8000
                 for port in custom_ports
             ]
         else:
-            container_ports = [client.V1ContainerPort(container_port=api_port)]
+            container_ports = [
+                client.V1ContainerPort(container_port=api_port),
+                client.V1ContainerPort(container_port=8080)]
 
         # Configure command
         if statefulset_type == "inference_microservice" and custom_command:
@@ -837,6 +842,7 @@ echo "Starting Inference Microservice..." &&
             metadata=client.V1ObjectMeta(**metadata_spec),
             spec=client.V1StatefulSetSpec(
                 replicas=num_nodes,
+                pod_management_policy="Parallel",
                 selector=client.V1LabelSelector(
                     match_labels=(
                         {"statefulset": statefulset_name}
@@ -1186,6 +1192,10 @@ def create_microservice_and_send_request(
                 )
                 if response.status_code != 200 and response.text:
                     logger.error(f"Error when sending microservice request {response.text}")
+                    internal_job_status_update(
+                        microservice_pod_id,
+                        message=f"Error when sending microservice request {response.text}"
+                    )
                     docker_handler.stop_container()
                     gpu_manager.release_gpus(microservice_pod_id)
                     return None
@@ -1193,6 +1203,11 @@ def create_microservice_and_send_request(
                     docker_handler.stop_container()
                     gpu_manager.release_gpus(microservice_pod_id)
                 return response
+            internal_job_status_update(
+                microservice_pod_id,
+                message=f"Error when creating microservice pod {microservice_pod_id}"
+            )
+            return None
 
         if BACKEND == "local-k8s":
             service_name = get_statefulset_service_name(microservice_pod_id)
@@ -1217,6 +1232,10 @@ def create_microservice_and_send_request(
                 )
                 if response.status_code != 200 and response.text:
                     logger.error(f"Error when sending microservice request {response.text}")
+                    internal_job_status_update(
+                        microservice_pod_id,
+                        message=f"Error when sending microservice request {response.text}"
+                    )
                     delete(microservice_pod_id, use_ngc=False)
                     return None
                 if api_endpoint != "post_action":
@@ -1227,6 +1246,10 @@ def create_microservice_and_send_request(
         logger.error(f"Exception thrown in create_microservice_and_send_request is {str(e)}")
         logger.error("Exception in create ms pod and send request")
         logger.error(traceback.format_exc())
+        internal_job_status_update(
+            microservice_pod_id,
+            message=f"Error when creating microservice pod {microservice_pod_id}"
+        )
         delete(microservice_pod_id, use_ngc=False)
         return None
 
@@ -1692,8 +1715,6 @@ def delete(job_name, use_ngc=True, resource_type="multinode"):
             stateful_set_name = get_statefulset_name(job_name)
             service_type = "statefulset"
 
-        # Delete service first, then statefulset
-        delete_service(job_id=job_name, service_type=service_type)
         stateful_set = api_instance.read_namespaced_stateful_set(
             name=stateful_set_name,
             namespace=name_space
@@ -1710,6 +1731,7 @@ def delete(job_name, use_ngc=True, resource_type="multinode"):
             )
         )
         logger.info(f"Statefulset deleted. status='{str(api_response.status)}'")
+        delete_service(job_id=job_name, service_type=service_type)
         return True
     except Exception as e:
         logger.error(f"Exception caught in delete_statefulset {str(e)}")
@@ -2148,7 +2170,7 @@ def get_cluster_ip(namespace='default'):
         else:
             config.load_incluster_config()
         api_instance = client.CoreV1Api()
-        service = api_instance.read_namespaced_service("tao-api-service", namespace)
+        service = api_instance.read_namespaced_service(f"{release_name}-service", namespace)
         cluster_ip = service.spec.cluster_ip
         cluster_port = 8000
         for port in service.spec.ports:

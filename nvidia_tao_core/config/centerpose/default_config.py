@@ -270,3 +270,8 @@ class ExperimentConfig(CommonExperimentConfig):
         CenterPoseGenTrtEngineExpConfig(),
         description="Configurable parameters to generate TensorRT engine.",
     )
+
+    def __post_init__(self):
+        """Set default model name for CenterPose."""
+        if self.model_name is None:
+            self.model_name = "centerpose"

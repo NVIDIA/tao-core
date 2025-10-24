@@ -75,4 +75,9 @@ automl_list_helper = {
             },
         },
     },
+    "cosmos-rl": {
+        "list_2": {
+            "train.optm_betas": ("optimizer_betas", None),
+        }
+    },
 }

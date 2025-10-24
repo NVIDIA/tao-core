@@ -41,6 +41,12 @@
         }
     },
 
+    "cloud_upload": {
+        "upload_strategy": {
+            "augment": "tarball_after_completion"
+        }
+    },
+
     "dynamic_config": {
         "parent_action_rules": {
             "annotation_format_convert": {

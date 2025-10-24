@@ -39,6 +39,15 @@ def fix_input_dimension(dimension_value, factor=32):
     return (int(dimension_value / factor) + 1) * factor
 
 
+def fix_power_of_factor(value, factor=2):
+    """Return the nearest power of factor that is >= value"""
+    if value <= 0:
+        return factor  # Return the base factor for non-positive values
+    # Calculate the power needed: factor^power >= value
+    power = math.ceil(math.log(value) / math.log(factor))
+    return int(factor ** power)
+
+
 def clamp_value(value, v_min, v_max):
     """Clamps value within the given range"""
     if value >= v_max:

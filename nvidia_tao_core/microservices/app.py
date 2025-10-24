@@ -46,12 +46,14 @@ from nvidia_tao_core.microservices.auth_utils import credentials, authentication
 from nvidia_tao_core.microservices.health_utils import health_check
 from nvidia_tao_core.microservices.handlers.inference_microservice_handler import InferenceMicroserviceHandler
 from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
+from nvidia_tao_core.microservices.app_handlers.mongo_handler import MongoBackupHandler
 from nvidia_tao_core.microservices.constants import AIRGAP_DEFAULT_USER
 from nvidia_tao_core.microservices.enum_constants import (
     ActionEnum,
     DatasetFormat,
     DatasetType,
     ExperimentNetworkArch,
+    ContainerNetworkArch,
     Metrics,
     BaseExperimentTask,
     BaseExperimentDomain,
@@ -1211,7 +1213,7 @@ def auth():
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 401)
         return response
     # access control
-    err = access_control.validate(user_id, org_name, url)
+    err = access_control.validate(user_id, org_name, url, token)
     if err:
         logger.warning("Forbidden: %s", err)
         metadata = {"error_desc": str(err), "error_code": 2}
@@ -1228,7 +1230,7 @@ class ContainerJobSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    neural_network_name = EnumField(ExperimentNetworkArch)
+    neural_network_name = EnumField(ContainerNetworkArch)
     action_name = EnumField(ActionEnum)
     specs = fields.Raw()
     cloud_metadata = fields.Raw()
@@ -2569,17 +2571,17 @@ def workspace_partial_update(org_name, workspace_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/orgs/<org_name>/workspaces/<workspace_id>/backup', methods=['POST'])
+@app.route('/api/v1/orgs/<org_name>/workspaces:backup', methods=['POST'])
 @disk_space_check
-def workspace_backup(org_name, workspace_id):
-    """Backup MongoDB data for a specific workspace.
+def workspace_backup(org_name):
+    """Backup MongoDB data using workspace metadata.
 
     ---
     post:
       tags:
-      - WORKSPACE
-      summary: Backup MongoDB data for a specific workspace
-      description: Returns the backup file name
+      - WORKSPACES
+      summary: Backup MongoDB data using workspace metadata
+      description: Backs up all MongoDB databases using provided workspace cloud credentials
       parameters:
       - name: org_name
         in: path
@@ -2589,22 +2591,24 @@ def workspace_backup(org_name, workspace_id):
           type: string
           maxLength: 255
           pattern: '^[a-zA-Z0-9_-]+$'
-      - name: workspace_id
-        in: path
-        description: Workspace ID
-        required: true
-        schema:
-          type: string
-          format: uuid
       requestBody:
         content:
           application/json:
-            schema: WorkspaceBackupReqSchema
-        description: Backup file name
-        required: true
+            schema:
+              type: object
+              properties:
+                workspace_metadata:
+                  type: object
+                  description: Workspace metadata containing cloud credentials
+                  required: true
+                backup_file_name:
+                  type: string
+                  description: Optional backup file name
+              required:
+                - workspace_metadata
       responses:
         200:
-          description: Message indicating if the backup was successful
+          description: Backup successful
           content:
             application/json:
               schema: MessageOnlySchema
@@ -2614,17 +2618,7 @@ def workspace_backup(org_name, workspace_id):
             X-RateLimit-Limit:
               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
-          description: Bad request, see reply body for details
-          content:
-            application/json:
-              schema: ErrorRspSchema
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: '#/components/headers/Access-Control-Allow-Origin'
-            X-RateLimit-Limit:
-              $ref: '#/components/headers/X-RateLimit-Limit'
-        404:
-          description: User or Workspace not found
+          description: Bad request
           content:
             application/json:
               schema: ErrorRspSchema
@@ -2634,38 +2628,49 @@ def workspace_backup(org_name, workspace_id):
             X-RateLimit-Limit:
               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(workspace_id=workspace_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
+    try:
+        request_data = request.get_json(force=True)
+        workspace_metadata = request_data.get("workspace_metadata")
+        backup_file_name = request_data.get("backup_file_name", "mongodb_backup.tar.gz")
+        schema = WorkspaceReqSchema()
+        workspace_metadata = schema.dump(schema.load(workspace_metadata))
+
+        if not workspace_metadata:
+            metadata = {"error_desc": "workspace_metadata is required", "error_code": 1}
+            schema = ErrorRspSchema()
+            response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+            return response
+
+        # Perform backup
+        response = MongoBackupHandler.backup_for_workspace(workspace_metadata, backup_file_name)
+
+        # Return response
+        if response.code == 200:
+            schema = MessageOnlySchema()
+        else:
+            schema = ErrorRspSchema()
+
+        schema_dict = schema.dump(schema.load(response.data))
+        return make_response(jsonify(schema_dict), response.code)
+
+    except Exception as e:
+        metadata = {"error_desc": f"Error in MongoDB backup: {str(e)}", "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    schema = WorkspaceBackupReqSchema()
-    request_dict = schema.dump(schema.load(request.get_json(force=True)))
-    # Get response
-    response = app_handler.mongo_backup(workspace_id, request_dict.get("backup_file_name"))
-    # Get schema
-    schema = None
-    if response.code == 200:
-        schema = MessageOnlySchema()
-    else:
-        schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/orgs/<org_name>/workspaces/<workspace_id>/restore', methods=['POST'])
+@app.route('/api/v1/orgs/<org_name>/workspaces:restore', methods=['POST'])
 @disk_space_check
-def workspace_restore(org_name, workspace_id):
-    """Restore MongoDB data for a specific workspace.
+def workspace_restore(org_name):
+    """Restore MongoDB data using workspace metadata.
 
     ---
     post:
       tags:
-      - WORKSPACE
-      summary: Restore MongoDB data for a specific workspace
-      description: Returns the restore file name
+      - WORKSPACES
+      summary: Restore MongoDB data using workspace metadata
+      description: Restores all MongoDB databases using provided workspace cloud credentials
       parameters:
       - name: org_name
         in: path
@@ -2675,22 +2680,24 @@ def workspace_restore(org_name, workspace_id):
           type: string
           maxLength: 255
           pattern: '^[a-zA-Z0-9_-]+$'
-      - name: workspace_id
-        in: path
-        description: Workspace ID
-        required: true
-        schema:
-          type: string
-          format: uuid
       requestBody:
         content:
           application/json:
-            schema: WorkspaceReqSchema
-        description: Updated metadata for Workspace
-        required: true
+            schema:
+              type: object
+              properties:
+                workspace_metadata:
+                  type: object
+                  description: Workspace metadata containing cloud credentials
+                  required: true
+                backup_file_name:
+                  type: string
+                  description: Optional backup file name to restore from
+              required:
+                - workspace_metadata
       responses:
         200:
-          description: Returned the updated Workspace
+          description: Restore successful
           content:
             application/json:
               schema: MessageOnlySchema
@@ -2700,17 +2707,7 @@ def workspace_restore(org_name, workspace_id):
             X-RateLimit-Limit:
               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
-          description: Bad request, see reply body for details
-          content:
-            application/json:
-              schema: ErrorRspSchema
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: '#/components/headers/Access-Control-Allow-Origin'
-            X-RateLimit-Limit:
-              $ref: '#/components/headers/X-RateLimit-Limit'
-        404:
-          description: User or Workspace not found
+          description: Bad request
           content:
             application/json:
               schema: ErrorRspSchema
@@ -2720,25 +2717,36 @@ def workspace_restore(org_name, workspace_id):
             X-RateLimit-Limit:
               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(workspace_id=workspace_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
+    try:
+        request_data = request.get_json(force=True)
+        workspace_metadata = request_data.get("workspace_metadata")
+        schema = WorkspaceReqSchema()
+        workspace_metadata = schema.dump(schema.load(workspace_metadata))
+        backup_file_name = request_data.get("backup_file_name", "mongodb_backup.tar.gz")
+
+        if not workspace_metadata:
+            metadata = {"error_desc": "workspace_metadata is required", "error_code": 1}
+            schema = ErrorRspSchema()
+            response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+            return response
+
+        # Perform restore
+        response = MongoBackupHandler.restore_for_workspace(workspace_metadata, backup_file_name)
+
+        # Return response
+        if response.code == 200:
+            schema = MessageOnlySchema()
+        else:
+            schema = ErrorRspSchema()
+
+        schema_dict = schema.dump(schema.load(response.data))
+        return make_response(jsonify(schema_dict), response.code)
+
+    except Exception as e:
+        metadata = {"error_desc": f"Error in MongoDB restore: {str(e)}", "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    schema = WorkspaceBackupReqSchema()
-    request_dict = schema.dump(schema.load(request.get_json(force=True)))
-    # Get response
-    response = app_handler.mongo_restore(workspace_id, request_dict.get("backup_file_name"))
-    # Get schema
-    schema = None
-    if response.code == 200:
-        schema = MessageOnlySchema()
-    else:
-        schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
 
 #
 # DATASET API
@@ -9388,20 +9396,11 @@ def inference_microservice_start(org_name, experiment_id):
         job_id = str(uuid.uuid4())
 
         # Create job configuration
-        success = InferenceMicroserviceHandler.start_inference_microservice(
+        response = InferenceMicroserviceHandler.start_inference_microservice(
             org_name, experiment_id, job_id, request_data
         )
 
-        if success:
-            return make_response(jsonify({
-                'job_id': job_id,
-                'status': 'starting',
-                'message': f'Inference Microservice started with job_id: {job_id}'
-            }), 200)
-        return make_response(jsonify({
-            'error': 'Failed to start Inference Microservice',
-            'error_code': 1
-        }), 500)
+        return make_response(jsonify(response.data), response.code)
 
     except Exception as err:
         logger.error("Error in inference_microservice_start: %s", str(traceback.format_exc()))
@@ -9816,6 +9815,8 @@ with app.test_request_context():
     spec.path(view=workspace_create)
     spec.path(view=workspace_update)
     spec.path(view=workspace_partial_update)
+    spec.path(view=workspace_backup)
+    spec.path(view=workspace_restore)
     spec.path(view=get_dataset_formats)
     spec.path(view=dataset_list)
     spec.path(view=dataset_retrieve)

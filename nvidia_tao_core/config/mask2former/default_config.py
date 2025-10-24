@@ -150,3 +150,8 @@ class ExperimentConfig(CommonExperimentConfig):
         Mask2FormerGenTrtEngineExpConfig(),
         description="Configurable parameters to construct the TensorRT engine builder for a Mask2former experiment.",
     )
+
+    def __post_init__(self):
+        """Set default model name for Mask2Former."""
+        if self.model_name is None:
+            self.model_name = "mask2former"

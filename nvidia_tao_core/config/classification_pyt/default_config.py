@@ -830,3 +830,8 @@ class ExperimentConfig(CommonExperimentConfig):
     gen_trt_engine: GenTrtEngineExpConfig = DATACLASS_FIELD(GenTrtEngineExpConfig())
     distill: ClassDistillationConfig = DATACLASS_FIELD(ClassDistillationConfig())
     quantize: ModelQuantizationConfig = DATACLASS_FIELD(ModelQuantizationConfig())
+
+    def __post_init__(self):
+        """Set default model name for Classification PyTorch."""
+        if self.model_name is None:
+            self.model_name = "classification_pyt"

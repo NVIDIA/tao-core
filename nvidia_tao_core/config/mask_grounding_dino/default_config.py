@@ -137,3 +137,8 @@ class ExperimentConfig(CommonExperimentConfig):
             "for a Mask Grounding DINO experiment."
         ),
     )
+
+    def __post_init__(self):
+        """Set default model name for Mask Grounding DINO."""
+        if self.model_name is None:
+            self.model_name = "mask_grounding_dino"

@@ -202,8 +202,8 @@ class BaseLogger(object):
             data_string = self.format_data(data)
             if self.is_master:
                 self.log(verbosity_level, data_string)
-            self.flush()
-            status_callback(data_string)
+                self.flush()
+                status_callback(data_string)
 
 
 class StatusLogger(BaseLogger):

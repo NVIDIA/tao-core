@@ -279,10 +279,11 @@ def download_ngc_model(ngc_path, ptm_root, key):
     try:
         clt.configure(api_key=key, org_name=org, team_name=team)
     except Exception as e:
-        if not ("Invalid org" in str(e) or "Invalid team" in str(e)):
+        if not ("Invalid org" in str(e) or "Invalid team" in str(e) or "doesn't match organization" in str(e)):
             logger.error(
                 "Can't configure the passed NGC KEY for Org {}, team {}".format(org, team)  # noqa pylint: disable=C0209
             )
+            logger.error("Error: %s", e)
             return False
         msg = (
             "Can't validate the passed NGC KEY for Org {}, team {}, "

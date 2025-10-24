@@ -759,3 +759,8 @@ class ExperimentConfig(CommonExperimentConfig):
         default_value="segment",
         valid_options="segment,classify"
     )
+
+    def __post_init__(self):
+        """Set default model name for Visual ChangeNet."""
+        if self.model_name is None:
+            self.model_name = "visual_changenet"

@@ -1,0 +1,137 @@
+{
+    "api_params": {
+        "dataset_type": "vlm",
+        "actions": ["train", "inference", "evaluate", "inference_microservice"],
+        "formats": ["llava"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image": "COSMOS_RL",
+        "spec_backend": "toml",
+        "actions_pipe": {
+            "train": "train",
+            "inference":"inference",
+            "evaluate": "evaluate"
+        }
+    },
+
+    "checkpoint": {
+        "format": "safetensors",
+        "folder": "true"
+    },
+
+    "cloud_upload": {
+        "exclude_patterns": {
+            "train": ["\\.pth$"]
+        },
+        "upload_strategy": {
+            "evaluate": "tarball_after_completion"
+        }
+    },
+
+    "data_sources": {
+        "train": {
+            "custom.dataset.annotation_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "custom.dataset.media_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "llava": ["images.tar.gz", "videos.tar.gz"],
+                    "*": "images.tar.gz"
+                }
+            }
+        },
+        "evaluate": {
+            "dataset.annotation_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.media_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "llava": ["images.tar.gz", "videos.tar.gz"],
+                    "*": "videos.tar.gz"
+                }
+            },
+            "model.enable_lora": {
+                "source": "parent_job_specs",
+                "check_key_exists": "policy.lora"
+            }
+        }
+    },
+    "spec_params":{
+        "train": {
+            "results_dir":"output_dir",
+            "train.output_dir":"output_dir"
+        },
+        "inference": {
+            "results_dir":"output_dir",
+            "model_path":"parent_model_folder"
+        },
+        "evaluate": {
+            "results_dir":"output_dir",
+            "model.model_name":"parent_model_folder"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "train.output_dir":"automl_output_dir",
+        "train.ckpt.save_freq_in_epoch": "assign_const_value,train.epoch",
+        "validation.freq_in_epoch": "assign_const_value,train.epoch,train.ckpt.save_freq_in_epoch"
+     },
+
+    "metrics": {
+        "available_metrics": [
+            "train/iteration_time",
+            "train/loss_avg",
+            "train/loss_max",
+            "train/learning_rate",
+            "train/grad_norm",
+            "train/model_flops",
+            "train/mfu",
+            "val/loss",
+            "val/step",
+            "steps_per_epoch",
+            "operation",
+            "component",
+            "status",
+            "error_type",
+            "error_message",
+            "interrupted",
+            "step_name",
+            "replica_type",
+            "event",
+            "max_epochs",
+            "current_epoch",
+            "training_phase",
+            "training_completed",
+            "accuracy",
+            "config",
+            "correct_samples",
+            "detailed_results",
+            "error",
+            "evaluation_phase",
+            "evaluation_status",
+            "inference_time_seconds",
+            "model_name",
+            "prepared_inputs",
+            "results_dir",
+            "results_path",
+            "shard_id",
+            "tasks_processed",
+            "total_samples",
+            "total_shards",
+            "total_tasks",
+            "lora_enabled",
+            "lora_merge_status",
+            "lora_merge_error",
+            "merged_model_path"
+        ],
+        "monitoring_metric": "val/loss"
+    }
+}

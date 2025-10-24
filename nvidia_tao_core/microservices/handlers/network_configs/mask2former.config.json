@@ -1,24 +1,32 @@
 {
     "api_params": {
-        "dataset_type":"segmentation",
-        "actions": ["train","evaluate","export","inference","gen_trt_engine"],
-        "formats":["coco_panoptic", "coco"],
-        "accepted_ds_intents": ["training", "evaluation", "testing"],
-        "image":"TAO_PYTORCH",
-        "spec_backend":"yaml",
-        "actions_pipe":{
-            "train":"train",
-            "evaluate":"evaluate",
-            "export":"export_with_spec",
-            "inference":"inference",
-            "gen_trt_engine":"gen_trt_engine"
+        "dataset_type": "segmentation",
+        "actions": [
+            "train",
+            "evaluate",
+            "export",
+            "inference",
+            "gen_trt_engine"
+        ],
+        "formats": [
+            "coco_panoptic",
+            "coco"
+        ],
+        "accepted_ds_intents": [
+            "training",
+            "evaluation",
+            "testing"
+        ],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference",
+            "gen_trt_engine": "gen_trt_engine"
         }
     },
-
-    "upload_strategy": {
-        "inference": "tarball_after_completion"
-    },
-
     "data_sources": {
         "train": {
             "dataset.train.img_dir": {
@@ -345,49 +353,55 @@
             }
         }
     },
-
-    "spec_params":{
+    "spec_params": {
         "train": {
-            "results_dir":"output_dir",
-            "encryption_key":"key",
+            "results_dir": "output_dir",
+            "encryption_key": "key",
+            "model.backbone.pretrained_weights": "{'link': 'https://github.com/SwinTransformer/storage/releases/download/v1.0.8/swin_tiny_patch4_window7_224_22k.pth', 'destination_path': '/ptm/mask2former/swin_tiny_patch4_window7_224_22k/swin_tiny_patch4_window7_224_22k.pth'}",
             "train.resume_training_checkpoint_path": "resume_model"
         },
-        "evaluate":{
-            "results_dir":"output_dir",
-            "evaluate.checkpoint":"parent_model",
-            "evaluate.trt_engine":"parent_model",
-            "encryption_key":"key"
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "evaluate.trt_engine": "parent_model",
+            "encryption_key": "key"
         },
-        "inference":{
-            "results_dir":"output_dir",
-            "inference.checkpoint":"parent_model",
-            "inference.trt_engine":"parent_model",
-            "encryption_key":"key"
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "inference.trt_engine": "parent_model",
+            "encryption_key": "key"
         },
-        "export":{
-            "results_dir":"output_dir",
-            "export.checkpoint":"parent_model",
-            "export.onnx_file":"create_onnx_file",
-            "encryption_key":"key"
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
         },
-        "gen_trt_engine":{
-            "results_dir":"output_dir",
-            "encryption_key":"key",
-            "gen_trt_engine.onnx_file":"parent_model",
-            "gen_trt_engine.trt_engine":"create_engine_file"
+        "gen_trt_engine": {
+            "results_dir": "output_dir",
+            "encryption_key": "key",
+            "gen_trt_engine.onnx_file": "parent_model",
+            "gen_trt_engine.trt_engine": "create_engine_file"
         }
     },
-
-    "automl_spec_params":{
-        "results_dir":"automl_output_dir",
-        "train.resume_training_checkpoint_path":"automl_resume_model",
-        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
-        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
-        "encryption_key":"key"
+    "automl_spec_params": {
+        "results_dir": "automl_output_dir",
+        "model.backbone.pretrained_weights": "{'link': 'https://github.com/SwinTransformer/storage/releases/download/v1.0.8/swin_tiny_patch4_window7_224_22k.pth', 'destination_path': '/ptm/mask2former/swin_tiny_patch4_window7_224_22k/swin_tiny_patch4_window7_224_22k.pth'}",
+        "train.resume_training_checkpoint_path": "automl_resume_model",
+        "train.checkpoint_interval": "assign_const_value,train.num_epochs",
+        "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key": "key"
     },
-
     "metrics": {
-        "available_metrics": ["mIoU"],
+        "available_metrics": [
+            "mIoU"
+        ],
         "monitoring_metric": "mIoU"
+    },
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        }
     }
 }

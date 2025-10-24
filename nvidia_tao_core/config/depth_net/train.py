@@ -70,11 +70,11 @@ class OptimConfig:
         automl_enabled="TRUE"
     )
     lr_scheduler: str = STR_FIELD(
-        value="MultiStep",  # {val_loss, train_loss}
+        value="MultiStepLR",  # {val_loss, train_loss}
         description="""The learning scheduler:
-                    * MultiStep : Decrease the lr by lr_decay from lr_steps
+                    * MultiStepLR : Decrease the lr by lr_decay from lr_steps
                     * StepLR : Decrease the lr by lr_decay at every lr_step_size.""",
-        display_name="learning rate scheduler",
+        display_name="Learning rate scheduler",
         valid_options=",".join(
             ["MultiStep", "StepLR", "CustomMultiStepLRScheduler",
              "LambdaLR", "PolynomialLR", "OneCycleLR", "CosineAnnealingLR"]
@@ -145,13 +145,11 @@ class DepthNetTrainExpConfig(TrainConfig):
         value=False,
         display_name="dataloader visualize",
         description="Whether to visualize the dataloader.",
-        automl_enabled="TRUE"
     )
     vis_step_interval: int = INT_FIELD(
         value=10,
         display_name="visualization interval",
         description="The visualization interval in step.",
-        automl_enabled="TRUE"
     )
     is_dry_run: bool = BOOL_FIELD(
         value=False,

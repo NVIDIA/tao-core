@@ -1,0 +1,164 @@
+{
+    "api_params": {
+        "dataset_type":"depth_net_mono",
+        "actions": ["train","evaluate","export","inference","gen_trt_engine"],
+        "formats":["ThreeDVLM","FSD","NvCLIP","IssacStereo","Crestereo","Middlebury","NYUDV2","NYUDV2Relative","BaseRelativeMonoDataset","BaseMetricMonoDataset"],
+        "accepted_ds_intents": ["training"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference",
+            "gen_trt_engine":"gen_trt_engine"
+        }
+    },
+
+    "upload_strategy": {
+        "inference": "tarball_after_completion"
+    },
+
+    "actions_mapping": {
+        "*": {
+            "network": "depth_net"
+        }
+    },
+
+    "dataset_validation": {
+        "required_files": {
+            "*": [
+                {
+                    "all_of": [
+                        {"path": "images.tar.gz", "type": "file"},
+                        {"path": "annotations.txt", "type": "file"}
+                    ]
+                }
+            ]
+        }
+    },
+
+    "preserve_source_path_params": ["dataset.infer_dataset.data_root"],
+    "data_sources": {
+        "train": {
+            "dataset.train_dataset.data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "data_file": {
+                        "path": "annotations.txt"
+                    },
+                    "dataset_name": "dataset_format"
+                }
+            },
+            "dataset.val_dataset.data_sources": {
+                    "source": "eval_dataset",
+                    "multiple_sources": true,
+                    "mapping": {
+                        "data_file": {
+                            "path": "annotations.txt"
+                        },
+                        "dataset_name": "dataset_format"
+                    }
+            }
+        },
+        "evaluate": {
+            "dataset.test_dataset.data_sources": {
+                "source": "eval_dataset",
+                "multiple_sources": true,
+                "mapping": {
+                    "data_file": {
+                        "path": "annotations.txt"
+                    },
+                    "dataset_name": "dataset_format"
+                }
+            }
+        },
+        "inference": {
+            "dataset.infer_dataset.data_sources": {
+                "source": "inference_dataset",
+                "multiple_sources": true,
+                "mapping": {
+                    "data_file": {
+                        "path": "annotations.txt"
+                    },
+                    "dataset_name": "dataset_format"
+                }
+            }
+        }
+    },
+
+    "additional_download": {
+        "train": [
+            {
+                "source": "train_datasets",
+                "path": "{dataset_path}/images.tar.gz"
+            },
+            {
+                "source": "eval_dataset",
+                "path": "{dataset_path}/images.tar.gz"
+            }
+        ],
+        "evaluate": [
+            {
+                "source": "eval_dataset",
+                "path": "{dataset_path}/images.tar.gz"
+            }
+        ],
+        "inference": [
+            {
+                "source": "inference_dataset",
+                "path": "{dataset_path}/images.tar.gz"
+            }
+        ]
+    },
+
+    "spec_params":{
+        "train": {
+            "results_dir":"output_dir",
+            "dataset.dataset_name": "MonoDataset",
+            "train.pretrained_model_path": "ptm_if_no_resume_model",
+            "model.mono_backbone.pretrained_path": "{'link': 'https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth', 'destination_path': '/ptm/depth_net/mono_backbone/dinov2_vitl14_pretrain.pth'}",
+            "train.resume_training_checkpoint_path": "resume_model"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "dataset.dataset_name": "MonoDataset",
+            "evaluate.checkpoint":"parent_model",
+            "evaluate.trt_engine":"parent_model"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "dataset.dataset_name": "MonoDataset",
+            "inference.checkpoint":"parent_model",
+            "inference.trt_engine":"parent_model"
+        },
+        "export":{
+            "results_dir":"output_dir",
+            "dataset.dataset_name": "MonoDataset",
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file"
+        },
+        "gen_trt_engine":{
+            "results_dir":"output_dir",
+            "dataset.dataset_name": "MonoDataset",
+            "gen_trt_engine.onnx_file":"parent_model",
+            "gen_trt_engine.trt_engine":"create_engine_file"
+        }
+    },
+
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "dataset.dataset_name": "MonoDataset",
+        "train.pretrained_model_path": "ptm_if_no_resume_model",
+        "model.mono_backbone.pretrained_path": "{'link': 'https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth', 'destination_path': '/ptm/depth_net/mono_backbone/dinov2_vitl14_pretrain.pth'}",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval"
+    },
+
+    "metrics": {
+        "available_metrics": ["train_loss","val/loss", "val/d1", "val/d2", "val/d3", "val/abs_rel"],
+        "monitoring_metric": "val/loss"
+    }
+}

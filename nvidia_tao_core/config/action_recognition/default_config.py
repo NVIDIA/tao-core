@@ -500,3 +500,8 @@ class ExperimentConfig(CommonExperimentConfig):
         ARInferenceExpConfig(),
         description="Configurable parameters for an inference experiment."
     )
+
+    def __post_init__(self):
+        """Set default model name for Action Recognition."""
+        if self.model_name is None:
+            self.model_name = "action_recognition"

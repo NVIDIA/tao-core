@@ -28,6 +28,7 @@ DOCKER_IMAGE_MAPPER = {
     "": os.getenv('IMAGE_DEFAULT', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt'),  # Default
     "API": os.getenv('IMAGE_API', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-api'),
     "TAO_DS": os.getenv('IMAGE_TAO_DS', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-data-services'),
+    "COSMOS_RL": os.getenv('IMAGE_COSMOS_RL', default='nvcr.io/nvstaging/tao/cosmos_rl_ram_dev:latest'),
     "VILA": os.getenv('IMAGE_VILA', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-vila'),
     "tensorboard": os.getenv('IMAGE_TAO_PYTORCH', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt')
 }
@@ -35,6 +36,8 @@ DOCKER_IMAGE_MAPPER = {
 
 DOCKER_IMAGE_VERSION = {  # (Release tao version for DNN framework, Overriden version for this model)
     "action_recognition": ("6.25.7", "6.0.0"),
+    "depth_net_mono": ("6.25.10", "6.25.10"),
+    "depth_net_stereo": ("6.25.10", "6.25.10"),
     "bevfusion": ("6.25.7", "6.0.0"),
     "centerpose": ("6.25.7", "6.0.0"),
     "classification_pyt": ("6.25.7", "6.0.0"),

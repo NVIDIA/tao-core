@@ -384,3 +384,8 @@ class ExperimentConfig(CommonExperimentConfig):
     evaluate: EvaluateConfig = DATACLASS_FIELD(EvaluateConfig())
     gen_trt_engine: MAEGenTrtEngineConfig = DATACLASS_FIELD(MAEGenTrtEngineConfig())
     export: ExportConfig = DATACLASS_FIELD(ExportConfig())
+
+    def __post_init__(self):
+        """Set default model name for MAE."""
+        if self.model_name is None:
+            self.model_name = "mae"

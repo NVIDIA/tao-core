@@ -27,6 +27,30 @@ from nvidia_tao_core.config.utils.types import (
 
 
 @dataclass
+class MonoBackBone:
+    """Define MonoBackBone dependency config"""
+
+    pretrained_path: Optional[str] = STR_FIELD(
+        value=None,
+        default_value="",
+        display_name="Pretrained path for mono backbone",
+        description="""Path to load depth anything v2 as an encoder for Monocular DepthNet""",
+    )
+    use_bn: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Batch normalization in Monocular DepthNet",
+        description="""A flag specifying whether to use batch normalization in Monocular DepthNet""",
+    )
+    use_clstoken: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Class token in Monocular DepthNet",
+        description="""A flag specifying whether to use class token""",
+    )
+
+
+@dataclass
 class StereoBackBone:
     """Define StereoBackBone dependency config"""
 
@@ -59,17 +83,25 @@ class DepthNetModelConfig:
     """DepthNet model config."""
 
     model_type: str = STR_FIELD(
-        value="MetricDepthAnythingV2",
-        default_value="MetricDepthAnythingV2",
+        value="MetricDepthAnything",
+        default_value="MetricDepthAnything",
         description="Network name",
         valid_options=",".join([
             "FoundationStereo", "MetricDepthAnything", "RelativeDepthAnything"
         ])
     )
-    stereo_back_bone: StereoBackBone = DATACLASS_FIELD(
+    mono_backbone: MonoBackBone = DATACLASS_FIELD(
+        MonoBackBone(),
+        value="",
+        default_value="",
+        display_name="Mono backbone configuration",
+        description="Network defined paths for Monocular DepthNet Backbone",
+    )
+    stereo_backbone: StereoBackBone = DATACLASS_FIELD(
         StereoBackBone(),
         value="",
         default_value="",
+        display_name="Stereo backbone configuration",
         description="Network defined paths for Edgenext and Depthanythingv2",
     )
     hidden_dims: List[int] = LIST_FIELD(
@@ -99,7 +131,6 @@ class DepthNetModelConfig:
         description="Train Iteration",
         display_name="train iteration",
         valid_min=1,
-        automl_enabled="TRUE"
     )
     valid_iters: int = INT_FIELD(
         value=22,
@@ -158,13 +189,6 @@ class DepthNetModelConfig:
         valid_options=",".join([
             "vits", "vitb", "vitl", "vitg"
         ])
-    )
-    load_checkpoint_strict: bool = BOOL_FIELD(
-        value=False,
-        display_name="checkpoint load check",
-        description="""
-        A boolean flag to expose how we load a pretrained checkpoint, whether strict or non strict.
-        """
     )
     max_disparity: int = INT_FIELD(
         value=416,

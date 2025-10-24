@@ -31,6 +31,7 @@ from nvidia_tao_core.microservices.handlers.cloud_storage import CloudStorage
 from nvidia_tao_core.microservices.handlers.ngc_handler import download_ngc_model, split_ngc_path
 from nvidia_tao_core.microservices.handlers.nvcf_handler import invoke_function
 from nvidia_tao_core.microservices.handlers.stateless_handlers import get_internal_job_status_update_data
+from nvidia_tao_core.distributed.decorators import master_node_only
 
 
 logger = logging.getLogger(__name__)
@@ -307,7 +308,8 @@ def get_file_modification_time(local_path):
         return 0
 
 
-def upload_files(local_path, cloud_storage, file_last_modified, selective_tarball_config=None):
+@master_node_only
+def upload_files(local_path, cloud_storage, file_last_modified, selective_tarball_config=None, exclude_patterns=None):
     """Uploads any detected changes to the specified cloud storage.
 
     Args:
@@ -315,6 +317,7 @@ def upload_files(local_path, cloud_storage, file_last_modified, selective_tarbal
         cloud_storage: An instance of the CloudStorage class for uploading files.
         file_last_modified: Dictionary to find modified files
         selective_tarball_config (dict): Configuration for selective tarball patterns to skip.
+        exclude_patterns (list, optional): List of regex patterns to exclude files from upload.
     """
     for root, _, files in os.walk(local_path):
         for filename in files:
@@ -327,6 +330,25 @@ def upload_files(local_path, cloud_storage, file_last_modified, selective_tarbal
                     file_path not in file_last_modified or
                     current_last_modified > file_last_modified[file_path]
                 ) and ("checkpoint-" not in file_path and "tmp" not in file_path):
+
+                    # Check exclude_patterns
+                    should_exclude = False
+                    if exclude_patterns:
+                        rel_path = os.path.relpath(file_path, local_path)
+                        for pattern in exclude_patterns:
+                            try:
+                                if re.search(pattern, rel_path) or re.search(pattern, filename):
+                                    should_exclude = True
+                                    logger.debug("Excluding file from upload due to pattern '%s': %s",
+                                                 pattern, rel_path)
+                                    break
+                            except re.error:
+                                logger.warning("Invalid regex pattern '%s', skipping", pattern)
+
+                    if should_exclude:
+                        # Update modification time but don't upload
+                        file_last_modified[file_path] = current_last_modified
+                        continue
 
                     # Skip files that will be included in selective tarball
                     if should_skip_file_for_tarball(file_path, local_path, selective_tarball_config):
@@ -443,7 +465,7 @@ def status_callback(data_string, retry=0):
             cleanup_cuda_contexts()
             raise ValueError("Status Callback was unsuccessful after multiple retries")
 
-        ngc_key = os.getenv("TAO_USER_KEY")
+        ngc_key = os.getenv("TAO_ADMIN_KEY")
         headers = {"Authorization": f"Bearer {ngc_key}"}
         if data_string and headers:
             status_url = os.getenv("TAO_LOGGING_SERVER_URL", "") + ":status_update"
@@ -475,6 +497,7 @@ def status_callback(data_string, retry=0):
                     try:
                         response = requests.post(status_url, json=data, headers=headers, timeout=REQUESTS_TIMEOUT)
                         if response.ok:
+                            logger.info(f"Status update with data {data} sent successfully")
                             return
                         logger.error(
                             "Failed to send status update. Status code: {}".format(  # noqa pylint: disable=C0209
@@ -532,7 +555,9 @@ def should_skip_file_for_tarball(file_path, local_path, selective_tarball_config
     return False
 
 
-def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0, selective_tarball_config=None):
+@master_node_only
+def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0,
+                       selective_tarball_config=None, exclude_patterns=None):
     """Monitors the specified local path and its subdirectories for new or modified files.
 
     Args:
@@ -541,6 +566,7 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0, s
         exit_event (threading.Event): An event to signal the thread to exit.
         seek_position (int): Initial seek position for log reading.
         selective_tarball_config (dict): Configuration for selective tarball patterns to skip.
+        exclude_patterns (list, optional): List of regex patterns to exclude files from upload.
 
     Returns:
         None
@@ -550,6 +576,8 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0, s
         patterns = selective_tarball_config.get("patterns", [])
         base_path = selective_tarball_config.get("base_path", "")
         logger.info("Selective tarball enabled - skipping patterns: %s in base_path: %s", patterns, base_path)
+    if exclude_patterns:
+        logger.info("Exclude patterns enabled for continuous upload: %s", exclude_patterns)
     file_last_modified = {}
 
     # Initialize file_last_modified with files that are already part of results dir
@@ -560,10 +588,10 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0, s
 
     try:
         while True:
-            upload_files(local_path, cloud_storage, file_last_modified, selective_tarball_config)
+            upload_files(local_path, cloud_storage, file_last_modified, selective_tarball_config, exclude_patterns)
             seek_position = send_logs_to_server(seek_position)
             if exit_event.is_set():
-                upload_files(local_path, cloud_storage, file_last_modified, selective_tarball_config)
+                upload_files(local_path, cloud_storage, file_last_modified, selective_tarball_config, exclude_patterns)
                 seek_position = send_logs_to_server(seek_position)
                 break
             time.sleep(30)  # Adjust the sleep interval as needed
@@ -663,7 +691,7 @@ def download_files_from_cloud(
         try:
             https_dictionary = ast.literal_eval(value)
             link = https_dictionary.get("link", "")
-            destination_path = https_dictionary.get("destination_path", "ptm/download")
+            destination_path = https_dictionary.get("destination_path", f"/ptm/{network_arch}/download")
             destination_folder = os.path.dirname(destination_path)
             download_from_https_link(link, destination_folder)
             dictionary[key] = destination_path
@@ -708,7 +736,7 @@ def download_files_from_cloud(
     if value.startswith("hf_model://"):
         try:
             huggingface_model = value.split("hf_model://")[-1]
-            download_huggingface_model(huggingface_model, "/ptm/download", os.getenv("HF_TOKEN", ""))
+            download_huggingface_model(huggingface_model, "/ptm/huggingface_models", os.getenv("HF_TOKEN", ""))
             dictionary[key] = "/ptm/huggingface_models"
             return "/ptm/huggingface_models"
         except Exception as e:
@@ -741,11 +769,17 @@ def download_files_from_spec(
     network_arch=None,
     ngc_key=None,
     reprocess_files=None,
-    preserve_source_path=False
+    preserve_source_path=False,
+    preserve_source_path_params=None,
+    current_path=""
 ):
     """Recursively download files from a nested dictionary."""
+    if preserve_source_path_params is None:
+        preserve_source_path_params = set()
     if isinstance(data, dict):
         for key, value in data.items():
+            # Build the current parameter path
+            new_path = f"{current_path}.{key}" if current_path else key
             if isinstance(value, dict):
                 download_files_from_spec(
                     cloud_data,
@@ -754,12 +788,16 @@ def download_files_from_spec(
                     network_arch=network_arch,
                     ngc_key=ngc_key,
                     reprocess_files=reprocess_files,
-                    preserve_source_path=preserve_source_path
+                    preserve_source_path=preserve_source_path,
+                    preserve_source_path_params=preserve_source_path_params,
+                    current_path=new_path
                 )
             elif isinstance(value, list):
                 override_list = []
                 for list_element in value:
                     if isinstance(list_element, str):
+                        # Check if this parameter should preserve source path
+                        param_preserve_source_path = preserve_source_path or new_path in preserve_source_path_params
                         override_value = download_files_from_cloud(
                             cloud_data,
                             data,
@@ -768,7 +806,7 @@ def download_files_from_spec(
                             job_id,
                             network_arch,
                             ngc_key,
-                            preserve_source_path=preserve_source_path
+                            preserve_source_path=param_preserve_source_path
                         )
                         if not override_value:
                             override_value = list_element
@@ -780,6 +818,10 @@ def download_files_from_spec(
                         override_dict = {}
                         for list_dict_key, list_dict_value in list_element.items():
                             if isinstance(list_dict_value, str):
+                                # Check if this parameter should preserve source path
+                                param_preserve_source_path = (
+                                    preserve_source_path or new_path in preserve_source_path_params
+                                )
                                 override_value = download_files_from_cloud(
                                     cloud_data,
                                     data,
@@ -788,7 +830,7 @@ def download_files_from_spec(
                                     job_id,
                                     network_arch,
                                     ngc_key,
-                                    preserve_source_path=preserve_source_path
+                                    preserve_source_path=param_preserve_source_path
                                 )
                                 if (reprocess_files is not None and override_value and
                                         (list_dict_value.endswith(".yaml") or list_dict_value.endswith(".json"))):
@@ -804,6 +846,8 @@ def download_files_from_spec(
                 data[key] = override_list
             else:
                 if isinstance(value, str):
+                    # Check if this parameter should preserve source path
+                    param_preserve_source_path = preserve_source_path or new_path in preserve_source_path_params
                     override_value = download_files_from_cloud(
                         cloud_data,
                         data,
@@ -813,7 +857,7 @@ def download_files_from_spec(
                         network_arch,
                         ngc_key,
                         reset_value=True,
-                        preserve_source_path=preserve_source_path
+                        preserve_source_path=param_preserve_source_path
                     )
                     if (reprocess_files is not None and override_value and
                             (value.endswith(".yaml") or value.endswith(".json"))):
@@ -844,26 +888,32 @@ def get_results_cloud_data(cloud_data, spec_data, dest_dir=None):
     return None, spec_data
 
 
-def create_tarball(source_dir, tarball_path, exclude_paths=None):
+def create_tarball(source_dir, tarball_path, exclude_paths=None, exclude_patterns=None):
     """Create a tarball from the source directory.
 
     Args:
         source_dir (str): Directory to tarball
         tarball_path (str): Path where the tarball will be created
         exclude_paths (set, optional): Set of relative paths to exclude from tarball
+        exclude_patterns (list, optional): List of regex patterns to exclude files from tarball
 
     Returns:
         bool: True if successful, False otherwise
     """
     try:
+        exclusion_info = []
         if exclude_paths:
-            logger.info("Creating tarball excluding %d pre-existing items: %s from source: %s",
-                        len(exclude_paths), tarball_path, source_dir)
+            exclusion_info.append(f"{len(exclude_paths)} pre-existing items")
+        if exclude_patterns:
+            exclusion_info.append(f"files matching patterns: {exclude_patterns}")
+        if exclusion_info:
+            logger.info("Creating tarball excluding %s: %s from source: %s",
+                        ", ".join(exclusion_info), tarball_path, source_dir)
         else:
             logger.info("Creating tarball: %s from source: %s", tarball_path, source_dir)
 
         with tarfile.open(tarball_path, 'w:gz') as tar:
-            if exclude_paths:
+            if exclude_paths or exclude_patterns:
                 # Walk through directory and selectively add files
                 files_added = 0
                 files_excluded = 0
@@ -873,8 +923,22 @@ def create_tarball(source_dir, tarball_path, exclude_paths=None):
                     for file in files:
                         file_path = os.path.join(root, file)
                         rel_path = os.path.relpath(file_path, source_dir)
+                        # Check if file should be excluded
+                        should_exclude = False
+                        # Check exclude_paths
+                        if exclude_paths and rel_path in exclude_paths:
+                            should_exclude = True
+                        # Check exclude_patterns
+                        if exclude_patterns and not should_exclude:
+                            for pattern in exclude_patterns:
+                                try:
+                                    if re.search(pattern, rel_path) or re.search(pattern, file):
+                                        should_exclude = True
+                                        break
+                                except re.error:
+                                    logger.warning("Invalid regex pattern '%s', skipping", pattern)
 
-                        if rel_path not in exclude_paths:
+                        if not should_exclude:
                             tar.add(file_path, arcname=rel_path)
                             files_added += 1
                         else:
@@ -886,7 +950,8 @@ def create_tarball(source_dir, tarball_path, exclude_paths=None):
                         rel_path = os.path.relpath(dir_path, source_dir)
 
                         # Check if directory is empty and wasn't in exclusion set
-                        if (rel_path not in exclude_paths and not os.listdir(dir_path)):  # Empty directory
+                        # Empty directory not in exclusion set
+                        if (not exclude_paths or rel_path not in exclude_paths) and not os.listdir(dir_path):
                             tar.add(dir_path, arcname=rel_path)
 
                 logger.info("Tarball created successfully: %s (%d files added, %d files excluded)",
@@ -903,6 +968,7 @@ def create_tarball(source_dir, tarball_path, exclude_paths=None):
         return False
 
 
+@master_node_only
 def upload_tarball_to_cloud(cloud_storage, tarball_path, remove_after_upload=True):
     """Upload a tarball to cloud storage.
 

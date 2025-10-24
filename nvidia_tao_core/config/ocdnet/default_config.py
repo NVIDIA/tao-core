@@ -970,3 +970,8 @@ class ExperimentConfig(CommonExperimentConfig):
         OCDNetPruneExpConfig(),
         description="Configurable parameters to construct the pruner for an OCDNet experiment.",
     )
+
+    def __post_init__(self):
+        """Set default model name for OCDNet."""
+        if self.model_name is None:
+            self.model_name = "ocdnet"

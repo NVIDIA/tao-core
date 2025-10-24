@@ -143,7 +143,17 @@ def _get_valid_config_json_param_for_network(network_name: str, param: str):
     return actions
 
 
-def _get_network_architectures() -> list[str]:
+def _get_mapped_network_architectures(config: dict, architectures: set[str], arch_name: str = None) -> None:
+    """Get mapped network architectures from config files."""
+    actions_mapping = config.get("actions_mapping", {})
+    for _, mapping in actions_mapping.items():
+        if "network" in mapping:
+            architectures.add(mapping["network"])
+            if arch_name and arch_name in architectures and arch_name != mapping["network"]:
+                architectures.remove(arch_name)
+
+
+def _get_network_architectures(get_mapped: bool = False) -> set[str]:
     """Scan config directory for .config.json files to determine valid network architectures.
 
     Returns:
@@ -164,14 +174,15 @@ def _get_network_architectures() -> list[str]:
                     if arch_name not in ["image_classification",
                                          "object_detection",
                                          "segmentation",
-                                         "character_recognition"]:
+                                         "character_recognition",
+                                         "vlm",
+                                         "maxine_dataset"]:
                         architectures.add(arch_name)
-
-                    # Add networks from action mappings
-                    actions_mapping = config.get("actions_mapping", {})
-                    for _, mapping in actions_mapping.items():
-                        if "network" in mapping:
-                            architectures.add(mapping["network"])
+                    else:
+                        # Add networks from action mappings
+                        _get_mapped_network_architectures(config, architectures)
+                    if get_mapped:
+                        _get_mapped_network_architectures(config, architectures, arch_name)
 
             except (json.JSONDecodeError, IOError):
                 continue
@@ -412,6 +423,10 @@ ActionEnum = enum.Enum('ActionEnum', {name: name for name in actions}, type=str)
 
 network_architectures = _get_network_architectures()
 ExperimentNetworkArch = enum.Enum('ExperimentNetworkArch', {name: name for name in network_architectures}, type=str)
+container_network_architectures = _get_network_architectures(get_mapped=True)
+ContainerNetworkArch = enum.Enum(
+    'ContainerNetworkArch', {name: name for name in container_network_architectures}, type=str
+)
 
 metrics = _get_all_metrics()
 Metrics = enum.Enum('Metrics', {name: name for name in metrics}, type=str)
