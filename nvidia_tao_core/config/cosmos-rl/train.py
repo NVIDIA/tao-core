@@ -14,11 +14,12 @@
 
 """Default config file"""
 
-from typing import List, Optional, Union
+from typing import List, Dict, Optional, Union
 from dataclasses import dataclass
 
 from nvidia_tao_core.config.utils.types import (
     BOOL_FIELD,
+    DICT_FIELD,
     FLOAT_FIELD,
     STR_FIELD,
     INT_FIELD,
@@ -46,12 +47,6 @@ class DatasetConfig:
         value="data/sft/train2017",
         display_name="Media directory path",
         description="Path to the media directory"
-    )
-    system_prompt: Optional[str] = STR_FIELD(
-        default_value="",
-        value="",
-        display_name="System prompt",
-        description="System prompt."
     )
 
 
@@ -212,6 +207,14 @@ class LoraConfig:
         automl_enabled="TRUE"
     )
 
+    r_pattern: Optional[Dict[str, int]] = DICT_FIELD(
+        hashMap={},
+        display_name="LoRA rank pattern",
+        description="Per-module overrides for LoRA rank r. Keys are regex patterns; "
+                    "evaluated in insertion order, first match wins. Example: "
+                    "{'visual\\..*': 16, 'attn.*': 8}",
+    )
+
     lora_alpha: int = INT_FIELD(
         value=8,
         default_value=8,
@@ -221,6 +224,14 @@ class LoraConfig:
         display_name="LoRA alpha",
         description="LoRA alpha (must be power of 2)",
         automl_enabled="TRUE"
+    )
+
+    alpha_pattern: Optional[Dict[str, float]] = DICT_FIELD(
+        hashMap={},
+        display_name="LoRA alpha pattern",
+        description="Per-module overrides for lora_alpha. Keys are regex patterns; "
+                    "evaluated in insertion order, first match wins. Example: "
+                    "{'visual\\..*': 32.0, 'attn.*': 16.0}",
     )
 
     lora_dropout: float = FLOAT_FIELD(
@@ -233,15 +244,14 @@ class LoraConfig:
         automl_enabled="TRUE"
     )
 
-    target_modules: Optional[List[str]] = SUBSET_LIST_FIELD(
+    target_modules: Union[List[str], str] = SUBSET_LIST_FIELD(
         arrList=["q_proj", "v_proj"],
         valid_options=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "gate_proj",
                        "down_proj", "attn.qkv", "attn.proj", "all-linear"],
         default_value=["q_proj", "v_proj"],
         display_name="LoRA target modules",
-        description="LoRA target modules, subset of valid options. Cannot include "
-                    "attn.qkv or attn.proj if modules_to_save contains 'visual'",
-        automl_enabled="TRUE",
+        description="LoRA target modules, subset of valid options. Can be a list of strings or 'all-linear'. "
+                    "Cannot include attn.qkv or attn.proj if modules_to_save contains 'visual'",
         depends_on="policy.lora.modules_to_save"
     )
 
@@ -260,7 +270,6 @@ class LoraConfig:
         display_name="Modules to save",
         description="List of modules apart from LoRA layers to be set as trainable "
                     "and saved in the final checkpoint. Can be None or ['visual']",
-        automl_enabled="TRUE",
         parent_param="TRUE",
         default_value=[]
     )
@@ -330,7 +339,7 @@ class TrainConfig:
     epoch: int = INT_FIELD(
         value=10,
         default_value=10,
-        valid_min=10,
+        valid_min=1,
         valid_max=20,
         display_name="Number of Epochs",
         description="The number of epochs.",
@@ -364,13 +373,16 @@ class TrainConfig:
         description="Output directory."
     )
 
-    optm_lr: float = FLOAT_FIELD(
+    optm_lr: Union[float, List[float]] = UNION_FIELD(
         value=1e-6,
+        union_types=["float", "list"],
         default_value=1e-6,
         valid_min=0,
         valid_max="inf",
         display_name="Learning rate",
-        description="Learning rate.",
+        description="Learning rate for optimizer. Can be a single float (applied to whole model) "
+                    "or a list of 2 floats [llm_lr, vision_lr] for separate learning rates "
+                    "for language model and vision encoder during full SFT finetuning.",
         automl_enabled="TRUE"
     )
 
@@ -424,15 +436,15 @@ class TrainConfig:
         valid_options="AdamW,Adam",
         display_name="Optimizer name",
         description="Name of the optimizer to use.",
-        automl_enabled="TRUE"
     )
 
     optm_betas: List[float] = LIST_FIELD(
         arrList=[0.9, 0.999],
         display_name="Optimizer betas",
         description="Beta parameters for Adam/AdamW optimizer.",
-        automl_enabled="TRUE",
-        value_type="list_2"
+        value_type="list_2",
+        valid_min=[0.8, 0.9],
+        valid_max=[0.95, 0.999]
     )
 
     optm_warmup_epochs: Optional[Union[int, float]] = UNION_FIELD(
@@ -444,8 +456,16 @@ class TrainConfig:
         math_cond="/ 2",
         display_name="Warmup epochs",
         description="Number of warmup epochs for learning rate scheduler (epochs / 2).",
-        automl_enabled="TRUE",
         depends_on="train.epoch"
+    )
+    optm_decay_type: str = STR_FIELD(
+        value="linear",
+        default_value="linear",
+        valid_options="linear,sqrt,cosine,none",
+        option_weights=[0.1, 0.1, 0.4, 0.4],
+        display_name="Decay type",
+        description="Type of decay for learning rate scheduler. Weights: none=0.4, cosine=0.4, linear=0.1, sqrt=0.1",
+        automl_enabled="TRUE"
     )
 
     async_tp_enabled: bool = BOOL_FIELD(
@@ -509,6 +529,32 @@ class TrainConfig:
 
 
 @dataclass
+class ValidationDatasetConfig:
+    """Validation dataset config."""
+
+    name: str = STR_FIELD(
+        value="",
+        default_value="",
+        display_name="Dataset name",
+        description="Name of the dataset."
+    )
+
+    subset: str = STR_FIELD(
+        value="",
+        default_value="",
+        display_name="Dataset subset",
+        description="Subset of the dataset."
+    )
+
+    split: str = STR_FIELD(
+        value="train",
+        default_value="train",
+        display_name="Dataset split",
+        description="Split of the dataset."
+    )
+
+
+@dataclass
 class ValidationConfig:
     """Validation config."""
 
@@ -525,6 +571,34 @@ class ValidationConfig:
         valid_max="inf",
         display_name="Validation frequency",
         description="Validation frequency."
+    )
+    dataset: Optional[ValidationDatasetConfig] = DATACLASS_FIELD(
+        ValidationDatasetConfig(), description="Validation dataset config."
+    )
+    batch_size: int = INT_FIELD(
+        value=4,
+        default_value=4,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Batch size",
+        description="Batch size."
+    )
+    dataloader_num_workers: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=0,
+        valid_max="inf",
+        display_name="Dataloader num workers",
+        description="Number of worker processes for data loading."
+    )
+
+    dataloader_prefetch_factor: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Dataloader prefetch factor",
+        description="Number of batches to prefetch per worker."
     )
 
 
@@ -656,8 +730,15 @@ class VisionConfig:
 class CustomConfig:
     """Custom config."""
 
-    dataset: DatasetConfig = DATACLASS_FIELD(DatasetConfig(), description="Dataset config.")
+    train_dataset: DatasetConfig = DATACLASS_FIELD(DatasetConfig(), description="Training dataset config.")
+    val_dataset: Optional[DatasetConfig] = DATACLASS_FIELD(None, description="Validation dataset config (optional).")
     vision: VisionConfig = DATACLASS_FIELD(VisionConfig(), description="Vision config.")
+    system_prompt: Optional[str] = STR_FIELD(
+        default_value="",
+        value="",
+        display_name="System prompt",
+        description="System prompt."
+    )
 
 
 @dataclass
@@ -681,3 +762,9 @@ class ExperimentConfig:
         description="Output directory."
     )
     custom: CustomConfig = DATACLASS_FIELD(CustomConfig(), description="Custom config.")
+    custom_script: Optional[str] = STR_FIELD(
+        default_value="",
+        value="",
+        display_name="Custom script",
+        description="Custom script."
+    )

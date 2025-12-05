@@ -16,24 +16,29 @@
 import numpy as np
 import math
 import logging
+import os
 
-from nvidia_tao_core.microservices.automl.utils import (
+from nvidia_tao_core.microservices.utils.automl_utils import (
     ResumeRecommendation, JobStates, get_valid_range, clamp_value
 )
 from nvidia_tao_core.microservices.automl.automl_algorithm_base import AutoMLAlgorithmBase
-from nvidia_tao_core.microservices.handlers.utilities import get_flatten_specs
-from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+from nvidia_tao_core.microservices.utils.handler_utils import get_flatten_specs
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     save_job_specs,
     get_job_specs,
     save_automl_brain_info,
     get_automl_brain_info
 )
+from nvidia_tao_core.microservices.automl import network_utils
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -46,7 +51,7 @@ class HyperBand(AutoMLAlgorithmBase):
         Args:
             root: handler root
             network: model we are running AutoML on
-            parameters: automl sweepable parameters
+            parameters: automl sweepable parameters (epoch params will be filtered out)
             R: the maximum amount of resource that can be allocated to a single configuration
             nu: an input that controls the proportion of configurations discarded in each round of SuccessiveHalving
             epoch_multiplier: multiplying factor for epochs
@@ -66,23 +71,59 @@ class HyperBand(AutoMLAlgorithmBase):
         self.expt_iter = 0  # Recommendations within the SH
         self.complete = False
         self.reverse_sort = True
+        logger.info(f"Hyperband initialized with R={R}, nu={nu}, epoch_multiplier={self.epoch_multiplier}")
 
     def brackets_and_sh_sequence(self, R, nu):
         """Generate ni,ri arrays based on R and nu values"""
         smax = int(np.log(R) / np.log(nu))
+        logger.info(f"Hyperband bracket calculation: R={R}, nu={nu}, smax={smax}")
         for itr, s in enumerate(range(smax, 0, -1)):
             self.ni[str(itr)] = []
             self.ri[str(itr)] = []
             n = int(math.ceil(int((smax + 1) / (s + 1)) * (nu**s)))
             r = int(R / (nu**s))
+            logger.info(f"  Bracket {itr} (s={s}): initial n={n}, r={r}")
             for s_idx in range(s + 1):
                 ni = int(n * (nu**(-s_idx)))
                 ri = int(r * (nu**s_idx))
                 self.ni[str(itr)].append(ni)
                 self.ri[str(itr)].append(ri)
+            logger.info(f"  Bracket {itr} final: ni={self.ni[str(itr)]}, ri={self.ri[str(itr)]}")
+        logger.info(f"All brackets: ni={self.ni}, ri={self.ri}")
+
+    def _is_epoch_parameter(self, param_name):
+        """Check if a parameter controls epoch count
+
+        Args:
+            param_name: Flattened parameter name (e.g., "train_config.num_epochs")
+
+        Returns:
+            bool: True if parameter controls epoch count
+        """
+        # Simple epoch parameter names at root level
+        if param_name in ("num_epochs", "epochs", "n_epochs", "max_iters", "epoch"):
+            return True
+
+        # Split the parameter name to check nested paths
+        parts = param_name.split(".")
+
+        # Check if any part is in epoch-related config sections
+        has_training_config = any(
+            p in ("training_config", "train_config", "train") for p in parts
+        )
+        has_epoch_key = any(
+            p in ("num_epochs", "epochs", "n_epochs", "max_iters", "epoch", "max_epochs")
+            for p in parts
+        )
+
+        return has_training_config and has_epoch_key
 
     def override_num_epochs(self, num_epochs):
-        """Override num epochs parameter in train spec file"""
+        """Override num epochs parameter in train spec file
+
+        This ensures bracket-based epoch control by updating all epoch-related
+        parameters in the spec, regardless of automl_params settings.
+        """
         spec = get_job_specs(self.job_context.id)
         for key1 in spec:
             if key1 in ("training_config", "train_config", "train"):
@@ -124,7 +165,8 @@ class HyperBand(AutoMLAlgorithmBase):
             v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
 
             # Apply math condition if specified
-            if math_cond and type(math_cond) is str:
+            # Skip relational constraints (like "> depends_on") as they're handled in base class
+            if math_cond and type(math_cond) is str and "depends_on" not in math_cond:
                 parts = math_cond.split(" ")
                 if len(parts) >= 2:
                     operator = parts[0]
@@ -148,7 +190,17 @@ class HyperBand(AutoMLAlgorithmBase):
                 if ((type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or
                         (type(parent_param) is bool and parent_param)):
                     self.parent_params[parameter_config.get("parameter")] = random_float
-            return random_float
+
+            # Apply network-specific parameter logic
+            return network_utils.apply_network_specific_param_logic(
+                network=self.network,
+                data_type=tp,
+                parameter_name=parameter_name,
+                value=random_float,
+                v_max=v_max,
+                default_train_spec=self.default_train_spec,
+                parent_params=self.parent_params
+            )
 
         return super().generate_automl_param_rec_value(parameter_config)
 
@@ -206,6 +258,12 @@ class HyperBand(AutoMLAlgorithmBase):
         if self.sh_iter == 0:
             specs = self._generate_random_parameters()
             self.epoch_number = self.ri[self.bracket][self.sh_iter] * self.epoch_multiplier
+            final_epoch = self.ri[self.bracket][-1] * self.epoch_multiplier
+            self.override_num_epochs(final_epoch)
+            logger.info(
+                f"Hyperband: New experiment in bracket {self.bracket}, SH iter {self.sh_iter}, "
+                f"will_pause_at_epoch={self.epoch_number}, spec_total_epochs={final_epoch}"
+            )
             to_return = specs
         else:
             # Do successive halving on the last bracket
@@ -231,6 +289,13 @@ class HyperBand(AutoMLAlgorithmBase):
                     )[0:self.ni[self.bracket][self.sh_iter]]
 
             self.epoch_number = self.ri[self.bracket][self.sh_iter] * self.epoch_multiplier
+            final_epoch = self.ri[self.bracket][-1] * self.epoch_multiplier
+            self.override_num_epochs(final_epoch)
+            logger.info(
+                f"Hyperband: Resume experiment in bracket {self.bracket}, SH iter {self.sh_iter}, "
+                f"will_run_to_epoch={self.epoch_number}, spec_total_epochs={final_epoch}, "
+                f"resume_from={self.resume_epoch_number}"
+            )
             resumerec = ResumeRecommendation(
                 self.experiments_considered[self.expt_iter].id,
                 self.experiments_considered[self.expt_iter].specs
@@ -245,10 +310,19 @@ class HyperBand(AutoMLAlgorithmBase):
         return self.complete
 
     def _generate_random_parameters(self):
-        """Generates random parameter values for a recommendation"""
+        """Generates random parameter values for a recommendation
+
+        Note: Epoch-controlling parameters are skipped because Hyperband controls
+        epochs via bracket configuration. The actual epoch count is set by
+        override_num_epochs() based on ri[bracket][sh_iter] * epoch_multiplier.
+        """
         hyperparam_dict = {}
         for param in self.parameters:
             name = param["parameter"]
+            # Skip epoch parameters in Hyperband - epochs are controlled by brackets
+            if self._is_epoch_parameter(name):
+                logger.info(f"Skipping epoch parameter in Hyperband (bracket-controlled): {name}")
+                continue
             rec = self.generate_automl_param_rec_value(param)
             logger.info(f"Generated random parameter in hyperband: {name} = {rec}")
             hyperparam_dict[name] = rec

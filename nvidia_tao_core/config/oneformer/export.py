@@ -98,7 +98,7 @@ class OneFormerExportExpConfig:
         value=-1,
         default_value=-1,
         valid_min=-1,
-        description="The batch size of the input Tensor for the engine",
+        description="The batch size of the input Tensor for the engine. A value of -1 implies dynamic tensor shapes.",
         display_name="batch size"
     )
     verbose: bool = BOOL_FIELD(

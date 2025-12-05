@@ -22,10 +22,13 @@ from urllib import parse
 import logging
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 mongodb_crd_group = 'mongodbcommunity.mongodb.com'
@@ -208,12 +211,11 @@ if __name__ == "__main__":
     logger.info("Mongo Operator Enabled: %s", mongo_operator_enabled)
     if not mongo_operator_enabled:
         try:
-            from handlers.mongo_handler import MongoHandler
+            from .utils.mongo_utils import MongoHandler
             # try to make a test connection to DB replicaset
             mongo_experiments = MongoHandler(
                 "tao",
-                "experiments",
-                retries=1
+                "experiments"
             )
         except Exception as e:  # if error, initialize replicaset
             logger.error("Exception caught in mongodb start with message %s", str(e))

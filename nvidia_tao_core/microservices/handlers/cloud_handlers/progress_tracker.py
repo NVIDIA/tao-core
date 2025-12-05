@@ -184,14 +184,24 @@ class ProgressTracker:
                 else:
                     current_file_info = ""
 
-                message = (
-                    f"{current_file_info}"
-                    f"Total {self.operation_type.capitalize()} Progress: "
-                    f"{current_file_count}/{self.total_files} files ({file_progress:.1f}%), "
-                    f"{format_size(self.processed_size_mb)}/{format_size(self.total_size_mb)} "
-                    f"({size_progress:.1f}%), Remaining: {remaining_files} files, "
-                    f"{format_size(remaining_size_mb)}, ETA: {eta_str}"
-                )
+                # Prioritize size-based progress for single large downloads (like HF models)
+                # to avoid showing misleading "0/1 files" when size shows significant progress
+                if self.total_files == 1 and size_progress > 5.0:
+                    message = (
+                        f"{current_file_info}"
+                        f"Total {self.operation_type.capitalize()} Progress: "
+                        f"{format_size(self.processed_size_mb)}/{format_size(self.total_size_mb)} "
+                        f"({size_progress:.1f}%), Remaining: {format_size(remaining_size_mb)}, ETA: {eta_str}"
+                    )
+                else:
+                    message = (
+                        f"{current_file_info}"
+                        f"Total {self.operation_type.capitalize()} Progress: "
+                        f"{current_file_count}/{self.total_files} files ({file_progress:.1f}%), "
+                        f"{format_size(self.processed_size_mb)}/{format_size(self.total_size_mb)} "
+                        f"({size_progress:.1f}%), Remaining: {remaining_files} files, "
+                        f"{format_size(remaining_size_mb)}, ETA: {eta_str}"
+                    )
             elif self.total_files > 0:
                 current_file_info = f"Current file {self.operation_type}: {self.file_name}; " if self.file_name else ""
                 if self.processed_size_mb > 0:

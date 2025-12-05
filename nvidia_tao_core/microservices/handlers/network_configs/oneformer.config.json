@@ -1,0 +1,241 @@
+{
+    "api_params": {
+        "dataset_type": "segmentation",
+        "actions": [
+            "train",
+            "evaluate",
+            "export",
+            "inference",
+            "gen_trt_engine"
+        ],
+        "formats": [
+            "coco_panoptic",
+            "coco"
+        ],
+        "accepted_ds_intents": [
+            "training",
+            "evaluation",
+            "testing"
+        ],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference",
+            "gen_trt_engine": "gen_trt_engine"
+        }
+    },
+    "data_sources": {
+        "train": {
+            "dataset.train.images": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.train.annotations": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.label_map": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "label_map.json"
+            },
+            "dataset.train.panoptic": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.annotations": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.val.panoptic": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.test.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            }
+        },
+        "evaluate": {
+            "dataset.train.images": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.label_map": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "label_map.json"
+            },
+            "dataset.train.annotations": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.train.panoptic": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.annotations": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.val.panoptic": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.test.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.test.annotations": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.test.panoptic": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            }
+            
+        },
+        "inference": {
+            "dataset.train.images": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.label_map": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "coco_panoptic": "label_map_panoptic.json",
+                    "*": "label_map.json"
+                }
+            },
+            "dataset.train.annotations": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.train.panoptic": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.annotations": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.val.panoptic": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.test.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            }
+        }
+    },
+    "spec_params": {
+        "train": {
+            "results_dir": "output_dir",
+            "encryption_key": "key",
+            "train.pretrained_backbone": "{'link': 'https://github.com/SwinTransformer/storage/releases/download/v1.0.8/swin_tiny_patch4_window7_224_22k.pth', 'destination_path': '/ptm/mask2former/swin_tiny_patch4_window7_224_22k/swin_tiny_patch4_window7_224_22k.pth'}",
+            "train.pretrained_model": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model"
+        },
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "evaluate.trt_engine": "parent_model",
+            "encryption_key": "key"
+        },
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "inference.trt_engine": "parent_model",
+            "encryption_key": "key"
+        },
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
+        },
+        "gen_trt_engine": {
+            "results_dir": "output_dir",
+            "encryption_key": "key",
+            "gen_trt_engine.onnx_file": "parent_model",
+            "gen_trt_engine.trt_engine": "create_engine_file"
+        }
+    },
+    "automl_spec_params": {
+        "results_dir": "automl_output_dir",
+        "train.pretrained_backbone": "{'link': 'https://github.com/SwinTransformer/storage/releases/download/v1.0.8/swin_tiny_patch4_window7_224_22k.pth', 'destination_path': '/ptm/mask2former/swin_tiny_patch4_window7_224_22k/swin_tiny_patch4_window7_224_22k.pth'}",
+        "train.pretrained_model": "ptm_if_no_resume_model",
+        "train.resume_training_checkpoint_path": "automl_resume_model",
+        "train.checkpoint_interval": "assign_const_value,train.num_epochs",
+        "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key": "key"
+    },
+    "metrics": {
+        "available_metrics": [
+            "mIoU"
+        ],
+        "monitoring_metric": "mIoU"
+    },
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        }
+    }
+}

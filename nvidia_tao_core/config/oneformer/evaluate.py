@@ -15,6 +15,7 @@
 
 from typing import List
 from dataclasses import dataclass
+from nvidia_tao_core.config.common.common_config import EvaluateConfig
 
 from nvidia_tao_core.config.utils.types import (
     INT_FIELD,
@@ -24,7 +25,7 @@ from nvidia_tao_core.config.utils.types import (
 
 
 @dataclass
-class OneFormerEvaluateConfig:
+class OneFormerEvaluateConfig(EvaluateConfig):
     """Evaluation configuration for OneFormer."""
 
     num_gpus: int = INT_FIELD(
@@ -51,4 +52,9 @@ class OneFormerEvaluateConfig:
         value="",
         description="Path to the results directory.",
         display_name="Results directory",
+    )
+    trt_engine: str = STR_FIELD(
+        value="",
+        description="Path to the TensorRT engine to be used for evaluation.",
+        display_name="TensorRT Engine",
     )

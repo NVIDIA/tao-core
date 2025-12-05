@@ -22,16 +22,20 @@ from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 from scipy.stats import norm
 from scipy.optimize import minimize
 
-from nvidia_tao_core.microservices.automl.utils import JobStates, get_valid_range, clamp_value
+from nvidia_tao_core.microservices.automl import network_utils
+from nvidia_tao_core.microservices.utils.automl_utils import JobStates, get_valid_range, clamp_value
 from nvidia_tao_core.microservices.automl.automl_algorithm_base import AutoMLAlgorithmBase
-from nvidia_tao_core.microservices.handlers.utilities import get_total_epochs, get_flatten_specs
-from nvidia_tao_core.microservices.handlers.stateless_handlers import save_automl_brain_info, get_automl_brain_info
+from nvidia_tao_core.microservices.utils.handler_utils import get_total_epochs, get_flatten_specs
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import save_automl_brain_info, get_automl_brain_info
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +95,8 @@ class Bayesian(AutoMLAlgorithmBase):
             v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
 
             # Apply math condition if specified
-            if math_cond and type(math_cond) is str:
+            # Skip relational constraints (like "> depends_on") as they're handled in base class
+            if math_cond and type(math_cond) is str and "depends_on" not in math_cond:
                 parts = math_cond.split(" ")
                 if len(parts) >= 2:
                     operator = parts[0]
@@ -116,7 +121,17 @@ class Bayesian(AutoMLAlgorithmBase):
                     isinstance(parent_param, bool) and parent_param
                 ):
                     self.parent_params[parameter_name] = quantized
-            return quantized
+
+            # Apply network-specific parameter logic
+            return network_utils.apply_network_specific_param_logic(
+                network=self.network,
+                data_type=data_type,
+                parameter_name=parameter_name,
+                value=quantized,
+                v_max=v_max,
+                default_train_spec=self.default_train_spec,
+                parent_params=self.parent_params
+            )
 
         return super().generate_automl_param_rec_value(parameter_config)
 
@@ -146,7 +161,20 @@ class Bayesian(AutoMLAlgorithmBase):
 
         len_y = len(ys)
         if Xs and ys:
-            bayesian.gp.fit(np.array(Xs[:len_y]), np.array(ys))
+            Xs_npy = np.array(Xs[:len_y])
+            ys_npy = np.array(ys)
+
+            # Validate data before fitting - check for inf/nan values
+            if np.any(np.isinf(ys_npy)) or np.any(np.isnan(ys_npy)):
+                logger.warning(
+                    "Detected inf/nan values in loaded training data. "
+                    "Replacing inf with large finite values and nan with 0."
+                )
+                ys_npy = np.nan_to_num(ys_npy, nan=0.0, posinf=1e7, neginf=-1e7)
+                # Update the loaded ys with cleaned values
+                bayesian.ys = ys_npy.tolist()
+
+            bayesian.gp.fit(Xs_npy, ys_npy)
 
         return bayesian
 
@@ -193,10 +221,25 @@ class Bayesian(AutoMLAlgorithmBase):
         return [dict(zip([param["parameter"] for param in self.parameters], recommendations))]
 
     def update_gp(self):
-        """Update gausian regressor parameters"""
+        """Update gaussian regressor parameters"""
         Xs_npy = np.array(self.Xs)
         ys_npy = np.array(self.ys)
-        self.gp.fit(Xs_npy, ys_npy)
+
+        # Validate data before fitting - check for inf/nan values
+        if np.any(np.isinf(ys_npy)) or np.any(np.isnan(ys_npy)):
+            logger.warning(
+                f"Detected inf/nan values in training data. "
+                f"ys_npy: {ys_npy}. "
+                f"Replacing inf with large finite values and nan with 0."
+            )
+            # Replace inf with large finite value (1e7) and nan with 0
+            ys_npy = np.nan_to_num(ys_npy, nan=0.0, posinf=1e7, neginf=-1e7)
+            logger.info(f"Cleaned ys_npy: {ys_npy}")
+
+        if len(Xs_npy) > 0 and len(ys_npy) > 0:
+            self.gp.fit(Xs_npy, ys_npy)
+        else:
+            logger.warning("No valid training data available for Gaussian Process")
 
     def optimize_ei(self):
         """Optmize expected improvement functions"""

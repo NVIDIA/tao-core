@@ -26,14 +26,20 @@ import uuid
 import random
 import requests
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from packaging import version
 from enum import Enum
 import logging
 
 if os.getenv("AIRGAPPED_MODE", "False").lower() == "false":
-    from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
-from nvidia_tao_core.microservices.handlers.ngc_handler import get_ngc_token_from_api_key
-from nvidia_tao_core.microservices.utils import read_network_config, get_admin_key, safe_load_file
+    from nvidia_tao_core.microservices.utils.mongo_utils import MongoHandler
+from nvidia_tao_core.microservices.utils.ngc_utils import get_ngc_token_from_api_key
+from nvidia_tao_core.microservices.utils.core_utils import (
+    read_network_config,
+    get_admin_key,
+    safe_load_file,
+    get_orchestration_network_from_microservices
+)
 from nvidia_tao_core.microservices.handlers.cloud_handlers.huggingface import (
     download_huggingface_model as download_hf_model
 )
@@ -43,14 +49,18 @@ from nvidia_tao_core.microservices.enum_constants import (
     BaseExperimentDomain,
     BaseExperimentBackboneClass,
     BaseExperimentBackboneType,
-    BaseExperimentLicense
+    BaseExperimentLicense,
+    ExperimentNetworkArch
 )
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 base_exp_uuid = "00000000-0000-0000-0000-000000000000"
@@ -99,6 +109,8 @@ class BaseExperimentMetadata:
         self.dry_run = dry_run
         self._cached_tao_version: str | None = None
         self._ngc_clients_cache: dict = {}  # Cache for NGC clients per org/team
+        self._network_config_cache: dict = {}  # Cache for network configs
+        self._max_workers = int(os.getenv("PTM_MAX_WORKERS", "10"))  # Configurable parallelism
 
         if self.override and self.dry_run:
             raise ValueError("Cannot use both `--override` and `--dry-run` flags together!")
@@ -122,9 +134,6 @@ class BaseExperimentMetadata:
 
         # create rootdir if it doesn't exist
         os.makedirs(self.rootdir, exist_ok=True)
-
-        # create a list of all supported network architectures
-        self.supported_network_archs = self.get_supported_network_archs()
 
         # set tao version and comparison operators
         self.tao_version = None  # type: version.Version
@@ -194,6 +203,53 @@ class BaseExperimentMetadata:
 
         return self._ngc_clients_cache[client_key]
 
+    def get_network_config_cached(self, network_arch: str):
+        """Get network config with caching to avoid repeated file reads
+
+        Tries to load the config in the following order:
+        1. Direct network config for network_arch
+        2. Orchestration network config (if network_arch is a microservices network)
+        3. Default fallback config
+
+        Args:
+            network_arch: Network architecture name
+
+        Returns:
+            dict: Network configuration
+        """
+        if network_arch not in self._network_config_cache:
+            # Try loading direct network config first
+            try:
+                self._network_config_cache[network_arch] = read_network_config(network_arch)
+                logger.debug(f"Cached network config for {network_arch} (direct)")
+                if not self._network_config_cache[network_arch]:
+                    logger.debug(f"Could not load direct network config for {network_arch}")
+                    # Try to find orchestration network and load its config
+                    orchestration_network = get_orchestration_network_from_microservices(network_arch)
+                    if orchestration_network != network_arch:
+                        self._network_config_cache[network_arch] = read_network_config(orchestration_network)
+                        logger.info(
+                            f"Cached network config for {network_arch} using "
+                            f"orchestration network: {orchestration_network}"
+                        )
+                    else:
+                        # No orchestration mapping found, use default
+                        raise Exception("No orchestration network mapping found")
+            except Exception as e:
+                logger.warning(
+                    f"Could not load network config for {network_arch} or its orchestration network: {e}"
+                )
+                # Cache default config to avoid repeated failures
+                self._network_config_cache[network_arch] = {
+                    "api_params": {
+                        "dataset_type": "object_detection",
+                        "actions": ["train", "evaluate", "inference"],
+                        "accepted_ds_intents": ["training", "evaluation"],
+                        "formats": ["coco"]
+                    }
+                }
+        return self._network_config_cache[network_arch]
+
     def check_version_compatibility(self, version_list: list):
         """Check if the current TAO version is compatible with the provided version list"""
         if self.tao_version is None:
@@ -212,6 +268,35 @@ class BaseExperimentMetadata:
             if not version_ok:
                 break
         return version_ok
+
+    def validate_network_endpoint(self, network_arch: str):
+        """Validate that network architecture is a valid endpoint (not orchestration-only).
+
+        Args:
+            network_arch: Network architecture name to validate
+
+        Raises:
+            ValueError: If network is orchestration-only without a dedicated config file
+
+        A valid endpoint must either:
+        1. Have its own config file (e.g., visual_changenet_classify, visual_changenet_segment)
+        2. Be a microservices network that maps to a different orchestration network
+           (e.g., auto_label -> object_detection)
+
+        Invalid endpoints are orchestration-only networks without config files that map to
+        themselves (e.g., visual_changenet)
+        """
+        direct_config = read_network_config(network_arch)
+        if not direct_config:
+            # Check if this is a microservices network that maps to a different orchestration network
+            orchestration_network = get_orchestration_network_from_microservices(network_arch)
+            if orchestration_network == network_arch:
+                # This network doesn't have a config and doesn't map to a different orchestration network
+                # It's an orchestration-only network that shouldn't be used as an endpoint
+                raise ValueError(
+                    f"Entrypoint `{network_arch}` is not supported. "
+                    f"This is an orchestration-only network without a dedicated config file."
+                )
 
     def get_ngc_token(self, org: str = "", team: str = ""):
         """Authenticate to NGC"""
@@ -312,14 +397,6 @@ class BaseExperimentMetadata:
         return org_teams
 
     @staticmethod
-    def get_supported_network_archs():
-        """Get the list of all supported network architectures by API"""
-        # remove .config.json (12 charachter) from the end of the file name
-        return [
-            arch[:-12] for arch in os.listdir(f"{os.path.dirname(os.path.abspath(__file__))}/handlers/network_configs/")
-        ]
-
-    @staticmethod
     def split_ngc_path(ngc_path):
         """Split ngc path into org, team and model name, model version"""
         path_split = ngc_path.replace("/no-team", "").split("/")
@@ -364,6 +441,43 @@ class BaseExperimentMetadata:
             )
         return response.json()
 
+    def get_model_info_batch(self, ngc_paths_with_tokens: list):
+        """Fetch model info from NGC in parallel for multiple models
+
+        Args:
+            ngc_paths_with_tokens: List of tuples (ngc_path, ngc_token)
+
+        Returns:
+            dict: Mapping of ngc_path to model_info
+        """
+        model_info_batch = {}
+
+        def fetch_single_model(ngc_path, ngc_token):
+            """Helper to fetch a single model's info"""
+            try:
+                org, team, model_name, model_version = self.split_ngc_path(ngc_path)
+                info = self.get_model_info_from_ngc(ngc_token, org, team, model_name, model_version)
+                return ngc_path, info, None
+            except Exception as e:
+                return ngc_path, None, e
+
+        # Process in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {
+                executor.submit(fetch_single_model, ngc_path, token): ngc_path
+                for ngc_path, token in ngc_paths_with_tokens
+            }
+
+            for future in as_completed(futures):
+                ngc_path, info, error = future.result()
+                if error:
+                    logger.error(f"Failed to fetch model info for {ngc_path}: {error}")
+                else:
+                    model_info_batch[ngc_path] = info
+                    logger.debug(f"Successfully fetched model info for {ngc_path}")
+
+        return model_info_batch
+
     def load_base_experiments_from_csv(self) -> dict:
         """Get base experiments from CSV file
 
@@ -405,6 +519,13 @@ class BaseExperimentMetadata:
                         logger.info(f"Skipping {model_path} - not in requested model names: {self.model_names}")
                         continue
 
+                    # Validate that the network architecture is a valid endpoint
+                    try:
+                        self.validate_network_endpoint(network_arch)
+                    except ValueError as e:
+                        logger.error(f"CSV row {row_num}: {e}")
+                        continue
+
                     # Parse model path to determine source type
                     source_type, cleaned_path = self.parse_model_path(model_path)
 
@@ -422,11 +543,11 @@ class BaseExperimentMetadata:
                         exp_id = str(uuid.uuid5(self.base_exp_uuid, f"hf:{cleaned_path}"))
 
                         # Validate network architecture for Hugging Face models
-                        if network_arch not in self.supported_network_archs:
+                        if network_arch not in ExperimentNetworkArch.__members__:
                             logger.warning(
                                 f"CSV row {row_num}: Network architecture '{network_arch}' "
                                 f"is not supported for Hugging Face model. "
-                                f"Supported architectures: {', '.join(self.supported_network_archs)}"
+                                f"Supported architectures: {', '.join(ExperimentNetworkArch.__members__)}"
                             )
                             logger.info(
                                 f"Proceeding with custom network architecture '{network_arch}' for Hugging Face model"
@@ -466,47 +587,62 @@ class BaseExperimentMetadata:
                     logger.error(f"Failed to process CSV row {row_num} '{row}': {e}")
                     continue
 
+        # Download specs in parallel for all NGC experiments
+        self.download_specs_parallel(base_experiments)
+
         return base_experiments
 
     def add_experiment(self, base_experiments, display_name, ngc_path, network_arch,
                        ngc_key, source_type="ngc", is_backbone=None):
-        """Add experiment to the base experiments list with unique id"""
+        """Add experiment to the base experiments list with unique id (without downloading specs)"""
         hash_str = f"{ngc_path}:{network_arch}"
         exp_id = str(uuid.uuid5(self.base_exp_uuid, hash_str))
 
-        if self.airgapped and source_type == "ngc":
-            # In airgapped mode, download complete NGC model instead of just specs
-            spec_data = {}
-            download_success = self.download_complete_model(ngc_path, exp_id, ngc_key)
-            if download_success:
-                # Try to get spec data if experiment.yaml exists
-                org, team, model, version = self.split_ngc_path(ngc_path)
-                spec_file_path = f"{self.rootdir}/{org}/{team}/{model}/{version}/{model}_v{version}/experiment.yaml"
-                if os.path.isfile(spec_file_path):
-                    spec_data = safe_load_file(spec_file_path, file_type="yaml") or {}
-        elif source_type == "ngc":
-            # Regular mode - only download experiment specs for NGC models
-            spec_data = self.get_base_spec(ngc_path, exp_id, ngc_key)
-        else:
-            # For non-NGC sources (like Hugging Face), no specs available
-            spec_data = {}
-
+        # Just add the experiment metadata without downloading specs yet
+        # Specs will be downloaded in parallel later
         base_experiments[exp_id] = {
             "id": exp_id,
             "name": display_name,
             "ngc_path": ngc_path,
             "network_arch": network_arch,
             "source_type": source_type,
-            "is_backbone": is_backbone,  # Store is_backbone value from CSV
+            "is_backbone": is_backbone,
+            "ngc_key": ngc_key,  # Store for later use
             "base_experiment_metadata": {
-                "spec_file_present": bool(spec_data),
-                "specs": spec_data
+                "spec_file_present": False,  # Will be updated after parallel download
+                "specs": {}
             }
         }
 
     def load_base_experiments_from_ngc(self, page_size: int = 1000) -> dict:
-        """Get base experiments from NGC"""
+        """Get base experiments from NGC with parallel page fetching"""
         base_experiments: dict[str, dict] = {}
+
+        def fetch_page(org, team, page_number, ngc_token, query, page_size):
+            """Fetch a single page of NGC models"""
+            headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {ngc_token}",
+                "Accept-Encoding": "identity"
+            }
+            url = f"{ngc_api_base_url}/search/resources/MODEL"
+            params = {
+                "q": json.dumps(
+                    {
+                        "fields": ["resourceId", "name", "displayName", "orgName", "teamName"],
+                        "page": page_number,
+                        "pageSize": page_size,
+                        "query": query,
+                    }
+                )
+            }
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+                return response.json()["results"]
+            except Exception as e:
+                logger.error(f"Exception caught during model search in page {page_number}: %s", e)
+                return []
+
         for org, team in self.org_team_list:
             logger.info(f"Querying base experiments from '{org}{'/' + team if team else ''}'")
             ngc_key, ngc_token = self.get_ngc_token(org, team)
@@ -529,66 +665,64 @@ class BaseExperimentMetadata:
                 raise e
 
             n_pages = response.json()["resultPageTotal"]
+            logger.info(f"Found {n_pages} pages of models for {org}{'/' + team if team else ''}")
 
-            # Get the list of models
-            for page_number in range(n_pages):
-                params = {
-                    "q": json.dumps(
-                        {
-                            "fields": ["resourceId", "name", "displayName", "orgName", "teamName"],
-                            "page": page_number,
-                            "pageSize": page_size,
-                            "query": query,
-                        }
-                    )
-                }
-                try:
-                    response = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
-                except Exception as e:
-                    logger.error("Exception caught during model search in a page: %s", e)
-                    raise e
-                results = response.json()["results"]
+            # Fetch all pages in parallel
+            all_results = []
+            if n_pages > 0:
+                with ThreadPoolExecutor(max_workers=min(self._max_workers, n_pages)) as executor:
+                    futures = [
+                        executor.submit(fetch_page, org, team, page_num, ngc_token, query, page_size)
+                        for page_num in range(n_pages)
+                    ]
+                    for future in as_completed(futures):
+                        results = future.result()
+                        all_results.extend(results)
 
-                # Iterate through the list of models
-                for model_list in results:
-                    for model in model_list["resources"]:
-                        try:
-                            model_meta = self.get_model_info_from_ngc(
-                                ngc_token, model["orgName"], model.get("teamName", ""), model["name"], ""
-                            )
-                        except ValueError as e:
-                            logger.error(e)
-                            continue
-                        if "modelVersions" in model_meta:
-                            for model_version in model_meta["modelVersions"]:
-                                if "customMetrics" in model_version:
-                                    ngc_path = f'{model["resourceId"]}:{model_version["versionId"]}'
-                                    for customMetrics in model_version["customMetrics"]:
-                                        endpoints = []
-                                        for key_value in customMetrics.get("attributes", []):
-                                            if key_value["key"] == "endpoints":
-                                                try:
-                                                    endpoints = ast.literal_eval(key_value["value"])
-                                                except (SyntaxError, ValueError):
-                                                    logger.error(f"{key_value} not loadable by `ast.literal_eval`.")
-                                        for network_arch in endpoints:
-                                            # Filter by model names if specified
-                                            if self.model_names and network_arch not in self.model_names:
-                                                logger.debug(
-                                                    f"Skipping {network_arch} - not in requested model names: "
-                                                    f"{self.model_names}"
-                                                )
-                                                continue
-
-                                            self.add_experiment(
-                                                base_experiments,
-                                                model.get("displayName", network_arch),
-                                                ngc_path,
-                                                network_arch,
-                                                ngc_key,
-                                                "ngc",
-                                                None  # NGC discovery doesn't have CSV is_backbone value
+            # Process all models from all pages
+            for model_list in all_results:
+                for model in model_list["resources"]:
+                    try:
+                        model_meta = self.get_model_info_from_ngc(
+                            ngc_token, model["orgName"], model.get("teamName", ""), model["name"], ""
+                        )
+                    except ValueError as e:
+                        logger.error(e)
+                        continue
+                    if "modelVersions" in model_meta:
+                        for model_version in model_meta["modelVersions"]:
+                            if "customMetrics" in model_version:
+                                ngc_path = f'{model["resourceId"]}:{model_version["versionId"]}'
+                                for customMetrics in model_version["customMetrics"]:
+                                    endpoints = []
+                                    for key_value in customMetrics.get("attributes", []):
+                                        if key_value["key"] == "endpoints":
+                                            try:
+                                                endpoints = ast.literal_eval(key_value["value"])
+                                            except (SyntaxError, ValueError):
+                                                logger.error(f"{key_value} not loadable by `ast.literal_eval`.")
+                                    for network_arch in endpoints:
+                                        # Filter by model names if specified
+                                        if self.model_names and network_arch not in self.model_names:
+                                            logger.debug(
+                                                f"Skipping {network_arch} - not in requested model names: "
+                                                f"{self.model_names}"
                                             )
+                                            continue
+
+                                        self.add_experiment(
+                                            base_experiments,
+                                            model.get("displayName", network_arch),
+                                            ngc_path,
+                                            network_arch,
+                                            ngc_key,
+                                            "ngc",
+                                            None  # NGC discovery doesn't have CSV is_backbone value
+                                        )
+
+        # Download specs in parallel for all NGC experiments
+        self.download_specs_parallel(base_experiments)
+
         return base_experiments
 
     def get_base_spec(self, ngc_path, exp_id, ngc_key):
@@ -618,6 +752,68 @@ class BaseExperimentMetadata:
             logger.error("Unable to get spec data for %s", ngc_path)
             logger.error(e)
         return {}
+
+    def download_specs_parallel(self, base_experiments: dict):
+        """Download experiment specs in parallel for NGC models
+
+        Args:
+            base_experiments: Dictionary of experiments to download specs for
+        """
+        ngc_experiments = [
+            (exp_id, exp_data)
+            for exp_id, exp_data in base_experiments.items()
+            if exp_data.get("source_type") == "ngc"
+        ]
+
+        if not ngc_experiments:
+            return
+
+        logger.info(f"Downloading specs for {len(ngc_experiments)} NGC experiments in parallel...")
+
+        def download_single_spec(exp_id, exp_data):
+            """Helper to download a single experiment spec"""
+            ngc_path = exp_data["ngc_path"]
+            ngc_key = exp_data["ngc_key"]
+
+            try:
+                if self.airgapped:
+                    # In airgapped mode, download complete model
+                    spec_data = {}
+                    download_success = self.download_complete_model(ngc_path, exp_id, ngc_key)
+                    if download_success:
+                        # Try to get spec data if experiment.yaml exists
+                        org, team, model, version = self.split_ngc_path(ngc_path)
+                        spec_file_path = (
+                            f"{self.rootdir}/{org}/{team}/{model}/{version}/"
+                            f"{model}_v{version}/experiment.yaml"
+                        )
+                        if os.path.isfile(spec_file_path):
+                            spec_data = safe_load_file(spec_file_path, file_type="yaml") or {}
+                else:
+                    # Regular mode - only download experiment specs
+                    spec_data = self.get_base_spec(ngc_path, exp_id, ngc_key)
+
+                return exp_id, spec_data, None
+            except Exception as e:
+                return exp_id, {}, e
+
+        # Download specs in parallel
+        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = {
+                executor.submit(download_single_spec, exp_id, exp_data): exp_id
+                for exp_id, exp_data in ngc_experiments
+            }
+
+            for future in as_completed(futures):
+                exp_id, spec_data, error = future.result()
+                if error:
+                    logger.error(f"Failed to download spec for {exp_id}: {error}")
+
+                # Update the experiment with spec data
+                base_experiments[exp_id]["base_experiment_metadata"]["spec_file_present"] = bool(spec_data)
+                base_experiments[exp_id]["base_experiment_metadata"]["specs"] = spec_data
+
+        logger.info("Completed parallel spec downloads")
 
     def download_complete_model(self, ngc_path, exp_id, ngc_key):
         """Download complete model for airgapped deployment"""
@@ -693,6 +889,9 @@ class BaseExperimentMetadata:
     def extract_common_metadata(self, experiment_info, api_params, model_specific_overrides=None):
         """Create common metadata structure for both NGC and Hugging Face models"""
         network_arch = experiment_info["network_arch"]
+        dataset_type = api_params.get("dataset_type", None)
+        if dataset_type is None:
+            dataset_type = get_orchestration_network_from_microservices(network_arch)
 
         # Common network architecture processing
         accepted_ds_intents = api_params.get("accepted_ds_intents", ["training", "evaluation"])
@@ -701,27 +900,25 @@ class BaseExperimentMetadata:
         if network_arch in TAO_NETWORKS:
             base_experiment_pull_complete = "pull_complete"
 
-        # Determine model type based on network architecture
-        if network_arch.startswith("maxine_"):
-            model_type = "maxine"
-        else:
-            model_type = "vision"
-
         # Base metadata structure
         metadata = {
             "id": experiment_info["id"],
+            "kind": "experiment",  # Add kind field for job schema compatibility
+            "user_id": "00000000-0000-0000-0000-000000000000",  # System user for pretrained models
+            "shared": False,  # Not shared (public instead)
             "public": True,
             "read_only": True,  # Default, can be overridden
-            "base_experiment": [],
+            "base_experiment_ids": [],
             "train_datasets": [],
             "eval_dataset": None,
             "calibration_dataset": None,
             "inference_dataset": None,
             "checkpoint_choose_method": "best_model",
             "checkpoint_epoch_number": {"id": 0},
+            "encryption_key": "tlt_encode",  # Default encryption key
             "logo": "https://www.nvidia.com",  # Default, can be overridden
             "network_arch": network_arch,
-            "dataset_type": api_params["dataset_type"],
+            "dataset_type": dataset_type,
             "dataset_formats": api_params.get("formats", ["coco"]),
             "accepted_dataset_intents": accepted_ds_intents,
             "actions": api_params["actions"],
@@ -748,7 +945,6 @@ class BaseExperimentMetadata:
                 "specs": experiment_info["base_experiment_metadata"]["specs"]
             },
             "base_experiment_pull_complete": base_experiment_pull_complete,
-            "type": model_type,
         }
 
         # Apply model-specific overrides
@@ -770,20 +966,12 @@ class BaseExperimentMetadata:
         """Create metadata for Hugging Face models using network config"""
         network_arch = experiment_info["network_arch"]
 
-        # Load network configuration
-        try:
-            api_params = read_network_config(network_arch)["api_params"]
-            logger.info(f"Loaded network config for {network_arch}")
-        except Exception as e:
-            logger.warning(f"Could not load network config for {network_arch}: {e}")
-            # Use minimal defaults if config is not available
-            api_params = {
-                "dataset_type": "object_detection",
-                "actions": ["train", "evaluate", "inference"],
-                "accepted_ds_intents": ["training", "evaluation"],
-                "formats": ["coco"]
-            }
-            logger.info(f"Using default config for {network_arch}")
+        # Validate that the network architecture is a valid endpoint
+        self.validate_network_endpoint(network_arch)
+
+        # Load network configuration (cached with automatic fallback)
+        network_config = self.get_network_config_cached(network_arch)
+        api_params = network_config["api_params"]
 
         # Extract model name for links
         model_path = experiment_info["ngc_path"]  # This contains the HF path
@@ -811,8 +999,11 @@ class BaseExperimentMetadata:
         if model_info["modelVersion"]["status"] != "UPLOAD_COMPLETE":
             raise ValueError(f"Model {experiment_info['ngc_path']} is not in UPLOAD_COMPLETE status!")
         network_arch = experiment_info["network_arch"]
-        if network_arch not in self.supported_network_archs:
+        if network_arch not in ExperimentNetworkArch.__members__:
             raise ValueError(f"Network architecture of `{network_arch}` is not supported by API!")
+
+        # Validate that the network architecture is a valid endpoint
+        self.validate_network_endpoint(network_arch)
 
         # Extract NGC-specific attributes from customMetrics
         attr = {}
@@ -837,15 +1028,21 @@ class BaseExperimentMetadata:
             if not attr.get("trainable"):
                 raise ValueError(f"Model {experiment_info['ngc_path']} is not trainable!")
             for endpoint in attr.get("endpoints", []):
-                if endpoint not in self.supported_network_archs:
+                if endpoint not in ExperimentNetworkArch.__members__:
                     logger.warning(
                         f"Skipping the 'endpoint' metadata for {experiment_info['ngc_path']}. "
                         f"'endpoint' metadata [{endpoint}] is not supported by API!"
                         "This may prevent base experiment creation in the future releases."
                     )
 
-        # Load network configuration
-        api_params = read_network_config(network_arch)["api_params"]
+        # Load network configuration (cached with automatic fallback)
+        network_config = self.get_network_config_cached(network_arch)
+        logger.debug(f"network_arch: {network_arch}")
+        logger.debug(f"network_config: {network_config}")
+        api_params = network_config["api_params"]
+        dataset_type = api_params.get("dataset_type", None)
+        if dataset_type is None:
+            dataset_type = get_orchestration_network_from_microservices(network_arch)
 
         # NGC-specific overrides
         ngc_overrides = {
@@ -859,7 +1056,7 @@ class BaseExperimentMetadata:
             "sha256_digest": attr.get("sha256_digest", {}),
             "dataset_formats": api_params.get(
                 "formats",
-                read_network_config(api_params["dataset_type"]).get("api_params", {}).get("formats", None)
+                self.get_network_config_cached(dataset_type).get("api_params", {}).get("formats", None)
             ),
             "base_experiment_metadata": {
                 "task": self.convert_str_to_enum(attr.get("task", None), BaseExperimentTask),
@@ -919,26 +1116,40 @@ class BaseExperimentMetadata:
             logger.info("Applied model name filtering for: %s", ', '.join(self.model_names))
         logger.info("--------------------------------------------------------")
 
+        # Separate NGC and non-NGC experiments
+        ngc_experiments_to_fetch = []
+        non_ngc_experiments = {}
+
         for exp_id, base_experiment in ngc_base_experiments.items():
             ngc_path = base_experiment["ngc_path"]
             source_type = base_experiment.get("source_type", "ngc")
-            logger.debug(f"Processing experiment {exp_id}: {ngc_path} with source_type: {source_type}")
 
             if source_type == "ngc":
-                # Handle NGC models
                 try:
-                    org, team, model_name, model_version = self.split_ngc_path(ngc_path)
-                    _, ngc_token = self.get_ngc_token(org, team)
-
+                    org, team, model_name, *_ = self.split_ngc_path(ngc_path)
                     # In CSV or both mode, process all experiments; in auto-discovery mode, check org/team membership
                     if self.use_csv or self.use_both or (org, team) in self.org_team_list:
-                        # Get ngc model metadata and cache it
-                        if ngc_path not in model_info:
-                            model_info[ngc_path] = self.get_model_info_from_ngc(
-                                ngc_token, org, team, model_name, model_version
-                            )
+                        _, ngc_token = self.get_ngc_token(org, team)
+                        ngc_experiments_to_fetch.append((exp_id, ngc_path, ngc_token, base_experiment, model_name))
+                except Exception as e:
+                    logger.error(f"Failed to parse NGC path {ngc_path}: {e}")
+                    continue
+            else:
+                non_ngc_experiments[exp_id] = base_experiment
 
-                        # Update metadata for each experiment
+        # Batch fetch NGC model info in parallel
+        if ngc_experiments_to_fetch:
+            logger.info(f"Fetching model info for {len(ngc_experiments_to_fetch)} NGC models in parallel...")
+            ngc_paths_with_tokens = [(ngc_path, token) for _, ngc_path, token, _, _ in ngc_experiments_to_fetch]
+            model_info = self.get_model_info_batch(ngc_paths_with_tokens)
+            logger.info(f"Successfully fetched {len(model_info)} NGC model infos")
+
+            # Process NGC experiments with fetched model info
+            for exp_id, ngc_path, _, base_experiment, model_name in ngc_experiments_to_fetch:
+                if ngc_path in model_info:
+                    try:
+                        # Remove ngc_key before extracting metadata (shouldn't be in final output)
+                        base_experiment.pop("ngc_key", None)
                         valid_base_experiments[exp_id] = self.extract_metadata(
                             model_info[ngc_path], base_experiment, model_name
                         )
@@ -946,23 +1157,29 @@ class BaseExperimentMetadata:
                             f"Successfully created a base experiment for {ngc_path},"
                             f"{base_experiment['network_arch']}"
                         )
-                except ValueError as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f"Failed to create a base experiment for {ngc_path} >>> {e}")
-                    continue
-            else:
-                # Handle non-NGC models (e.g., Hugging Face)
-                try:
-                    # For non-NGC models, extract metadata using network config
-                    valid_base_experiments[exp_id] = self.extract_huggingface_metadata(base_experiment)
-                    logger.info(
-                        f"Successfully created a base experiment for {ngc_path},"
-                        f"{base_experiment['network_arch']} (source: {source_type})"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to create a base experiment for {ngc_path} >>> {e}")
-                    logger.error(traceback.format_exc())
-                    continue
+                    except ValueError as e:
+                        logger.error(f"Failed to create a base experiment for {ngc_path} >>> {e}")
+                        continue
+                else:
+                    logger.error(f"Model info not available for {ngc_path}")
+
+        # Process non-NGC models (e.g., Hugging Face)
+        for exp_id, base_experiment in non_ngc_experiments.items():
+            ngc_path = base_experiment["ngc_path"]
+            source_type = base_experiment.get("source_type", "unknown")
+            try:
+                # Remove ngc_key before extracting metadata (shouldn't be in final output)
+                base_experiment.pop("ngc_key", None)
+                valid_base_experiments[exp_id] = self.extract_huggingface_metadata(base_experiment)
+                logger.info(
+                    f"Successfully created a base experiment for {ngc_path},"
+                    f"{base_experiment['network_arch']} (source: {source_type})"
+                )
+            except Exception as e:
+                logger.error(f"Failed to create a base experiment for {ngc_path} >>> {e}")
+                logger.error(traceback.format_exc())
+                continue
+
         return valid_base_experiments
 
     def get_existing_base_experiments(self):
@@ -986,11 +1203,11 @@ class BaseExperimentMetadata:
             logger.info(f"Base experiments metadata written to JSON file: {self.metadata_file}")
         elif not self.dry_run:
             # Regular mode - write to MongoDB
-            mongo_experiments = MongoHandler("tao", "experiments")
+            mongo_jobs = MongoHandler("tao", "jobs")
             for base_exp_id in self.metadata:
                 base_exp_metadata = self.metadata[base_exp_id]
-                mongo_experiments.upsert({'id': base_exp_id}, base_exp_metadata)
-            logger.info("Base experiments metadata written to database")
+                mongo_jobs.upsert({'id': base_exp_id}, base_exp_metadata)
+            logger.info("Base experiments metadata written to jobs database")
         else:
             logger.info("Skipping metadata write in dry run mode!")
 

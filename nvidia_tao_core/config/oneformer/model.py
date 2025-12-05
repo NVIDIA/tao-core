@@ -150,8 +150,8 @@ class OneFormer:
         display_name="size divisibility",
     )
     num_object_queries: int = INT_FIELD(
-        value=100,
-        default_value=100,
+        value=150,
+        default_value=150,
         description="Number of object queries.",
         display_name="num object queries",
     )

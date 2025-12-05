@@ -12,4 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API handlers module"""
+"""API handlers module - provides direct access to specialized handler classes"""
+
+# Import all handlers for direct access
+from .dataset_handler import DatasetHandler
+from .workspace_handler import WorkspaceHandler
+from .experiment_handler import ExperimentHandler
+from .job_handler import JobHandler
+from .spec_handler import SpecHandler
+from .mongo_handler import MongoBackupHandler
+from .model_handler import ModelHandler
+
+# Export all handlers
+__all__ = [
+    'DatasetHandler',
+    'WorkspaceHandler',
+    'ExperimentHandler',
+    'JobHandler',
+    'SpecHandler',
+    'MongoBackupHandler',
+    'ModelHandler'
+]

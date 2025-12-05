@@ -14,7 +14,7 @@
 
 """Default evaluation config file for Cosmos-RL"""
 
-from typing import Optional
+from typing import Optional, List
 from dataclasses import dataclass
 
 from nvidia_tao_core.config.utils.types import (
@@ -22,6 +22,7 @@ from nvidia_tao_core.config.utils.types import (
     FLOAT_FIELD,
     STR_FIELD,
     INT_FIELD,
+    LIST_FIELD,
     DATACLASS_FIELD,
 )
 
@@ -43,12 +44,11 @@ class TaskConfig:
 class MetricsConfig:
     """Metrics configuration for general evaluation."""
 
-    names: str = STR_FIELD(
-        default_value="bleu,rouge,bertscore",
-        value="bleu,rouge,bertscore",
+    names: List[str] = LIST_FIELD(
+        ["bleu", "rouge", "bertscore"],
         display_name="Metric names",
         valid_options="bleu,rouge,bertscore",
-        description="Comma-separated list of metrics to compute (bleu, rouge, bertscore)"
+        description="List of metrics to compute (bleu, rouge, bertscore)"
     )
     bertscore_model: Optional[str] = STR_FIELD(
         default_value="microsoft/deberta-xlarge-mnli",
@@ -138,14 +138,6 @@ class ModelConfig:
         display_name="Data type",
         description="Data type for model weights (bfloat16, float16)"
     )
-    tp_size: int = INT_FIELD(
-        default_value=1,
-        value=1,
-        valid_min=1,
-        valid_max=8,
-        display_name="Tensor parallel size",
-        description="Tensor parallel size for distributed inference"
-    )
     max_length: int = INT_FIELD(
         default_value=128000,
         value=128000,
@@ -208,14 +200,6 @@ class EvaluationConfig:
         display_name="Task limit",
         description="Limit the number of tasks to evaluate (-1 for no limit, useful for debugging)"
     )
-    total_shard: int = INT_FIELD(
-        default_value=1,
-        value=1,
-        valid_min=1,
-        valid_max=64,
-        display_name="Total shards",
-        description="Total number of shards for distributed evaluation"
-    )
     shard_id: int = INT_FIELD(
         default_value=0,
         value=0,
@@ -223,6 +207,14 @@ class EvaluationConfig:
         valid_max=63,
         display_name="Shard ID",
         description="Current shard ID (0-based)"
+    )
+    batch_size: int = INT_FIELD(
+        default_value=50,
+        value=50,
+        valid_min=1,
+        valid_max=500,
+        display_name="Batch size",
+        description="Number of requests to process in each batch during inference"
     )
     soft_accuracy: SoftAccuracyConfig = DATACLASS_FIELD(
         SoftAccuracyConfig(),
@@ -365,6 +357,18 @@ class EvaluateConfig:
     results: ResultsConfig = DATACLASS_FIELD(
         ResultsConfig(),
         description="Results and output configuration"
+    )
+    num_gpus: int = INT_FIELD(
+        default_value=1,
+        value=1,
+        valid_min=1,
+        valid_max=8,
+        display_name="Number of GPUs",
+        description=(
+            "Total number of GPUs to use. "
+            "Automatically calculates total_shard = num_gpus / tp_size. "
+            "Default: data parallelism (tp_size=1)."
+        )
     )
 
 

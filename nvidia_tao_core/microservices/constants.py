@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Constants values"""
-import os
 
 TAO_NETWORKS = set([
     "action_recognition", "bevfusion", "classification_pyt", "grounding_dino", "mal", "mask2former",
@@ -81,10 +80,6 @@ COPY_MODEL_PARAMS_FROM_TRAIN_NETWORKS = [
 
 CACHE_TIME_OUT = 60 * 60  # cache timeout period in second
 LAST_ACCESS_TIME_OUT = 60  # last access timeout period in second
-
-# Job status timeout configuration
-# Default 15 minutes timeout for job status updates
-JOB_STATUS_TIMEOUT_MINUTES = int(os.getenv("JOB_STATUS_TIMEOUT_MINUTES", "15"))
 
 CONTINUOUS_STATUS_KEYS = ["cur_iter", "epoch", "max_epoch", "eta", "time_per_epoch", "time_per_iter", "key_metric"]
 

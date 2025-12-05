@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import shlex
+import shutil
 import subprocess
 from contextlib import contextmanager
 from time import time
@@ -30,10 +31,13 @@ from nvidia_tao_core.telemetry.nvml import get_device_details
 from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +68,43 @@ def convert_dict_to_cli_args(data, parent_key=""):
                     cli_args.append(str(value))
 
     return cli_args
+
+
+def handle_custom_script(specs, custom_script_key, target_script_path="scripts/custom_sft.py"):
+    """Handle custom training script provided by user.
+
+    Args:
+    - specs (dict): The specifications dictionary that may contain custom_training_script.
+    - custom_script_key (str): The key of the custom script in the specifications dictionary.
+    - target_script_path (str): The target path where the custom script should be copied.
+
+    Returns:
+    - None. Modifies specs in place by removing the custom_training_script key if present.
+    """
+    if custom_script_key in specs:
+        user_script_path = specs.pop(custom_script_key)
+
+        if not user_script_path:
+            logger.warning(f"{custom_script_key} is empty, skipping custom script copy")
+            return
+
+        if not os.path.exists(user_script_path):
+            logger.error(f"Custom training script not found at: {user_script_path}")
+            raise FileNotFoundError(f"Custom training script not found: {user_script_path}")
+
+        # Create the target directory if it doesn't exist
+        target_dir = os.path.dirname(target_script_path)
+        if target_dir and not os.path.exists(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+            logger.info(f"Created target directory: {target_dir}")
+
+        # Copy the user-provided script to overwrite the container's script
+        try:
+            shutil.copy2(user_script_path, target_script_path)
+            logger.info(f"Successfully copied custom training script from {user_script_path} to {target_script_path}")
+        except Exception as e:
+            logger.error(f"Failed to copy custom training script: {e}")
+            raise
 
 
 @contextmanager
@@ -104,6 +145,10 @@ def vlm_launch(neural_network_name, action, specs, job_id=""):
     else:
         lepton_args = ""
     if neural_network_name == "cosmos-rl" and action in ["train", "evaluate"]:
+        # Handle custom training script if provided by user
+        if action == "train":
+            handle_custom_script(specs, "custom_script", target_script_path="scripts/custom_sft.py")
+
         train_args = ""
         if action == "train":
             train_args = f"{lepton_args} --port 8080 --rdzv-port 29345 scripts/custom_sft.py"

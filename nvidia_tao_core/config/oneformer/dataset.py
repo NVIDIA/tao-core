@@ -136,7 +136,7 @@ class OneFormerDatasetConfig:
         value=True,
         default_value=True,
         display_name="pin_memory",
-        description="Flag to enable the dataloader to allocate pagelocked memory for faster"
+        description="Flag to enable the dataloader to allocate pagelocked memory"
     )
     pixel_mean: List[float] = LIST_FIELD(
         arrList=[123.675, 116.28, 103.53],

@@ -19,23 +19,26 @@ from datetime import datetime, timezone
 from typing import Dict, Any
 import os
 
-from nvidia_tao_core.microservices.handlers.docker_images import DOCKER_IMAGE_MAPPER
-from nvidia_tao_core.microservices.handlers.utilities import (
+from .docker_images import DOCKER_IMAGE_MAPPER
+from nvidia_tao_core.microservices.utils.handler_utils import (
     Code, add_workspace_to_cloud_metadata, get_model_results_path
 )
-from nvidia_tao_core.microservices.job_utils.executor import (
+from nvidia_tao_core.microservices.utils.job_utils.executor import (
     ServiceExecutor,
     StatefulSetExecutor
 )
-from nvidia_tao_core.microservices.handlers.stateless_handlers import get_handler_metadata
-from nvidia_tao_core.microservices.utils import read_network_config
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_handler_metadata
+from nvidia_tao_core.microservices.utils.core_utils import read_network_config
 
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -57,14 +60,11 @@ class InferenceMicroserviceHandler:
 
         The network architecture is automatically determined from the experiment metadata.
         """
-        from nvidia_tao_core.microservices.handlers.stateless_handlers import write_job_metadata
+        from nvidia_tao_core.microservices.utils.stateless_handler_utils import write_job_metadata
         from nvidia_tao_core.microservices.utils import get_admin_key
-        from nvidia_tao_core.microservices.job_utils.executor.utils import get_cluster_ip
+        from nvidia_tao_core.microservices.utils.job_utils.executor.base_executor import get_cluster_ip
 
         logger.info("Starting Inference Microservice %s for experiment %s", job_id, experiment_id)
-        # StatefulSet name
-        statefulset_name = f"ims-{job_id}"
-        logger.info("Using StatefulSet name: %s", statefulset_name)
 
         # Get experiment metadata to determine network architecture
         experiment_metadata = get_handler_metadata(experiment_id, kind="experiments")
@@ -90,11 +90,31 @@ class InferenceMicroserviceHandler:
             image = DOCKER_IMAGE_MAPPER.get(network_arch.upper(), "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt")
             logger.info("Using fallback Docker image: %s", image)
 
-        logger.info("image: %s", image)
-        logger.info("Using folder path function: %s", folder_path_function)
-
         # Build command for Inference Microservice integrated into TAO container
-        parent_id = job_config.get("parent_id", "")
+        parent_id = job_config.get("parent_job_id", job_config.get("parent_id", ""))
+
+        # Check if parent job is in Done state
+        if parent_id:
+            from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
+                get_handler_job_metadata
+            )
+            parent_job_metadata = get_handler_job_metadata(parent_id)
+            if parent_job_metadata:
+                parent_status = parent_job_metadata.get("status", "")
+                if parent_status != "Done":
+                    error_msg = (
+                        f"Cannot start inference microservice: parent job {parent_id} "
+                        f"is not in 'Done' state (current status: {parent_status})"
+                    )
+                    logger.error(error_msg)
+                    return Code(400, {}, error_msg)
+            else:
+                error_msg = (
+                    f"Cannot start inference microservice: parent job {parent_id} not found"
+                )
+                logger.error(error_msg)
+                return Code(400, {}, error_msg)
+
         folder_path = "folder" in folder_path_function
         model_path = job_config.get("model_path", get_model_results_path(experiment_metadata, parent_id, folder_path))
         logger.info("Using model path: %s", model_path)
@@ -106,7 +126,7 @@ class InferenceMicroserviceHandler:
         # logger.info("Using CLI args: %s", cli_args)
 
         docker_env_vars = experiment_metadata.get("docker_env_vars", {})
-        docker_env_vars["BACKEND"] = os.getenv("BACKEND", "local-k8s")
+        docker_env_vars["TAO_EXECUTION_BACKEND"] = os.getenv("BACKEND", "local-k8s")
         docker_env_vars["TAO_API_JOB_ID"] = job_id
 
         # Set up environment variables for status callbacks (auto-deletion)
@@ -133,6 +153,14 @@ class InferenceMicroserviceHandler:
             "model_path": model_path,
             "results_dir": f"{cloud_type}://{bucket_name}/results/{job_id}",
         }
+
+        # Propagate additional parameters from job_config to specs
+        # These include enable_lora, base_model_path, and any other user-provided configs
+        for key, value in job_config.items():
+            if key not in ["parent_id", "parent_job_id", "model_path"]:
+                specs[key] = value
+                logger.info(f"Propagating parameter to specs: {key} = {value}")
+
         job_metadata = {
             "job_id": job_id,
             "specs": specs,
@@ -143,6 +171,8 @@ class InferenceMicroserviceHandler:
         # Clean TAO-compliant StatefulSet setup: Pure container_handler.py approach
         run_command = f"""
 umask 0 &&
+
+
 {network_arch}-inference-microservice --job "{str(job_metadata)}" --docker_env_vars "{str(docker_env_vars)}"
         """
         logger.info("Using run command: %s", run_command)
@@ -178,8 +208,6 @@ umask 0 &&
                 if service_status != "Running":
                     logger.error("Inference Microservice service failed to become ready. Status: %s", service_status)
                     return Code(500, {}, f"Inference Microservice service failed to become ready: {service_status}")
-
-            logger.info("Inference Microservice %s is ready", statefulset_name)
 
             # For Kubernetes services, we typically use cluster IP for internal communication
             service_url = f"http://{service_id}:{api_port}"
@@ -258,7 +286,7 @@ umask 0 &&
                 )
 
                 # Update job status to Done in database
-                from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+                from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
                     update_job_status, get_handler_job_metadata
                 )
                 job_metadata = get_handler_job_metadata(job_id)
@@ -314,8 +342,16 @@ umask 0 &&
             return Code(500, {}, f"Failed to get service status: {str(e)}")
 
     @staticmethod
-    def check_inference_microservice_model_readiness(job_id: str) -> dict:
-        """Check if Inference Microservice model is ready in StatefulSet containers"""
+    def check_inference_microservice_model_readiness(job_id: str, api_port: int = 8080) -> dict:
+        """Check if Inference Microservice model is ready in StatefulSet containers
+
+        Args:
+            job_id: Job ID for the microservice
+            api_port: Port number for the microservice
+
+        Returns:
+            Dictionary with readiness status and progress information
+        """
         try:
             statefulset_name = f"ims-{job_id}"
 
@@ -326,14 +362,31 @@ umask 0 &&
                 )
                 statefulset_status = stat_dict.get("status", "Unknown")
 
+                # If StatefulSet is running, get detailed status from the microservice
                 if statefulset_status == "Running":
-                    # If StatefulSet is running, model should be loaded (loaded at startup)
-                    return {
-                        "job_id": job_id,
-                        "status": "ready",
-                        "loaded": True,
-                        "statefulset_status": statefulset_status
-                    }
+                    try:
+                        # Get detailed status including progress
+                        status_response = InferenceMicroserviceHandler.get_inference_microservice_status_direct(
+                            job_id, api_port
+                        )
+                        return {
+                            "job_id": job_id,
+                            "status": "ready" if status_response.get("model_loaded") else "loading",
+                            "loaded": status_response.get("model_loaded", False),
+                            "loading": status_response.get("model_loading", False),
+                            "initializing": status_response.get("server_initializing", False),
+                            "statefulset_status": statefulset_status,
+                            "progress": status_response.get("progress", {})
+                        }
+                    except Exception as status_err:
+                        logger.warning(f"Could not get detailed status for {job_id}: {status_err}")
+                        # Fallback to basic response
+                        return {
+                            "job_id": job_id,
+                            "status": "ready",
+                            "loaded": True,
+                            "statefulset_status": statefulset_status
+                        }
                 return {
                     "job_id": job_id,
                     "status": "not_ready",
@@ -436,11 +489,22 @@ umask 0 &&
         except requests.exceptions.Timeout:
             error_msg = f"Inference request timed out after {timeout} seconds for job {job_id}"
             logger.error(error_msg)
+            # Try to get current progress to include in error response
+            try:
+                status_response = (
+                    InferenceMicroserviceHandler.get_inference_microservice_status_direct(
+                        job_id, api_port
+                    )
+                )
+                progress_info = status_response.get("progress", {})
+            except Exception:
+                progress_info = {}
             return {
                 "status": "error",
                 "error": error_msg,
                 "job_id": job_id,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "progress": progress_info
             }
         except requests.exceptions.ConnectionError:
             error_msg = f"Could not connect to inference microservice for job {job_id}"
@@ -449,7 +513,13 @@ umask 0 &&
                 "status": "error",
                 "error": error_msg,
                 "job_id": job_id,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "progress": {
+                    "stage": "error",
+                    "message": "Connection failed - microservice may not be running",
+                    "remaining_steps": [],
+                    "details": {"error": "ConnectionError"}
+                }
             }
         except Exception as e:
             error_msg = f"Unexpected error during inference request for job {job_id}: {str(e)}"
@@ -458,7 +528,13 @@ umask 0 &&
                 "status": "error",
                 "error": error_msg,
                 "job_id": job_id,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "progress": {
+                    "stage": "error",
+                    "message": f"Unexpected error: {str(e)}",
+                    "remaining_steps": [],
+                    "details": {"error": str(e)}
+                }
             }
 
     @staticmethod
@@ -469,7 +545,7 @@ umask 0 &&
             job_id: Job ID for the microservice
 
         Returns:
-            Status response from the microservice
+            Status response from the microservice including progress information
         """
         try:
             logger.info(f"Getting status for inference microservice job {job_id}")
@@ -485,6 +561,7 @@ umask 0 &&
             if response.status_code == 200:
                 result = response.json()
                 logger.info(f"Status retrieved successfully for job {job_id}")
+                # Progress information is already included in the result from the server
                 return result
             error_msg = f"Status request failed with status {response.status_code}"
             logger.error(f"{error_msg} for job {job_id}")
@@ -492,7 +569,13 @@ umask 0 &&
                 "status": "error",
                 "error": error_msg,
                 "job_id": job_id,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "progress": {
+                    "stage": "error",
+                    "message": error_msg,
+                    "remaining_steps": [],
+                    "details": {}
+                }
             }
 
         except Exception as e:
@@ -502,7 +585,13 @@ umask 0 &&
                 "status": "error",
                 "error": error_msg,
                 "job_id": job_id,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "progress": {
+                    "stage": "error",
+                    "message": f"Failed to connect to microservice: {str(e)}",
+                    "remaining_steps": [],
+                    "details": {"error": str(e)}
+                }
             }
 
     @staticmethod

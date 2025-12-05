@@ -146,34 +146,36 @@ class DDAugmentationConfig:
     )
     train_random_crop_min: int = INT_FIELD(
         value=384,
-        valid_min=1,
+        valid_min=32,
         valid_max="inf",
         description="The minimum random crop size for training data",
         automl_enabled="TRUE",
-        display_name="minumum random crop size"
+        display_name="minumum random crop size",
+        parent_param="TRUE"
     )
     train_random_crop_max: int = INT_FIELD(
         value=600,
-        valid_min=1,
-        valid_max="inf",
-        description="The maximum random crop size for training data",
+        valid_min=32,
+        valid_max=1333,
+        description="The maximum random crop size for training data. Must be > train_random_crop_min",
         automl_enabled="TRUE",
-        display_name="Maximum random crop size"
+        math_cond="> depends_on",
+        display_name="Maximum random crop size",
+        depends_on="dataset.augmentation.train_random_crop_min"
     )
     random_resize_max_size: int = INT_FIELD(
         value=1333,
         valid_min=1,
         valid_max="inf",
         description="The maximum random resize size for training data",
-        automl_enabled="TRUE",
         display_name="random resize max size"
     )
     test_random_resize: int = INT_FIELD(
         value=800,
-        valid_min=1,
+        valid_min=32,
         valid_max="inf",
         description="The random resize size for test data",
-        automl_enabled="TRUE",
+        automl_enabled="FALSE",
         display_name="random resize max size"
     )
     fixed_padding: bool = BOOL_FIELD(

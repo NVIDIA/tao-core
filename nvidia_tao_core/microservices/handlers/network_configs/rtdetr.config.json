@@ -265,6 +265,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

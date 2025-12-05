@@ -81,15 +81,26 @@ def get_folder_stats(folder_path):
 def send_progress_status_callback(message):
     """Send progress status callback using HTTP (job pods don't have MongoDB access).
 
+    Also notifies inference microservice progress bridge for real-time progress updates.
+
     Args:
         message (str): Progress message to send
     """
     try:
+        # Notify inference microservice progress bridge (if registered)
+        try:
+            job_id = os.getenv("TAO_API_JOB_ID")
+            if job_id:
+                from nvidia_tao_core.microservices.handlers.inference_progress_bridge import notify_progress
+                notify_progress(job_id, message)
+        except Exception as e:
+            logger.debug(f"Could not notify inference progress bridge: {e}")
+
         if os.getenv("CLOUD_BASED") == "True":
             # Use status_callback (HTTP) instead of internal_job_status_update (MongoDB)
             # Job pods don't have MongoDB access, so we send via HTTP to the server
             from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
-            from nvidia_tao_core.microservices.handlers.stateless_handlers import get_internal_job_status_update_data
+            from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_internal_job_status_update_data
 
             # Create status update data with RUNNING status for progress updates
             callback_data = get_internal_job_status_update_data(

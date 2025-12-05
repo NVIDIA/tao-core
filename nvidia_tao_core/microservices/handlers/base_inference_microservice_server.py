@@ -27,16 +27,19 @@ from datetime import datetime
 from typing import Dict, List, Any, Tuple
 from flask import Flask, request, jsonify
 
-from nvidia_tao_core.microservices.handlers.container_handler import prepare_data_before_job_run
+from .container_handler import prepare_data_before_job_run
 from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import (
     download_from_user_storage, get_file_path_from_cloud_string
 )
-from nvidia_tao_core.microservices.utils import safe_load_file
+from nvidia_tao_core.microservices.utils.core_utils import safe_load_file
 
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +67,19 @@ class BaseInferenceMicroserviceServer(ABC):
         self.model_state_dir = "/tmp/tao_models"
         self.model_params = model_params  # Store all model-specific params
 
+        # Progress tracking for initialization and downloads
+        self.progress = {
+            "stage": "initializing",  # initializing, downloading_model, loading_model, ready, error
+            "message": "Server initialization starting",
+            "remaining_steps": [
+                "Prepare data and cloud storage",
+                "Download model files",
+                "Load model into memory",
+                "Ready for inference"
+            ],
+            "details": {}
+        }
+
         # Health check and auto-deletion configuration
         self.last_request_time = datetime.now()
         self.idle_timeout_minutes = 30  # Default 30 minutes idle timeout
@@ -75,6 +91,33 @@ class BaseInferenceMicroserviceServer(ABC):
         """Update the last request timestamp - called on each inference request"""
         self.last_request_time = datetime.now()
         logger.debug(f"Updated last request time: {self.last_request_time}")
+
+    def update_progress(
+        self, stage: str, message: str, remaining_steps: List[str] = None,
+        details: Dict[str, Any] = None
+    ):
+        """Update progress information
+
+        Args:
+            stage: Current stage (initializing, downloading_model, loading_model, ready, error)
+            message: Human-readable progress message
+            remaining_steps: List of remaining steps until ready (optional)
+            details: Optional dictionary with additional details
+        """
+        self.progress = {
+            "stage": stage,
+            "message": message,
+            "remaining_steps": remaining_steps or [],
+            "details": details or {},
+            "timestamp": datetime.now().isoformat()
+        }
+        steps_info = f" (Remaining: {len(remaining_steps)} steps)" if remaining_steps else ""
+        logger.info(f"Progress update: {stage} - {message}{steps_info}")
+        # Save progress to state file
+        self.save_model_state(
+            loaded=self.model_loaded,
+            loading=self.model_loading
+        )
 
     def get_idle_time_minutes(self) -> float:
         """Get the current idle time in minutes
@@ -149,6 +192,31 @@ class BaseInferenceMicroserviceServer(ABC):
                 logger.warning("Health monitor thread did not shutdown gracefully")
             self._health_monitor_thread = None
 
+    def _handle_download_progress(self, percentage: int, message: str):
+        """Handle download progress updates from progress bridge
+
+        Args:
+            percentage: Overall progress percentage (used to determine remaining steps)
+            message: Progress message from ProgressTracker
+        """
+        # Extract key information from message for details
+        details = {"phase": "downloading", "download_message": message}
+
+        # Determine remaining steps based on progress
+        remaining_steps = [
+            "Complete model file download",
+            "Load model into memory",
+            "Ready for inference"
+        ]
+
+        # Keep message simple - details contain the verbose download info
+        self.update_progress(
+            stage="initializing",
+            message="Downloading model files",
+            remaining_steps=remaining_steps,
+            details=details
+        )
+
     def _initialize_background(self, job_data: Dict[str, Any], docker_env_vars: Dict[str, Any]):
         """Initialize server configuration in background thread"""
         try:
@@ -156,11 +224,56 @@ class BaseInferenceMicroserviceServer(ABC):
             self.server_initializing = True
             self.initialization_error = None
 
-            # Save initializing state
-            self.save_model_state(loaded=False, loading=False)
+            # Update progress: Starting initialization
+            self.update_progress(
+                stage="initializing",
+                message="Starting server initialization",
+                remaining_steps=[
+                    "Prepare data and cloud storage",
+                    "Download model files",
+                    "Load model into memory",
+                    "Ready for inference"
+                ],
+                details={"phase": "starting"}
+            )
 
-            # Prepare data (downloads files, sets up cloud storage) - this can be slow
-            cloud_storage, specs, _ = prepare_data_before_job_run(job_data, docker_env_vars)
+            # Update progress: Preparing to download files
+            self.update_progress(
+                stage="initializing",
+                message="Preparing data and cloud storage",
+                remaining_steps=[
+                    "Download model files",
+                    "Load model into memory",
+                    "Ready for inference"
+                ],
+                details={"phase": "preparing"}
+            )
+
+            # Register progress callback to receive download progress updates
+            from nvidia_tao_core.microservices.handlers.inference_progress_bridge import (
+                register_progress_callback, unregister_progress_callback
+            )
+
+            try:
+                # Register callback to receive progress updates during downloads
+                register_progress_callback(job_data["job_id"], self._handle_download_progress)
+
+                # Prepare data (downloads files, sets up cloud storage) - this can be slow
+                cloud_storage, specs, _ = prepare_data_before_job_run(job_data, docker_env_vars)
+            finally:
+                # Unregister callback after downloads complete
+                unregister_progress_callback(job_data["job_id"])
+
+            # Update progress: Files downloaded
+            self.update_progress(
+                stage="initializing",
+                message="Data preparation completed",
+                remaining_steps=[
+                    "Load model into memory",
+                    "Ready for inference"
+                ],
+                details={"phase": "completed", "specs": list(specs.keys())}
+            )
 
             # Update instance with downloaded/prepared data
             self.cloud_storage = cloud_storage
@@ -168,6 +281,17 @@ class BaseInferenceMicroserviceServer(ABC):
 
             self.server_initializing = False
             logger.info("Background initialization completed - starting model loading")
+
+            # Update progress: Initialization complete, starting model load
+            self.update_progress(
+                stage="loading_model",
+                message="Loading model into memory",
+                remaining_steps=[
+                    "Complete model loading",
+                    "Ready for inference"
+                ],
+                details={"phase": "model_loading_starting"}
+            )
 
             # Now start model loading
             self.load_model()
@@ -179,6 +303,12 @@ class BaseInferenceMicroserviceServer(ABC):
             logger.error(traceback.format_exc())
             self.server_initializing = False
             self.initialization_error = str(e)
+            self.update_progress(
+                stage="error",
+                message=f"Initialization failed: {str(e)}",
+                remaining_steps=[],
+                details={"error": str(e), "phase": "initialization"}
+            )
             self.save_model_state(loaded=False, loading=False, error=str(e))
 
     def save_model_state(self, loaded: bool = False, loading: bool = False, load_time: float = None, error: str = None):
@@ -198,7 +328,8 @@ class BaseInferenceMicroserviceServer(ABC):
             "initializing": self.server_initializing,
             "timestamp": datetime.now().isoformat(),
             "server_port": self.port,
-            "model_type": self.__class__.__name__
+            "model_type": self.__class__.__name__,
+            "progress": self.progress
         }
 
         if load_time is not None:
@@ -236,7 +367,7 @@ class BaseInferenceMicroserviceServer(ABC):
             logger.info("Requesting auto-deletion via status callback")
 
             # Import here to avoid circular dependencies
-            from nvidia_tao_core.cloud_handlers.utils import status_callback
+            from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
 
             # Create status data in the format expected by status_callback
             status_data = {
@@ -303,8 +434,16 @@ class BaseInferenceMicroserviceServer(ABC):
             self.model_load_error = None
             start_time = time.time()
 
-            # Save loading state
-            self.save_model_state(loaded=False, loading=True)
+            # Update progress: Model loading started
+            self.update_progress(
+                stage="loading_model",
+                message="Loading model into memory",
+                remaining_steps=[
+                    "Complete model loading",
+                    "Ready for inference"
+                ],
+                details={"phase": "loading", "model_type": self.__class__.__name__}
+            )
 
             # Merge model_params with provided kwargs
             all_params = {**self.model_params, **kwargs}
@@ -317,7 +456,15 @@ class BaseInferenceMicroserviceServer(ABC):
                 self.model_loaded = True
                 self.model_loading = False
                 print(f"{self.__class__.__name__} model loaded successfully in {load_time:.2f} seconds")
-                self.save_model_state(loaded=True, loading=False, load_time=load_time)
+
+                # Update progress: Model loaded successfully
+                self.update_progress(
+                    stage="ready",
+                    message="Model loaded successfully, ready for inference",
+                    remaining_steps=[],
+                    details={"load_time": load_time, "model_type": self.__class__.__name__}
+                )
+
                 logger.info(f"Model loaded successfully in {load_time:.2f}s - ready for inference")
 
                 # Start health monitoring for idle timeout now that server is ready for inference
@@ -326,6 +473,12 @@ class BaseInferenceMicroserviceServer(ABC):
             else:
                 self.model_loading = False
                 self.model_load_error = "Model loading failed"
+                self.update_progress(
+                    stage="error",
+                    message="Model loading failed",
+                    remaining_steps=[],
+                    details={"error": "Model loading returned False", "phase": "model_loading"}
+                )
                 self.save_model_state(loaded=False, loading=False, error="Model loading failed")
 
         except Exception as e:
@@ -337,6 +490,12 @@ class BaseInferenceMicroserviceServer(ABC):
             self.model_loaded = False
             self.model_loading = False
             self.model_load_error = str(e)
+            self.update_progress(
+                stage="error",
+                message=f"Model loading failed: {str(e)}",
+                remaining_steps=[],
+                details={"error": str(e), "phase": "model_loading"}
+            )
             self.save_model_state(loaded=False, loading=False, error=str(e))
 
     def load_model(self, **kwargs) -> bool:
@@ -357,16 +516,26 @@ class BaseInferenceMicroserviceServer(ABC):
         load_thread.start()
         return True
 
-    def download_and_process_file(self, input_file: str) -> str:
+    def download_and_process_file(self, input_file: str, update_progress: bool = True) -> str:
         """Download file from cloud storage if needed and return local path
 
         Args:
             input_file: Input file path or cloud URL
+            update_progress: Whether to update progress during download
 
         Returns:
             Local file path
         """
         try:
+            # Update progress if requested
+            if update_progress:
+                self.update_progress(
+                    stage="downloading_file",
+                    message=f"Downloading file: {os.path.basename(input_file)}",
+                    remaining_steps=self.progress.get("remaining_steps", []),
+                    details={"file": input_file, "phase": "downloading"}
+                )
+
             # Handle cloud storage URLs by downloading first
             _, _, cloud_file_path = get_file_path_from_cloud_string(input_file)
             actual_file_path = download_from_user_storage(
@@ -378,10 +547,27 @@ class BaseInferenceMicroserviceServer(ABC):
                 preserve_source_path=True,
                 reset_value=False
             )
+
+            # Update progress after download complete
+            if update_progress:
+                self.update_progress(
+                    stage="downloading_file",
+                    message=f"File downloaded: {os.path.basename(input_file)}",
+                    remaining_steps=self.progress.get("remaining_steps", []),
+                    details={"file": input_file, "local_path": actual_file_path, "phase": "completed"}
+                )
+
             return actual_file_path
 
         except Exception as e:
             logger.error(f"Failed to process {input_file}: {e}")
+            if update_progress:
+                self.update_progress(
+                    stage="error",
+                    message=f"Failed to download file: {os.path.basename(input_file)}",
+                    remaining_steps=[],
+                    details={"file": input_file, "error": str(e), "phase": "download_failed"}
+                )
             raise
 
     def run_inference(self, **kwargs) -> Dict[str, Any]:
@@ -441,7 +627,8 @@ class BaseInferenceMicroserviceServer(ABC):
                 "last_request_time": self.last_request_time.isoformat(),
                 "idle_time_minutes": round(idle_minutes, 2),
                 "idle_timeout_minutes": self.idle_timeout_minutes,
-                "auto_deletion_enabled": self.auto_deletion_enabled
+                "auto_deletion_enabled": self.auto_deletion_enabled,
+                "progress": self.progress
             })
 
         @app.route('/api/v1/health/readiness', methods=['GET'])
@@ -527,7 +714,8 @@ class BaseInferenceMicroserviceServer(ABC):
                 "health_monitor_active": (
                     self._health_monitor_thread is not None and
                     self._health_monitor_thread.is_alive()
-                )
+                ),
+                "progress": self.progress
             })
 
         @app.route('/api/v1/inference', methods=['POST'])

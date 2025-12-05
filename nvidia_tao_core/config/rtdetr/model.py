@@ -140,15 +140,21 @@ class RTModelConfig:
         display_name="number of queries",
         valid_min=1,
         valid_max="inf",
-        automl_enabled="TRUE"
+        automl_enabled="TRUE",
+        parent_param="TRUE"
     )
     num_select: int = INT_FIELD(
         value=300,
         default_value=300,
-        description="The number of top-K predictions selected during post-process",
+        description=(
+            "The number of top-K predictions selected during post-process. "
+            "Must be < num_queries * num_classes"
+        ),
         display_name="num select",
         valid_min=1,
-        automl_enabled="TRUE"
+        valid_max=1000,
+        automl_enabled="TRUE",
+        depends_on="model.num_queries"
     )
     num_feature_levels: int = INT_FIELD(
         value=3,
