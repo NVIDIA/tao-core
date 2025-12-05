@@ -18,7 +18,7 @@ import os
 import glob
 import logging
 
-from nvidia_tao_core.microservices.handlers.cloud_storage import create_cs_instance
+from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
 from nvidia_tao_core.microservices.handlers.stateless_handlers import get_handler_metadata
 from nvidia_tao_core.microservices.utils import read_network_config
 
@@ -152,6 +152,52 @@ def write_dir_contents(directory, file):
             f.write(dir_files + "\n")
 
 
+def _get_format_requirements(validation_config, dataset_format):
+    """Get format-specific requirements with support for multiple formats and wildcards
+
+    Args:
+        validation_config (dict): The dataset validation configuration
+        dataset_format (str): The dataset format (can be single format, comma-separated, or wildcard)
+    Returns:
+        list: List of validation requirements
+    """
+    required_files_config = validation_config.get("required_files", {})
+    # Handle wildcard case - return requirements from "*" key or collect from all formats
+    if dataset_format == "*":
+        # First try to get requirements from the "*" key directly
+        wildcard_reqs = required_files_config.get("*", [])
+        if wildcard_reqs:
+            return wildcard_reqs
+        # If no "*" key, collect requirements from all other format keys
+        all_requirements = []
+        for format_key, requirements in required_files_config.items():
+            if format_key not in ["default", "*"]:
+                all_requirements.extend(requirements)
+        # If no specific format requirements found, use default
+        if not all_requirements:
+            all_requirements = required_files_config.get("default", [])
+        return all_requirements
+    # Handle comma-separated formats
+    if "," in dataset_format:
+        formats = [fmt.strip() for fmt in dataset_format.split(",")]
+        combined_requirements = []
+        for fmt in formats:
+            # Try to get requirements for this specific format
+            fmt_reqs = required_files_config.get(fmt, [])
+            if fmt_reqs:
+                combined_requirements.extend(fmt_reqs)
+            else:
+                # If no specific requirements for this format, use default or wildcard
+                fallback_reqs = required_files_config.get("default", required_files_config.get("*", []))
+                combined_requirements.extend(fallback_reqs)
+        return combined_requirements
+    # Handle single format (original behavior)
+    return required_files_config.get(
+        dataset_format,
+        required_files_config.get("default", required_files_config.get("*", []))
+    )
+
+
 def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
     """Generic dataset validator using config
 
@@ -196,11 +242,8 @@ def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata
         logger.debug("network_config: %s", network_config)
         validation_config = network_config.get("dataset_validation", {})
 
-        # Get format-specific requirements, fallback to default
-        format_reqs = validation_config.get("required_files", {}).get(
-            handler.format,
-            validation_config.get("required_files", {}).get("default", [])
-        )
+        # Get format-specific requirements with support for multiple formats and wildcards
+        format_reqs = _get_format_requirements(validation_config, handler.format)
 
         # Store expected structure
         validation_result["expected_structure"] = {
@@ -284,6 +327,10 @@ def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata
                         # Check if all sub-requirements are met
                         all_valid = True
                         subreq_paths = []
+                        # First collect all paths for error message
+                        for subsubreq in subreq["all_of"]:
+                            subreq_paths.append(subsubreq["path"])
+                        # Then check if all files exist
                         for subsubreq in subreq["all_of"]:
                             # For cloud validation, use the relative path directly instead of joining with temp_dir
                             if handler.cloud_instance:
@@ -292,20 +339,20 @@ def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata
                                 path = os.path.join(handler.root, subsubreq["path"])
                             file_type = subsubreq.get("type", "file")
                             file_extension = subsubreq.get("regex", "") if file_type == "regex" else ""
-                            subreq_paths.append(subsubreq["path"])
                             if not handler.check_for_file_existence(
                                 path, file_type=file_type, file_extension=file_extension
                             ):
                                 all_valid = False
                                 break
-                        any_of_options.append(f"all of: {', '.join(subreq_paths)}")
+                        any_of_options.append(f"({', '.join(subreq_paths)})")
                         if all_valid:
                             any_valid = True
                             break
 
                 if not any_valid:
+                    # For any_of validation, show the complete requirement options, not just missing files
                     options_str = " OR ".join(any_of_options)
-                    validation_errors.append(f"Must have at least one of: {options_str}")
+                    validation_errors.append(f"Dataset must contain one of the following combinations: {options_str}")
             elif "intent_based_path" in req:
                 # Check if intent exists
                 if not handler.intent:

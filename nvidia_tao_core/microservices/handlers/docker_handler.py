@@ -21,7 +21,6 @@ import traceback
 # pylint: disable=c-extension-no-member
 import docker
 import os
-import sys
 import logging
 import requests
 from nvidia_tao_core.microservices.utils import get_admin_key
@@ -221,7 +220,7 @@ class DockerHandler:
                 docker_pull_progress(line)
         except docker.errors.APIError as e:
             logger.error(f"Docker pull failed. {e}")
-            sys.exit(1)
+            raise e
         logger.info("Container pull complete.")
 
     @staticmethod
@@ -236,13 +235,13 @@ class DockerHandler:
 
     def start_container(self, container_name="", docker_env_vars={}, command=[], num_gpus=-1, volumes=None):
         """Start a container."""
-        # Check if the image exists locally. If not, pull it.
-        if not self._check_image_exists():
-            logger.info(
-                "The required docker doesn't exist locally/the manifest has changed. "
-                "Pulling a new docker.")
-            self.pull()
         try:
+            # Check if the image exists locally. If not, pull it.
+            if not self._check_image_exists():
+                logger.info(
+                    "The required docker doesn't exist locally/the manifest has changed. "
+                    "Pulling a new docker.")
+                self.pull()
             gpu_ids = gpu_manager.assign_gpus(container_name, num_gpus)
             logger.info(f"Starting Container: {self._docker_image}")
             self._container = self._docker_client.containers.run(
@@ -261,6 +260,7 @@ class DockerHandler:
         except Exception as e:
             logger.error(f"Exception thrown in start_container is {str(e)}")
             logger.error(traceback.format_exc())
+            raise e
 
     def check_container_health(self, port=8000):
         """Check if the microservice container is running and healthy."""
@@ -272,11 +272,37 @@ class DockerHandler:
                 try:
                     base_url = f"http://{container_name}:{port}"
                     liveness_response = requests.get(f"{base_url}/api/v1/health/liveness", timeout=120)
-                    readiness_response = requests.get(f"{base_url}/api/v1/health/readiness", timeout=120)
-                    if liveness_response.status_code == 200 and readiness_response.status_code == 200:
+                    if liveness_response.status_code == 200:
                         return True
                 except Exception as e:
                     logger.error(f"Exception caught during checking container health: {e}")
+                    return False
+            else:
+                logger.error(f"Container {self._container.name} is in {self._container.status} state")
+                return False
+        return False
+
+    def check_container_readiness(self, port=8000):
+        """Check if the microservice is ready to serve inference requests.
+
+        Returns:
+            True if model is loaded and ready for inference, False otherwise
+        """
+        if self._container:
+            logger.info(f"Checking container readiness: {self._container.name}")
+            self._container.reload()
+            if self._container.status.lower() == "running":
+                container_name = self._container.name
+                try:
+                    base_url = f"http://{container_name}:{port}"
+                    readiness_response = requests.get(f"{base_url}/api/v1/health/readiness", timeout=30)
+                    if readiness_response.status_code == 200:
+                        logger.info(f"Container {container_name} is ready for inference")
+                        return True
+                    logger.info(f"Container {container_name} not ready yet: {readiness_response.status_code}")
+                    return False
+                except Exception as e:
+                    logger.error(f"Exception caught during checking container readiness: {e}")
                     return False
             else:
                 logger.error(f"Container {self._container.name} is in {self._container.status} state")

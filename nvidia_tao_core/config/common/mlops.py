@@ -36,6 +36,7 @@ class WandBConfig:
     sync_tensorboard: bool = BOOL_FIELD(value=False)
     save_code: bool = BOOL_FIELD(value=False)
     name: str = STR_FIELD(value="TAO Toolkit Training")
+    run_id: str = STR_FIELD(value="")
 
 
 @dataclass

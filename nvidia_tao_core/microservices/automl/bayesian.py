@@ -34,8 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-np.random.seed(95051)
-
 
 class Bayesian(AutoMLAlgorithmBase):
     """Bayesian AutoML algorithm class"""
@@ -71,8 +69,15 @@ class Bayesian(AutoMLAlgorithmBase):
     def generate_automl_param_rec_value(self, parameter_config, suggestion):
         """Convert 0 to 1 GP prediction into a possible value"""
         parameter_name = parameter_config.get("parameter")
+        # Apply custom overrides if provided
+        if self.custom_ranges and parameter_name in self.custom_ranges:
+            for override_key, override_value in self.custom_ranges[parameter_name].items():
+                if override_value is not None:
+                    parameter_config[override_key] = override_value
+
         data_type = parameter_config.get("value_type")
         default_value = parameter_config.get("default_value", None)
+        math_cond = parameter_config.get("math_cond", None)
         parent_param = parameter_config.get("parent_param", None)
 
         if data_type == "float":
@@ -83,9 +88,28 @@ class Bayesian(AutoMLAlgorithmBase):
             if (type(v_min) is not str and math.isnan(v_min)) or (type(v_max) is not str and math.isnan(v_max)):
                 return float(default_value)
 
-            v_min, v_max = get_valid_range(parameter_config, self.parent_params)
-            normalized = suggestion * (v_max - v_min) + v_min
-            quantized = clamp_value(normalized, v_min, v_max)
+            v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
+
+            # Apply math condition if specified
+            if math_cond and type(math_cond) is str:
+                parts = math_cond.split(" ")
+                if len(parts) >= 2:
+                    operator = parts[0]
+                    factor = int(float(parts[1]))
+                    if operator == "^":
+                        # Use helper function for power constraints with equal priority
+                        normalized = suggestion * (v_max - v_min) + v_min
+                        fallback = clamp_value(normalized, v_min, v_max)
+                        quantized = float(self._apply_power_constraint_with_equal_priority(
+                            v_min, v_max, factor, fallback))
+                    else:
+                        # Regular sampling for non-power constraints
+                        normalized = suggestion * (v_max - v_min) + v_min
+                        quantized = clamp_value(normalized, v_min, v_max)
+            else:
+                # No math condition, regular sampling
+                normalized = suggestion * (v_max - v_min) + v_min
+                quantized = clamp_value(normalized, v_min, v_max)
 
             if not (type(parent_param) is float and math.isnan(parent_param)):
                 if (isinstance(parent_param, str) and parent_param != "nan" and parent_param == "TRUE") or (
@@ -136,7 +160,9 @@ class Bayesian(AutoMLAlgorithmBase):
             self.Xs.append(suggestions)
             recommendations = []
             for param_dict, suggestion in zip(self.parameters, suggestions):
-                recommendations.append(self.generate_automl_param_rec_value(param_dict, suggestion))
+                recommendation_value = self.generate_automl_param_rec_value(param_dict, suggestion)
+                logger.info(f"Recommendation param: {param_dict['parameter']} value: {recommendation_value}")
+                recommendations.append(recommendation_value)
             return [dict(zip([param["parameter"] for param in self.parameters], recommendations))]
         # This function will be called every 5 seconds or so.
         # If no change in history, dont give a recommendation
@@ -160,7 +186,9 @@ class Bayesian(AutoMLAlgorithmBase):
             f"number of suggestions ({len(suggestions)})"
         )
         for param_dict, suggestion in zip(self.parameters, suggestions):
-            recommendations.append(self.generate_automl_param_rec_value(param_dict, suggestion))
+            recommendation_value = self.generate_automl_param_rec_value(param_dict, suggestion)
+            logger.info(f"Recommendation param: {param_dict['parameter']} value: {recommendation_value}")
+            recommendations.append(recommendation_value)
 
         return [dict(zip([param["parameter"] for param in self.parameters], recommendations))]
 

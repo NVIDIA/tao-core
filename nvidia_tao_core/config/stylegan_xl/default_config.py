@@ -376,3 +376,8 @@ class ExperimentConfig(CommonExperimentConfig):
     inference: InferenceExpConfig = DATACLASS_FIELD(InferenceExpConfig())
     export: ExportExpConfig = DATACLASS_FIELD(ExportExpConfig())
     gen_trt_engine: GenTrtEngineExpConfig = DATACLASS_FIELD(GenTrtEngineExpConfig())
+
+    def __post_init__(self):
+        """Set default model name for StyleGAN XL."""
+        if self.model_name is None:
+            self.model_name = "stylegan_xl"

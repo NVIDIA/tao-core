@@ -17,7 +17,9 @@ import numpy as np
 import math
 import logging
 
-from nvidia_tao_core.microservices.automl.utils import ResumeRecommendation, JobStates, get_valid_range, clamp_value
+from nvidia_tao_core.microservices.automl.utils import (
+    ResumeRecommendation, JobStates, get_valid_range, clamp_value
+)
 from nvidia_tao_core.microservices.automl.automl_algorithm_base import AutoMLAlgorithmBase
 from nvidia_tao_core.microservices.handlers.utilities import get_flatten_specs
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
@@ -33,8 +35,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-np.random.seed(95051)
 
 
 class HyperBand(AutoMLAlgorithmBase):
@@ -87,7 +87,7 @@ class HyperBand(AutoMLAlgorithmBase):
         for key1 in spec:
             if key1 in ("training_config", "train_config", "train"):
                 for key2 in spec[key1]:
-                    if key2 in ("num_epochs", "epochs", "n_epochs", "max_iters"):
+                    if key2 in ("num_epochs", "epochs", "n_epochs", "max_iters", "epoch"):
                         spec[key1][key2] = num_epochs
                     elif key2 in ("train_config"):
                         for key3 in spec[key1][key2]:
@@ -101,8 +101,17 @@ class HyperBand(AutoMLAlgorithmBase):
 
     def generate_automl_param_rec_value(self, parameter_config):
         """Generate a random value for the parameter passed"""
+        parameter_name = parameter_config.get("parameter")
+
+        # Apply custom overrides if provided
+        if self.custom_ranges and parameter_name in self.custom_ranges:
+            for override_key, override_value in self.custom_ranges[parameter_name].items():
+                if override_value is not None:
+                    parameter_config[override_key] = override_value
+
         tp = parameter_config.get("value_type")
         default_value = parameter_config.get("default_value", None)
+        math_cond = parameter_config.get("math_cond", None)
         parent_param = parameter_config.get("parent_param", None)
 
         if tp == "float":
@@ -112,9 +121,28 @@ class HyperBand(AutoMLAlgorithmBase):
                 return float(default_value)
             if (type(v_min) is not str and math.isnan(v_min)) or (type(v_max) is not str and math.isnan(v_max)):
                 return float(default_value)
-            v_min, v_max = get_valid_range(parameter_config, self.parent_params)
-            random_float = np.random.uniform(low=v_min, high=v_max)
-            random_float = clamp_value(random_float, v_min, v_max)
+            v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
+
+            # Apply math condition if specified
+            if math_cond and type(math_cond) is str:
+                parts = math_cond.split(" ")
+                if len(parts) >= 2:
+                    operator = parts[0]
+                    factor = int(float(parts[1]))
+                    if operator == "^":
+                        # Use helper function for power constraints with equal priority
+                        fallback = np.random.uniform(low=v_min, high=v_max)
+                        fallback = clamp_value(fallback, v_min, v_max)
+                        random_float = float(self._apply_power_constraint_with_equal_priority(
+                            v_min, v_max, factor, fallback))
+                    else:
+                        # Regular sampling for non-power constraints
+                        random_float = np.random.uniform(low=v_min, high=v_max)
+                        random_float = clamp_value(random_float, v_min, v_max)
+            else:
+                # No math condition, regular sampling
+                random_float = np.random.uniform(low=v_min, high=v_max)
+                random_float = clamp_value(random_float, v_min, v_max)
 
             if not (type(parent_param) is float and math.isnan(parent_param)):
                 if ((type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or
@@ -222,6 +250,7 @@ class HyperBand(AutoMLAlgorithmBase):
         for param in self.parameters:
             name = param["parameter"]
             rec = self.generate_automl_param_rec_value(param)
+            logger.info(f"Generated random parameter in hyperband: {name} = {rec}")
             hyperparam_dict[name] = rec
         return hyperparam_dict
 

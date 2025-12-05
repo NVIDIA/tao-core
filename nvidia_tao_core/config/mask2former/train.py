@@ -172,13 +172,6 @@ class Mask2FormerTrainExpConfig(TrainConfig):
         A True value instructs train to recompute in backward pass to save GPU memory,
         rather than storing activations.""",
     )
-    verbose: bool = BOOL_FIELD(
-        value=False,
-        display_name="enable verbose logs",
-        description="""
-        Flag to enable printing of detailed learning rate scaling from the optimizer.
-        """
-    )
     iters_per_epoch: Optional[int] = INT_FIELD(
         value=None,  # 20210, 118272
         display_name="iteration per epoch",

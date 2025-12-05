@@ -23,7 +23,7 @@ from datetime import datetime
 from kubernetes import client, config
 
 from nvidia_tao_core.microservices.handlers.ngc_handler import send_ngc_api_request
-from nvidia_tao_core.microservices.job_utils.executor import _get_name_space
+from nvidia_tao_core.microservices.job_utils.executor.utils import get_namespace
 
 # Configure logging
 logging.basicConfig(
@@ -175,7 +175,7 @@ def overwrite_job_logs_from_bcp(logfile, job_name):
     """Get job logs from BCP and overwrite it with existing logs"""
     logger.info("Over-writing job logs from BCP to local")
     try:
-        name_space = _get_name_space()
+        name_space = get_namespace()
         crd_group = 'dgx-job-manager.nvidia.io'
         crd_version = 'v1alpha1'
         crd_plural = 'dgxjobs'

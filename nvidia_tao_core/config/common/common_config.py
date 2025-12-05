@@ -87,6 +87,13 @@ class TrainConfig:
         description="The interval (in epochs) at which a checkpoint will be saved. Helps resume training.",
         popular="yes",
     )
+    checkpoint_interval_unit: str = STR_FIELD(
+        value="epoch",
+        default_value="epoch",
+        valid_options="epoch,step",
+        display_name="Checkpoint interval unit",
+        description="The unit of the checkpoint interval.",
+    )
     validation_interval: int = INT_FIELD(
         value=1,
         valid_min=1,

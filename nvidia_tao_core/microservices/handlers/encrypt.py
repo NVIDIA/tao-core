@@ -46,7 +46,7 @@ class NVVaultEncryption:
     occurs inside this k8s cluster and doesn't need to exchange any info with external servers.
     """
 
-    AES_ENCRYPT_HEADER = b"monai_service_k8s_header"
+    AES_ENCRYPT_HEADER = b"tao_service_k8s_header"
     AES_ENCRYPT_TEXT_KEYS = ['nonce', 'header', 'ciphertext', 'tag']
 
     def __init__(self, config_path):

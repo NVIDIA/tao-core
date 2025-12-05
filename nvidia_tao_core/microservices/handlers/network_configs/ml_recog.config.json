@@ -1,24 +1,29 @@
 {
     "api_params": {
-        "dataset_type":"ml_recog",
-        "actions": ["train","evaluate","export","inference","gen_trt_engine"],
-        "formats":["default"],
-        "accepted_ds_intents": ["training"],
-        "image":"TAO_PYTORCH",
-        "spec_backend":"yaml",
-        "actions_pipe":{
-            "train":"train",
-            "evaluate":"evaluate",
-            "export":"export_with_spec",
-            "inference":"inference",
-            "gen_trt_engine":"gen_trt_engine"
+        "dataset_type": "ml_recog",
+        "actions": [
+            "train",
+            "evaluate",
+            "export",
+            "inference",
+            "gen_trt_engine"
+        ],
+        "formats": [
+            "default"
+        ],
+        "accepted_ds_intents": [
+            "training"
+        ],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference",
+            "gen_trt_engine": "gen_trt_engine"
         }
     },
-
-    "upload_strategy": {
-        "inference": "tarball_after_completion"
-    },
-
     "dataset_validation": {
         "required_files": {
             "default": [
@@ -53,7 +58,6 @@
             ]
         }
     },
-
     "data_sources": {
         "train": {
             "dataset.train_dataset": {
@@ -116,46 +120,50 @@
             }
         }
     },
-
-    "spec_params":{
+    "spec_params": {
         "train": {
-            "results_dir":"output_dir",
+            "results_dir": "output_dir",
             "model.pretrained_model_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model"
         },
-        "evaluate":{
-            "results_dir":"output_dir",
-            "evaluate.checkpoint":"parent_model",
-            "evaluate.trt_engine":"parent_model"
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "evaluate.trt_engine": "parent_model"
         },
-        "inference":{
-            "results_dir":"output_dir",
-            "inference.checkpoint":"parent_model",
-            "inference.trt_engine":"parent_model"
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "inference.trt_engine": "parent_model"
         },
-        "export":{
-            "results_dir":"output_dir",
-            "export.checkpoint":"parent_model",
-            "export.onnx_file":"create_onnx_file"
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file"
         },
-        "gen_trt_engine":{
-            "results_dir":"output_dir",
-            "gen_trt_engine.onnx_file":"parent_model",
-            "gen_trt_engine.trt_engine":"create_engine_file",
-            "gen_trt_engine.tensorrt.calibration.cal_cache_file":"create_cal_cache"
+        "gen_trt_engine": {
+            "results_dir": "output_dir",
+            "gen_trt_engine.onnx_file": "parent_model",
+            "gen_trt_engine.trt_engine": "create_engine_file",
+            "gen_trt_engine.tensorrt.calibration.cal_cache_file": "create_cal_cache"
         }
     },
-
-    "automl_spec_params":{
-        "results_dir":"automl_output_dir",
-        "model.pretrained_model_path":"automl_assign_ptm",
-        "train.resume_training_checkpoint_path":"automl_resume_model",
-        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
-        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval"
+    "automl_spec_params": {
+        "results_dir": "automl_output_dir",
+        "model.pretrained_model_path": "automl_assign_ptm",
+        "train.resume_training_checkpoint_path": "automl_resume_model",
+        "train.checkpoint_interval": "assign_const_value,train.num_epochs",
+        "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval"
     },
-
     "metrics": {
-        "available_metrics": ["val Precision at Rank 1"],
+        "available_metrics": [
+            "val Precision at Rank 1"
+        ],
         "monitoring_metric": "val Precision at Rank 1"
+    },
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        }
     }
 }

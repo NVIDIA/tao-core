@@ -13,13 +13,14 @@
 # limitations under the License.
 
 """Constants values"""
+import os
 
 TAO_NETWORKS = set([
     "action_recognition", "bevfusion", "classification_pyt", "grounding_dino", "mal", "mask2former",
     "mask_grounding_dino", "ml_recog", "ocdnet", "ocrnet", "optical_inspection", "pointpillars",
     "pose_classification", "re_identification", "centerpose", "visual_changenet_classify",
     "visual_changenet_segment", "deformable_detr",
-    "dino", "rtdetr", "segformer",  # PYT CV MODELS
+    "depth_net_mono", "depth_net_stereo", "dino", "rtdetr", "segformer",  # PYT CV MODELS
     "annotations", "analytics", "augmentation", "auto_label", "image"  # Data_Service tasks.
 ])
 MAXINE_NETWORKS = set(["maxine_eye_contact"])  # Maxine networks
@@ -27,15 +28,15 @@ VLM_NETWORKS = set(["vlm"])  # VLM networks
 
 _OD_NETWORKS = set(["deformable_detr", "dino", "grounding_dino", "rtdetr"])
 _PURPOSE_BUILT_MODELS = set([
-    "action_recognition", "bevfusion", "ml_recog", "ocdnet", "ocrnet", "optical_inspection",
-    "pose_classification", "re_identification", "centerpose", "visual_changenet_classify",
+    "action_recognition", "depth_net_mono", "depth_net_stereo", "bevfusion", "ml_recog", "ocdnet", "ocrnet",
+    "optical_inspection", "pose_classification", "re_identification", "centerpose", "visual_changenet_classify",
     "visual_changenet_segment"
 ])
 
 _PYT_TAO_NETWORKS = set([
-    "action_recognition", "bevfusion", "deformable_detr", "dino", "grounding_dino", "mask_grounding_dino",
-    "mal", "mask2former", "ml_recog", "ocdnet", "ocrnet", "optical_inspection", "pointpillars",
-    "pose_classification", "re_identification", "rtdetr", "centerpose", "segformer",
+    "action_recognition", "bevfusion", "depth_net_mono", "depth_net_stereo", "deformable_detr", "dino",
+    "grounding_dino", "mask_grounding_dino", "mal", "mask2former", "ml_recog", "ocdnet", "ocrnet", "optical_inspection",
+    "pointpillars", "pose_classification", "re_identification", "rtdetr", "centerpose", "segformer",
     "visual_changenet_classify", "visual_changenet_segment"
 ])
 _DATA_SERVICES_ACTIONS = set([
@@ -44,12 +45,6 @@ _DATA_SERVICES_ACTIONS = set([
 ])
 _DATA_GENERATE_ACTIONS = set(["dataset_convert_gaze", "augment", "validate_images"])
 
-MEDICAL_CUSTOM_ARCHITECT = ["monai_custom", "monai_classification", "monai_detection", "monai_segmentation"]
-MEDICAL_NETWORK_ARCHITECT = [
-    "monai_vista3d", "monai_vista2d", "monai_annotation", "monai_genai", "monai_maisi"
-] + MEDICAL_CUSTOM_ARCHITECT
-MEDICAL_AUTOML_ARCHITECT = ["monai_automl", "monai_automl_generated"]
-MONAI_NETWORKS = set(MEDICAL_NETWORK_ARCHITECT + MEDICAL_AUTOML_ARCHITECT)  # Data_Service tasks.
 NO_SPEC_ACTIONS_MODEL = (
     "dataset_convert_gaze", "evaluate", "retrain", "export", "gen_trt_engine", "inference"
 )  # Actions with **optional** specs
@@ -72,7 +67,7 @@ TENSORBOARD_EXPERIMENT_LIMIT = 10  # Maximum number of Tensorboard enabled exper
 # only at end of training they run evaluation
 NO_VAL_METRICS_DURING_TRAINING_NETWORKS = set([])
 MISSING_EPOCH_FORMAT_NETWORKS = set([
-    "pointpillars", "bevfusion"
+    "pointpillars", "bevfusion", "cosmos-rl"
 ])  # These networks have the epoch/iter number not following a format; ex: 1.pth instead of 001.pth
 STATUS_CALLBACK_MISMATCH_WITH_CHECKPOINT_EPOCH = set([
     "pointpillars"
@@ -84,22 +79,18 @@ COPY_MODEL_PARAMS_FROM_TRAIN_NETWORKS = [
     "mask_grounding_dino", "mask2former", "visual_changenet_classify", "visual_changenet_segment"
 ]
 
-MONAI_DATASET_DEFAULT_SPECS = {
-    "next_image_strategy": "sequential",
-    "cache_image_url": "",
-    "cache_force": False,
-    "notify_study_urls": [],
-    "notify_image_urls": [],
-    "notify_label_urls": [],
-}
-
-VALID_MODEL_DOWNLOAD_TYPE = ("monai_bundle", "tao")
 CACHE_TIME_OUT = 60 * 60  # cache timeout period in second
 LAST_ACCESS_TIME_OUT = 60  # last access timeout period in second
+
+# Job status timeout configuration
+# Default 15 minutes timeout for job status updates
+JOB_STATUS_TIMEOUT_MINUTES = int(os.getenv("JOB_STATUS_TIMEOUT_MINUTES", "15"))
 
 CONTINUOUS_STATUS_KEYS = ["cur_iter", "epoch", "max_epoch", "eta", "time_per_epoch", "time_per_iter", "key_metric"]
 
 NETWORK_CONTAINER_MAPPING = {"action_recognition": "TAO_PYTORCH",
+                             "depth_net_mono": "TAO_PYTORCH",
+                             "depth_net_stereo": "TAO_PYTORCH",
                              "annotations": "TAO_DS",
                              "auto_label": "TAO_DS",
                              "analytics": "TAO_DS",

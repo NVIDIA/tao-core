@@ -26,7 +26,7 @@ from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
 from nvidia_tao_core.microservices.handlers.stateless_handlers import get_user, get_handler_metadata, serialize_object
 from nvidia_tao_core.microservices.handlers.utilities import Code, decrypt_handler_metadata
 from nvidia_tao_core.microservices.handlers.docker_images import DOCKER_IMAGE_MAPPER
-from nvidia_tao_core.microservices.job_utils import executor as jobDriver
+from nvidia_tao_core.microservices.job_utils.executor import DeploymentExecutor
 
 release_name = os.getenv("RELEASE_NAME", 'tao-api')
 
@@ -75,7 +75,7 @@ class TensorboardHandler:
         )
         tb_image = DOCKER_IMAGE_MAPPER["tensorboard"]
         logs_image = DOCKER_IMAGE_MAPPER["API"]
-        jobDriver.create_tensorboard_deployment(
+        DeploymentExecutor().create_tensorboard_deployment(
             tb_deployment_name,
             tb_image,
             command,
@@ -87,7 +87,7 @@ class TensorboardHandler:
         not_ready_log = False
         logger.info("Check deployment status")
         while (timeout > 0):
-            stat_dict = jobDriver.status_tensorboard_deployment(tb_deployment_name, replicas=replicas)
+            stat_dict = DeploymentExecutor().status_tensorboard_deployment(tb_deployment_name, replicas=replicas)
             status = stat_dict.get("status", "Unknown")
             if status == "Running":
                 logger.info(f"Deployed Tensorboard for {experiment_id}")
@@ -113,24 +113,24 @@ class TensorboardHandler:
         deployment_name = f'{release_name}-tb-deployment-{experiment_id}'
         tb_service_name = f"{release_name}-tb-service-{experiment_id}"
         tb_ingress_name = f'{release_name}-tb-ingress-{experiment_id}'
-        jobDriver.delete_tensorboard_deployment(deployment_name)
-        jobDriver.delete_tensorboard_service(tb_service_name)
-        jobDriver.delete_tensorboard_ingress(tb_ingress_name)
+        DeploymentExecutor().delete_tensorboard_deployment(deployment_name)
+        DeploymentExecutor().delete_tensorboard_service(tb_service_name)
+        DeploymentExecutor().delete_tensorboard_ingress(tb_ingress_name)
         TensorboardHandler.remove_from_user_metadata(user_id)
         return Code(200, {}, "Delete Tensorboard Started")
 
     @staticmethod
     def start_tb_service(tb_service_name, deploy_label, tb_ingress_name, tb_ingress_path):
         """Start the Tensorboard service component."""
-        jobDriver.create_tensorboard_service(tb_service_name, deploy_label)
+        DeploymentExecutor().create_tensorboard_service(tb_service_name, deploy_label)
         timeout = 60
         logger.info("Check TB Service status")
         not_ready_log = False
         while (timeout > 0):
-            service_stat_dict = jobDriver.status_tb_service(tb_service_name)
+            service_stat_dict = DeploymentExecutor().status_tb_service(tb_service_name)
             service_status = service_stat_dict.get("status", "Unknown")
             if service_status == "Running":
-                jobDriver.create_tensorboard_ingress(tb_service_name, tb_ingress_name, tb_ingress_path)
+                DeploymentExecutor().create_tensorboard_ingress(tb_service_name, tb_ingress_name, tb_ingress_path)
                 tb_service_ip = service_stat_dict.get("tb_service_ip", None)
                 logger.info(f"Created Tensorboard service {tb_service_name} at {tb_service_ip}")
                 return Code(200, "Created Tensorboard Service")

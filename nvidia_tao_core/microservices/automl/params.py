@@ -21,11 +21,14 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import get_job_sp
 from nvidia_tao_core.scripts.generate_schema import generate_schema
 from nvidia_tao_core.microservices.utils import get_microservices_network_and_action
 
+import logging
+logger = logging.getLogger(__name__)
+
 _VALID_TYPES = ["int", "integer",
                 "float",
                 "ordered_int", "bool",
                 "ordered", "categorical",
-                "list_1_backbone", "list_1_normal", "list_2", "list_3"]
+                "list_1_backbone", "list_1_normal", "list_2", "list_3", "subset_list", "optional_list"]
 
 
 def flatten_properties(data, parent_key='', sep='.'):
@@ -41,6 +44,23 @@ def flatten_properties(data, parent_key='', sep='.'):
         elif isinstance(v, dict):
             # Otherwise, gather metadata
             dtype = v.get('type', '')
+
+            # Handle union types (anyOf schemas)
+            if 'anyOf' in v and not dtype:
+                # For union types, determine the primary type from anyOf
+                any_of_types = v.get('anyOf', [])
+                if any_of_types:
+                    # Use the first type as the primary type for AutoML
+                    first_type = any_of_types[0].get('type', '')
+                    if first_type == 'integer':
+                        dtype = 'int'
+                    elif first_type == 'number':
+                        dtype = 'float'
+                    elif first_type == 'boolean':
+                        dtype = 'bool'
+                    else:
+                        dtype = first_type
+
             if v.get('type', '') == "number":
                 dtype = "float"
             if v.get('type', '') == "boolean":
@@ -72,10 +92,14 @@ def generate_hyperparams_to_search(
     Returns: a list of dict for AutoML supported networks
     """
     network_arch, _ = get_microservices_network_and_action(job_context.network, job_context.action)
+    logger.info(f"Network arch: {network_arch}")
     if network_arch not in AUTOML_DISABLED_NETWORKS:
         try:
-            json_schema = generate_schema(network_arch)
+            json_schema = generate_schema(network_arch, "train")
         except Exception as e:
+            logger.info(f"Error generating schema for network: {network_arch}")
+            logger.info(f"Job Context Network: {job_context.network}")
+            logger.info(f"Job Context Action: {job_context.action}")
             raise Exception(e) from e
 
         original_train_spec = json_schema.get("default", {})
@@ -97,9 +121,6 @@ def generate_hyperparams_to_search(
             data_frame = data_frame.loc[data_frame['automl_enabled'] != False]  # pylint: disable=C0121  # noqa: E712
 
         data_frame['automl_enabled'] = False
-        # Push params that are dependent on other params to the bottom
-        data_frame = data_frame.sort_values(by=['depends_on'])
-        data_frame = data_frame[::-1]
 
         # Set `automl_enabled` for specific parameters in automl_hyperparameters
         data_frame.loc[data_frame.parameter.isin(automl_hyperparameters), 'automl_enabled'] = True
@@ -107,6 +128,11 @@ def generate_hyperparams_to_search(
         # Filter for automl-enabled and non-deleted parameters
         automl_params = data_frame.loc[data_frame['automl_enabled'] == True]  # pylint: disable=C0121  # noqa: E712
         automl_params = automl_params.loc[~automl_params['parameter'].isin(deleted_params)]
+
+        # Sort automl parameters: push params that are dependent on other params to the bottom
+        # Use na_position='first' to put NaN (no depends_on) first, non-NaN (has depends_on) last
+        automl_params = automl_params.sort_values(by=['depends_on'], na_position='first')
+
         # Select the required columns
         automl_params = automl_params[[
             "parameter",
@@ -119,5 +145,6 @@ def generate_hyperparams_to_search(
             "parent_param",
             "depends_on"
         ]]
+        logger.info(f"Automl params enabled: {automl_params['parameter'].values}")
         return automl_params.to_dict('records'), automl_params["parameter"].values
     return [{}], []

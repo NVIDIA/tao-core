@@ -22,7 +22,7 @@ import json
 import logging as _logging
 import os
 
-from nvidia_tao_core.cloud_handlers.utils import status_callback
+from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
 
 
 class MessageFormatter(_logging.Formatter):
@@ -202,8 +202,8 @@ class BaseLogger(object):
             data_string = self.format_data(data)
             if self.is_master:
                 self.log(verbosity_level, data_string)
-            self.flush()
-            status_callback(data_string)
+                self.flush()
+                status_callback(data_string)
 
 
 class StatusLogger(BaseLogger):

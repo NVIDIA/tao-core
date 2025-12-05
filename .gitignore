@@ -1,8 +1,5 @@
-api/handlers/__pycache__
-*.pyc
-*.ipynb_checkpoints
-.env
-docker/TAO_API_REPOSITORY.txt
-docker/UUID_TAO_HELM.txt
-tao-toolkit-api-*.tgz
+__pycache__
+*.egg-info/
 
+**/build/**
+**/dist/**

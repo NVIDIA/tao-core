@@ -23,7 +23,6 @@ import shutil
 import hashlib
 import requests
 import functools
-import subprocess
 import numpy as np
 import logging
 from filelock import FileLock
@@ -40,16 +39,6 @@ logger = logging.getLogger(__name__)
 NUM_OF_RETRY = 5
 base_exp_uuid = "00000000-0000-0000-0000-000000000000"
 NVCF_SECRET_FILE = "/var/secrets/secrets.json"
-
-
-def run_system_command(command):
-    """Run a linux command - similar to os.system(). Waits till process ends."""
-    result = subprocess.run(['/bin/bash', '-c', command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if result.stdout:
-        logger.info("run_system_command stdout: %s", result.stdout.decode("utf-8"))
-    if result.stderr:
-        logger.error("run_system_command stderr: %s", result.stderr.decode("utf-8"))
-    return 0
 
 
 def sha256_checksum(file_path):
@@ -99,6 +88,25 @@ def read_network_config(network):
     with open(config_json_path, mode='r', encoding='utf-8-sig') as f:
         cli_config = json.load(f)
     return cli_config
+
+
+def get_spec_file_extension(backend):
+    """Get file extension for the given spec backend"""
+    backend_to_extension = {
+        "yaml": "yaml",
+        "protobuf": "txt",
+        "toml": "toml",
+        "json": "json"
+    }
+    return backend_to_extension.get(backend, "yaml")  # default to yaml if unknown
+
+
+def get_spec_backend_info(network):
+    """Get spec backend and file extension from network config"""
+    config = read_network_config(network)
+    spec_backend = config.get("api_params", {}).get("spec_backend", "yaml")
+    file_extension = get_spec_file_extension(spec_backend)
+    return spec_backend, file_extension
 
 
 def get_microservices_network_and_action(network, action):
@@ -660,9 +668,6 @@ class DataMonitorLogTypeEnum(str, Enum):
     tao_job = "TAO_JOB"
     tao_experiment = "TAO_EXPERIMENT"
     tao_dataset = "TAO_DATASET"
-    medical_job = "MEDICAL_JOB"
-    medical_experiment = "MEDICAL_EXPERIMENT"
-    medical_dataset = "MEDICAL_DATASET"
 
 
 def log_monitor(log_type, log_content):

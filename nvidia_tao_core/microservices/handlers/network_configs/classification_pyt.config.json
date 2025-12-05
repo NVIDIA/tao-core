@@ -1,26 +1,35 @@
 {
     "api_params": {
-        "dataset_type":"image_classification",
-        "actions": ["train", "distill", "quantize", "evaluate","export","gen_trt_engine","inference"],
-        "formats":["classification_pyt"],
-        "accepted_ds_intents": ["training", "evaluation", "testing"],
-        "image":"TAO_PYTORCH",
-        "spec_backend":"yaml",
-        "actions_pipe":{
-            "train":"train",
-            "distill":"train",
-            "quantize":"train",
-            "evaluate":"evaluate",
-            "export":"export_with_spec",
-            "gen_trt_engine":"gen_trt_engine",
-            "inference":"inference"
+        "dataset_type": "image_classification",
+        "actions": [
+            "train",
+            "distill",
+            "quantize",
+            "evaluate",
+            "export",
+            "gen_trt_engine",
+            "inference"
+        ],
+        "formats": [
+            "classification_pyt"
+        ],
+        "accepted_ds_intents": [
+            "training",
+            "evaluation",
+            "testing"
+        ],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "distill": "train",
+            "quantize": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "gen_trt_engine": "gen_trt_engine",
+            "inference": "inference"
         }
     },
-
-    "upload_strategy": {
-        "inference": "tarball_after_completion"
-    },
-
     "data_sources": {
         "train": {
             "dataset.train_dataset.images_dir": {
@@ -71,6 +80,11 @@
                 "source": "eval_dataset",
                 "multiple_sources": false,
                 "path": "images_val.tar.gz"
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "calibration_dataset",
+                "multiple_sources": false,
+                "path": "images_train.tar.gz"
             }
         },
         "evaluate": {
@@ -115,55 +129,59 @@
             }
         }
     },
-
-    "spec_params":{
+    "spec_params": {
         "train": {
-            "results_dir":"output_dir",
-            "model.backbone.pretrained_backbone_path":"ptm_if_no_resume_model",
-            "train.pretrained_model_path":"ptm_if_no_resume_model",
-            "train.resume_training_checkpoint_path":"resume_model"
+            "results_dir": "output_dir",
+            "model.backbone.pretrained_backbone_path": "ptm_if_no_resume_model",
+            "train.pretrained_model_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model"
         },
         "distill": {
-            "results_dir":"output_dir",
-            "distill.pretrained_teacher_model_path":"parent_model"
+            "results_dir": "output_dir",
+            "distill.pretrained_teacher_model_path": "parent_model"
         },
         "quantize": {
-            "results_dir":"output_dir",
-            "quantize.model_path":"parent_model"
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model"
         },
-        "evaluate":{
-            "results_dir":"output_dir",
-            "evaluate.checkpoint":"parent_model"
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model"
         },
         "export": {
-            "results_dir":"output_dir",
-            "export.checkpoint":"parent_model",
-            "export.onnx_file":"create_onnx_file"
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file"
         },
         "inference": {
-            "results_dir":"output_dir",
-            "inference.checkpoint":"parent_model",
-            "inference.trt_engine":"parent_model"
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "inference.trt_engine": "parent_model"
         },
         "gen_trt_engine": {
-            "results_dir":"output_dir",
-            "gen_trt_engine.onnx_file":"parent_model",
-            "gen_trt_engine.trt_engine":"create_engine_file"
+            "results_dir": "output_dir",
+            "gen_trt_engine.onnx_file": "parent_model",
+            "gen_trt_engine.trt_engine": "create_engine_file"
         }
     },
-
-    "automl_spec_params":{
-        "results_dir":"automl_output_dir",
-        "model.backbone.pretrained_backbone_path":"automl_assign_ptm",
-        "train.pretrained_model_path":"automl_assign_ptm",
-        "distill.teacher_model_path":"automl_resume_model",
-        "train.resume_training_checkpoint_path":"automl_resume_model",
-        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
-        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval"
+    "automl_spec_params": {
+        "results_dir": "automl_output_dir",
+        "model.backbone.pretrained_backbone_path": "automl_assign_ptm",
+        "train.pretrained_model_path": "automl_assign_ptm",
+        "distill.teacher_model_path": "automl_resume_model",
+        "train.resume_training_checkpoint_path": "automl_resume_model",
+        "train.checkpoint_interval": "assign_const_value,train.num_epochs",
+        "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval"
     },
-
     "metrics": {
-        "available_metrics": ["val_acc_1"],
+        "available_metrics": [
+            "val_acc_1"
+        ],
         "monitoring_metric": "val_acc_1"
+    },
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        }
     }
 }

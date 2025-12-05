@@ -36,7 +36,6 @@ import glob
 import json
 import math
 import uuid
-import shutil
 import requests
 import tempfile
 import traceback
@@ -50,19 +49,14 @@ from nvidia_tao_core.microservices.constants import (
     _PYT_TAO_NETWORKS,
     STATUS_CALLBACK_MISMATCH_WITH_CHECKPOINT_EPOCH,
     MISSING_EPOCH_FORMAT_NETWORKS,
-    MONAI_NETWORKS
 )
-from nvidia_tao_core.microservices.handlers.cloud_storage import create_cs_instance
+from nvidia_tao_core.microservices.network_utils.network_constants import gpu_mapper, node_mapper
+from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
 from nvidia_tao_core.microservices.handlers.encrypt import NVVaultEncryption
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     get_handler_metadata,
     get_handler_job_metadata,
-    get_handler_root,
-    get_jobs_root,
     get_job_specs,
-    get_base_experiment_path,
-    get_root,
-    get_latest_ver_folder,
     get_automl_brain_info,
     get_automl_controller_info,
     get_dnn_status,
@@ -75,13 +69,7 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     get_workspace_string_identifier,
     BACKEND
 )
-from nvidia_tao_core.microservices.handlers.monai.template_python import (
-    TEMPLATE_TIS_MODEL,
-    TEMPLATE_TIS_CONFIG,
-    TEMPLATE_CONTINUAL_LEARNING
-)
 from nvidia_tao_core.microservices.handlers.ngc_handler import validate_ptm_download
-from nvidia_tao_core.microservices.handlers.monai.helpers import find_matching_bundle_dir
 from nvidia_tao_core.microservices.utils import create_folder_with_permissions, get_monitoring_metric
 
 # Configure logging
@@ -171,8 +159,6 @@ class JobContext:
         self.job_details = {}
         self.specs = specs
         # validate and update num_gpu
-        if specs is not None and network in MONAI_NETWORKS:
-            self.specs["num_gpu"] = validate_num_gpu(specs.get("num_gpu"), action)[0]
         self.name = name
         self.description = description
         self.num_gpu = num_gpu
@@ -570,7 +556,8 @@ class StatusParser:
                     else:
                         criterion = metric
                     reverse_sort = True
-                    if metric == "loss" or criterion in ("loss", "evaluation_cost "):
+                    logger.info("Metric: %s, Criterion: %s in read_metric", metric, criterion)
+                    if metric == "loss" or criterion in ("loss", "evaluation_cost") or "loss" in criterion:
                         reverse_sort = False
 
                     if log["metric"] == criterion:
@@ -639,7 +626,7 @@ def search_for_dataset(root):
 
 
 def search_for_base_experiment(root, network=""):
-    """Return path of the Base-experiment file for MonAI or spec file for TAO under the Base-experiment root folder"""
+    """Return path of the Base-experiment file or spec file for TAO under the Base-experiment root folder"""
     artifacts = (
         glob.glob(root + "/**/*.tlt", recursive=True) +
         glob.glob(root + "/**/*.hdf5", recursive=True) +
@@ -850,12 +837,13 @@ def get_flatten_specs(dict_spec, flat_specs, parent=""):
 
 def get_total_epochs(job_context, handler_root, automl=False, automl_experiment_id=None):
     """Get the epoch/iter number from specs of train action"""
-    spec = get_job_specs(job_context.id)
+    job_id = job_context if type(job_context) is str else job_context.id
+    spec = get_job_specs(job_id, automl=automl, automl_experiment_id=automl_experiment_id)
     max_epoch = 100.0
     for key1 in spec:
         if key1 in ("training_config", "train_config", "train"):
             for key2 in spec[key1]:
-                if key2 in ("num_epochs", "epochs", "n_epochs", "max_iters"):
+                if key2 in ("num_epochs", "epochs", "n_epochs", "max_iters", "epoch"):
                     max_epoch = int(spec[key1][key2])
                 elif key2 in ("train_config"):
                     for key3 in spec[key1][key2]:
@@ -890,11 +878,50 @@ def _check_gpu_conditions(field_name, field_value):
             )
 
 
-def get_num_gpus_from_spec(spec, action, default=0):
+def get_nested_dict_value(data, key_path):
+    """Get value from nested dictionary using dot notation key path.
+
+    Args:
+        data (dict): The dictionary to search in
+        key_path (str): Dot-separated key path (e.g., "policy.parallelism.dp_shard_size")
+
+    Returns:
+        The value at the key path, or None if not found
+    """
+    if not key_path or not isinstance(data, dict):
+        return None
+
+    keys = key_path.split('.')
+    current = data
+
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return None
+
+    return current
+
+
+def get_num_gpus_from_spec(spec, action, network=None, default=0):
     """Validate the gpus requested"""
     if not isinstance(spec, dict):
         return default
+
     gpu_set_values = []
+
+    # First check for network-specific GPU parameter using gpu_mapper
+    if network and network in gpu_mapper:
+        gpu_param_path = gpu_mapper[network]
+        if gpu_param_path:  # Only check if there's a non-empty path defined
+            network_gpu_value = get_nested_dict_value(spec, gpu_param_path)
+            if network_gpu_value is not None and network_gpu_value != 0:
+                if isinstance(network_gpu_value, (int, float)):
+                    gpu_set_values.append(int(network_gpu_value))
+                elif isinstance(network_gpu_value, list):
+                    gpu_set_values.append(len(set(network_gpu_value)))
+
+    # Fall back to original logic for standard GPU parameters
     for gpu_param_name in ("gpus", "num_gpus", "gpu_ids", "gpu_id"):
         field_value = 0
         field_name = ""
@@ -922,7 +949,7 @@ def get_num_gpus_from_spec(spec, action, default=0):
     return 1
 
 
-def get_num_nodes_from_spec(spec, action, default=1):
+def get_num_nodes_from_spec(spec, action, network=None, default=1):
     """Validate the nodes requested
 
     Args:
@@ -936,6 +963,16 @@ def get_num_nodes_from_spec(spec, action, default=1):
     if not isinstance(spec, dict):
         return default
     node_set_values = []
+
+    # First check for network-specific node parameter using node_mapper
+    if network and network in node_mapper:
+        node_param_path = node_mapper[network]
+        if node_param_path:  # Only check if there's a non-empty path defined
+            network_node_value = get_nested_dict_value(spec, node_param_path)
+            if network_node_value is not None and network_node_value != 0:
+                if isinstance(network_node_value, (int, float)):
+                    node_set_values.append(int(network_node_value))
+
     # Accessing num_nodes under train['system']
     node_param_name = "num_nodes"
 
@@ -1203,8 +1240,16 @@ def sanitize_metadata(metadata):
     metadata.pop('_id', None)
 
 
-def latest_model(files, delimiters="_", epoch_number="000", extensions=[".tlt", ".hdf5", ".pth"]):
+def latest_model(files, delimiters="_", epoch_number="000", extensions=[".tlt", ".hdf5", ".pth"], network_name=""):
     """Returns the latest generated model file based on epoch number"""
+    # Update extensions based on network config if available
+    if network_name:
+        network_config = get_network_config(network_name)
+        checkpoint_config = network_config.get("checkpoint", {})
+        if checkpoint_config:
+            checkpoint_format = checkpoint_config.get("format", "")
+            if checkpoint_format:
+                extensions = [f".{checkpoint_format}"]
     cur_best = 0
     best_model = None
     for file in files:
@@ -1236,18 +1281,81 @@ def latest_model(files, delimiters="_", epoch_number="000", extensions=[".tlt", 
     return checkpoint_name
 
 
-def filter_files(files, regex_pattern=""):
-    """Filter file list based on regex provided"""
+def filter_files(files, regex_pattern="", network_name=""):
+    """Filter file list based on regex provided
+
+    Args:
+        files: List of file paths to filter
+        regex_pattern: Custom regex pattern to use for filtering
+        network_name: Network name to read checkpoint config from network_configs
+
+    Returns:
+        List of filtered file paths
+    """
+    # Try to get checkpoint config from network configuration
     if not regex_pattern:
         regex_pattern = r'^(?!.*lightning_logs).*\.(pth|tlt|hdf5)$'
+
+    if network_name:
+        network_config = get_network_config(network_name)
+        checkpoint_config = network_config.get("checkpoint", {})
+
+        if checkpoint_config:
+            checkpoint_format = checkpoint_config.get("format", "")
+            # Build regex pattern based on format
+            if checkpoint_format:
+                regex_pattern = rf'.*\.{re.escape(checkpoint_format)}$'
+
     checkpoints = [path for path in files if re.match(regex_pattern, path)]
     return checkpoints
 
 
-def filter_file_objects(file_objects, regex_pattern=""):
-    """Based on regex provided filter file_objects list"""
+def get_network_config(network_name):
+    """Read network configuration from network_configs directory"""
+    if not network_name:
+        return {}
+
+    # Get the directory where this utilities.py file is located
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_file = os.path.join(current_dir, "network_configs", f"{network_name}.config.json")
+
+    if not os.path.exists(config_file):
+        return {}
+
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        logger.error("Error reading network config for %s: %s", network_name, str(e))
+        return {}
+
+
+def filter_file_objects(file_objects, regex_pattern="", network_name=""):
+    """Based on regex provided filter file_objects list
+
+    Args:
+        file_objects: List of file objects to filter
+        regex_pattern: Custom regex pattern to use for filtering
+        network_name: Network name to read checkpoint config from network_configs
+
+    Returns:
+        List of filtered file objects
+    """
+    # Try to get checkpoint config from network configuration
     if not regex_pattern:
         regex_pattern = r'.*\.(pth|tlt|hdf5)$'
+
+    if network_name:
+        network_config = get_network_config(network_name)
+        checkpoint_config = network_config.get("checkpoint", {})
+
+        if checkpoint_config:
+            checkpoint_format = checkpoint_config.get("format", "")
+            # Build regex pattern based on format
+            if checkpoint_format:
+                regex_pattern = rf'.*\.{re.escape(checkpoint_format)}$'
+
     filtered_objects = [file_object for file_object in file_objects if re.match(regex_pattern, file_object.name)]
     return filtered_objects
 
@@ -1260,7 +1368,7 @@ def format_checkpoints_path(checkpoints):
     return checkpoint_name
 
 
-def from_epoch_number(files, delimiters="", epoch_number="000"):
+def from_epoch_number(files, delimiters="", epoch_number="000", network_name=""):
     """Based on the epoch number string passed, returns the path of the checkpoint.
 
     If a checkpoint with the epoch info is not present, raises an exception.
@@ -1282,13 +1390,14 @@ def from_epoch_number(files, delimiters="", epoch_number="000"):
     (?:_({epoch_number}))               # Match '_<epoch_number>' for MISSING_EPOCH_FORMAT_NETWORKS
     \.(pth|tlt|hdf5)$                   # Match file extensions
     '''
-    checkpoints = filter_files(files, regex_pattern)
+    checkpoints = filter_files(files, regex_pattern, network_name=network_name)
     checkpoint_name = format_checkpoints_path(checkpoints)
     return checkpoint_name
 
 
-def _get_result_file_path(checkpoint_function, files, format_epoch_number):
-    result_file = checkpoint_function(files, delimiters="_", epoch_number=format_epoch_number)
+def _get_result_file_path(checkpoint_function, files, format_epoch_number, network_name=""):
+    result_file = checkpoint_function(files, delimiters="_", epoch_number=format_epoch_number,
+                                      network_name=network_name)
     return result_file
 
 
@@ -1378,7 +1487,8 @@ def search_for_checkpoint(handler_metadata, job_id, res_root, files, checkpoint_
         result_file = _get_result_file_path(
             checkpoint_function=checkpoint_function,
             files=files,
-            format_epoch_number=format_epoch_number
+            format_epoch_number=format_epoch_number,
+            network_name=network
         )
         if (not result_file) and (checkpoint_choose_method in ("best_model", "from_epoch_number")):
             logger.warning(
@@ -1389,7 +1499,8 @@ def search_for_checkpoint(handler_metadata, job_id, res_root, files, checkpoint_
             result_file = _get_result_file_path(
                 checkpoint_function=checkpoint_function,
                 files=files,
-                format_epoch_number=format_epoch_number
+                format_epoch_number=format_epoch_number,
+                network_name=network
             )
 
     return result_file
@@ -1414,10 +1525,12 @@ def resolve_checkpoint_root_and_search(handler_metadata, job_id, folder=False, r
         return None
 
     files, action, res_root, workspace_id = get_files_from_cloud(handler_metadata, job_id)
+    network = handler_metadata.get("network_arch", "")
 
     if action == "retrain":
         action = "train"
 
+    result_file = None
     if action in ("train", "distill", "quantize"):
         checkpoint_choose_method = handler_metadata.get("checkpoint_choose_method", "best_model")
         result_file = search_for_checkpoint(
@@ -1428,21 +1541,19 @@ def resolve_checkpoint_root_and_search(handler_metadata, job_id, folder=False, r
             checkpoint_choose_method=checkpoint_choose_method
         )
 
-    elif action == "prune":
-        result_file = filter_files(files)
+    if action == "export" or (action == "quantize" and not result_file):
+        regex_pattern = regex if regex else r'.*\.(onnx|uff)$'
+        result_file = filter_files(files, regex_pattern=regex_pattern, network_name=network)
         result_file = format_checkpoints_path(result_file)
 
-    elif action == "export":
-        regex_pattern = regex if regex else r'.*\.(onnx|uff)$'
-        result_file = filter_files(files, regex_pattern=regex_pattern)
+    elif action == "prune":
+        result_file = filter_files(files, network_name=network)
         result_file = format_checkpoints_path(result_file)
 
     elif action in ("trtexec", "gen_trt_engine"):
         regex_pattern = regex if regex else r'.*\.(engine)$'
-        result_file = filter_files(files, regex_pattern=regex_pattern)
+        result_file = filter_files(files, regex_pattern=regex_pattern, network_name=network)
         result_file = format_checkpoints_path(result_file)
-    else:
-        result_file = None
 
     if result_file:
         workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
@@ -1457,283 +1568,3 @@ def resolve_checkpoint_root_and_search(handler_metadata, job_id, folder=False, r
 def get_model_results_path(handler_metadata, job_id, folder=False):
     """Return the model file for the job context and handler metadata passes"""
     return resolve_checkpoint_root_and_search(handler_metadata, job_id, folder=folder)
-
-
-def get_model_bundle_root(org_name, experiment_id):
-    """Returns the path to the model bundle directory"""
-    model_root = os.path.join(get_root(), org_name, "experiments", experiment_id)
-    return os.path.join(model_root, "bundle")
-
-
-def get_model_name(bundle_name):
-    """Remove the version number from the bundle name to get the model name for TIS"""
-    return re.sub(r"_v\d+\.\d+\.\d+", "", bundle_name)
-
-
-def copy_bundle_base_experiment2model(
-    base_experiment_id,
-    org_name,
-    user_id,
-    experiment_id,
-    patterns=[r'(.+?)_v\d+\.\d+\.\d+'],
-    job_id=None
-):
-    """Copies the pre-trained model to the model directory.
-
-    Except the pre-trained weights, the whole bundle will be copied.
-
-    - If the base_experiment is from NGC, then the directory will be under:
-      {base_exp_uuid}/experiments/{base_exp_uuid}/<experiment_id>
-        ├── metadata.json
-        └── spleen_deepedit_annotation_v1.2.3 （not a real version)
-            ├── configs
-            ├── docs
-            ├── LICENSE
-            └── models
-
-    - If the base_experiment is from a previously-trained model, the job_id has to be provided to locate the model.
-      The orgs/<org_name>/users/<user_id>/<job_id> directory will be:
-        └── spleen_deepedit_annotation_v1.2.3 （not a real version)
-            ├── configs
-            ├── docs
-            ├── LICENSE
-            └── models
-
-    Args:
-        base_experiment_id (str): The PTM ID
-        org_name (str): The user ID
-        experiment_id (str): The model ID
-        patterns (list): The regex pattern to match the PTM name
-        job_id (str): The job ID
-
-    Returns:
-        bool: True if the PTM is copied successfully, False otherwise
-        str: message why it failed, or the name of the bundle if successful
-    """
-    # base_experiment_root = get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, base_experiment_id)
-    # This change is based on:
-    # https://nvidia.slack.com/archives/C0696NHU7A7/p1704767995516689
-    base_experiment_root = get_base_experiment_path(base_experiment_id, create_if_not_exist=False)
-    base_experiment_root = base_experiment_root if job_id is None else os.path.join(base_experiment_root, str(job_id))
-    if not os.path.isdir(base_experiment_root):
-        # the base experiment is not a directory only if job_id is provided
-        if job_id:
-            base_experiment_root = os.path.join(get_jobs_root(user_id, org_name), str(job_id))
-        else:
-            base_experiment_root = get_handler_root(
-                org_name=org_name,
-                kind="experiments",
-                handler_id=base_experiment_id
-            )
-
-    if not os.path.isdir(base_experiment_root):
-        return False, None, "PTM not found"
-
-    # Find an item that matches one of the patterns
-    # e.g. spleen_deepedit_annotation_v1.2.3 （not a real version)
-    matching_item = find_matching_bundle_dir(base_experiment_root, patterns)
-    if not matching_item:
-        return False, None, "No matching item found"
-
-    src = os.path.join(base_experiment_root, matching_item)
-    # dst_root = /shared/orgs/<org_name>/experiments/<experiment_id>/bundle/<tis_model_name>
-    dst_root = os.path.join(get_model_bundle_root(org_name, experiment_id), get_model_name(matching_item))
-    dst = os.path.join(dst_root, matching_item)
-
-    # Ensure destination directory (bundle dir inside tis model dir) exists and is empty
-    os.makedirs(dst_root, exist_ok=True)
-    if os.path.exists(dst):
-        shutil.rmtree(dst)
-
-    # Copy bundle to the model directory
-    shutil.copytree(src, dst)
-
-    return True, matching_item, "Copy succeeded"
-
-
-def ensure_script_format(config, prefix="", postfix=""):
-    """Format a list to a string that can be used in the script file"""
-    if isinstance(config, list):
-        config_file_str = ', '.join(f'"{prefix}{x}{postfix}"' for x in config)  # If it's a list, join the items
-        config_file_str = f"[{config_file_str}]"
-    elif isinstance(config, str):
-        config_file_str = f'"{prefix}{config}{postfix}"'
-    else:
-        # None or dict
-        config_file_str = f"{config}"
-    return config_file_str
-
-
-def generate_tis_model_script(bundle_name, model_params):
-    """Generate the Triton Inference Server model script"""
-    override = model_params.get("override", {})
-    image_key = model_params.get("image_key", "image")
-    output_postfix = override.get("output_postfix", "seg")
-    output_ext = override.get("output_ext", ".nrrd")
-    output_dtype = override.get("output_dtype", "uint8")
-    # can be customized by the user
-    override["output_postfix"] = output_postfix
-    override["output_ext"] = output_ext
-    override["output_dtype"] = output_dtype
-
-    # no need and not open for customization
-    output_dir = "inference_results"
-    override["separate_folder"] = False
-    override["output_dir"] = output_dir
-    override["dataset#data"] = [{}]
-
-    return TEMPLATE_TIS_MODEL.format(
-        bundle_name=bundle_name,
-        image_key=image_key,
-        override=override,
-        output_dir=output_dir,
-    )
-
-
-def generate_config_pbtxt(tis_model):
-    """Generate the Triton Inference Server config.pbtxt"""
-    return TEMPLATE_TIS_CONFIG.format(tis_model=tis_model)
-
-
-def _check_tis_model_params(model_params):
-    """Check the format of model_params"""
-    if not isinstance(model_params, dict):
-        return False, f"model_params should be a dict, got {type(model_params)}."
-    if "override" in model_params:
-        override = model_params["override"]
-        if isinstance(override, dict):
-            return validate_monai_bundle_params(override)
-        return False, f"Value of key `override` in model_params should be a dict, got {type(override)}."
-
-    return True, ""
-
-
-def get_monai_bundle_path(src_root):
-    """Get the first folder path that has a monai bundle."""
-    src_root_contents = os.listdir(src_root)
-    for content in src_root_contents:
-        content_path = os.path.join(src_root, content)
-        if os.path.isdir(content_path):
-            monai_bundle_content = ["configs", "models", "docs", "LICENSE"]
-            monai_bundle_paths = [os.path.join(content_path, x) for x in monai_bundle_content]
-            paths_exist = [os.path.exists(x) for x in monai_bundle_paths]
-            if not all(paths_exist):
-                continue
-            return Code(200, content, "Got path!")
-    return Code(404, {}, "Cannot export monai bundle.")
-
-
-def generate_bundle_requirements_file(generate_dir, bundle_metadata):
-    """Generate the requirements.txt file for the bundle."""
-    libs = []
-    restrict_libs = ["monai", "torch", "torchvision", "numpy", "pytorch-ignite"]
-
-    if "optional_packages_version" in bundle_metadata.keys():
-        optional_dict = bundle_metadata["optional_packages_version"]
-        for name, version in optional_dict.items():
-            if name not in restrict_libs:
-                libs.append(f"{name}=={version}")
-
-    if len(libs) > 0:
-        requirements_file_name = "requirements.txt"
-        with open(os.path.join(generate_dir, requirements_file_name), "w", encoding="utf-8") as f:
-            for line in libs:
-                f.write(f"{line}\n")
-
-
-def prep_tis_model_repository(
-    model_params,
-    base_experiment_id,
-    org_name,
-    user_id,
-    experiment_id,
-    patterns=[r'(.+?)_v\d+\.\d+\.\d+'],
-    job_id=None,
-    update_model=False
-):
-    """Prepare the model repository for Triton Inference Server"""
-    # Copy the PTM to the model directory
-    success, bundle_name, msg = copy_bundle_base_experiment2model(
-        base_experiment_id,
-        org_name,
-        user_id,
-        experiment_id,
-        patterns,
-        job_id
-    )
-    if not success:
-        # should return 4 values to unify with successful return
-        return False, None, msg, None
-    check_result, check_msg = _check_tis_model_params(model_params)
-    if not check_result:
-        return False, None, check_msg, None
-
-    # Generate {model_repository}/{tis_model}/{model_version}/model.py
-    model_script = generate_tis_model_script(bundle_name, model_params)
-    tis_model = get_model_name(bundle_name)
-    tis_model_path = os.path.join(get_model_bundle_root(org_name, experiment_id), tis_model)
-    os.makedirs(tis_model_path, exist_ok=True)
-    lastest_ver = get_latest_ver_folder(tis_model_path)
-    # produce a new version subfolder
-    model_dir = os.path.join(tis_model_path, str(lastest_ver + 1))
-    os.makedirs(model_dir, exist_ok=True)
-    model_script_path = os.path.join(model_dir, "model.py")
-    with open(model_script_path, "w", encoding="utf-8") as f:
-        f.write(model_script)
-
-    model_bundle_configs_dir = os.path.join(os.path.dirname(model_dir), bundle_name, "configs")
-    model_bundle_config_metadata_json = os.path.join(model_bundle_configs_dir, "metadata.json")
-    model_bundle_metadata = {}
-    if os.path.exists(model_bundle_config_metadata_json):
-        with open(model_bundle_config_metadata_json, encoding="utf-8") as fp:
-            model_bundle_metadata = json.load(fp)
-
-    # no need to re-produce config.pbtxt if just update the model
-    if not update_model:
-        # Generate {model_repository}/{tis_model}/config.pbtxt
-        config_pbtxt = generate_config_pbtxt(tis_model)
-        config_pbtxt_path = os.path.join(get_model_bundle_root(org_name, experiment_id), tis_model, "config.pbtxt")
-        with open(config_pbtxt_path, "w", encoding="utf-8") as f:
-            f.write(config_pbtxt)
-
-    # prepare requirements file
-    generate_bundle_requirements_file(tis_model_path, model_bundle_metadata)
-
-    return True, tis_model, "Triton Inference Server model repository prepared successfully", model_bundle_metadata
-
-
-def validate_monai_bundle_params(model_params):
-    """Validate the the param are internal model params withheld from user"""
-    if not isinstance(model_params, dict):
-        return False, f"model_param override should be a dict, got {type(model_params)}."
-    for key in ["bundle_root", "workflow_type", "ckpt_dir", "finetune_model_path"]:
-        if key in model_params:
-            return False, f"Override {key} in model_params is not allowed."
-    for key in ["num_gpu", "cluster"]:
-        if key in model_params:
-            model_params.pop(key)
-    return True, ""
-
-
-def generate_cl_script(notify_record, job_context, handler_root, logfile, logs_from_toolkit):
-    """Generate the continual learning script"""
-    job_context_dict = {
-        "id": job_context.id,
-        "parent_id": job_context.parent_id,
-        "network": job_context.network,
-        "action": job_context.action,
-        "handler_id": job_context.handler_id,
-        "user_id": job_context.user_id,
-        "org_name": job_context.org_name,
-        "kind": job_context.kind,
-        "created_on": job_context.created_on,
-        "last_modified": job_context.last_modified,
-        "specs": job_context.specs,
-    }
-    return TEMPLATE_CONTINUAL_LEARNING.format(
-        notify_record=notify_record,
-        job_context_dict=job_context_dict,
-        handler_root=handler_root,
-        logfile=logfile,
-        logs_from_toolkit=logs_from_toolkit,
-    )

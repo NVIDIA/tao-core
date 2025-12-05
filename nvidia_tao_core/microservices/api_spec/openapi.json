@@ -518,8 +518,7 @@
                             "classification_pyt",
                             "classification_tf2",
                             "visual_changenet_segment",
-                            "visual_changenet_classify",
-                            "monai"
+                            "visual_changenet_classify"
                         ],
                         "type": "string"
                     },
@@ -730,8 +729,7 @@
                             "classification_pyt",
                             "classification_tf2",
                             "visual_changenet_segment",
-                            "visual_changenet_classify",
-                            "monai"
+                            "visual_changenet_classify"
                         ],
                         "type": "string"
                     },
@@ -1121,12 +1119,6 @@
                         ],
                         "type": "string"
                     },
-                    "bundle_url": {
-                        "format": "regex",
-                        "maxLength": 1000,
-                        "nullable": true,
-                        "type": "string"
-                    },
                     "calibration_dataset": {
                         "format": "uuid",
                         "maxLength": 36,
@@ -1244,17 +1236,6 @@
                             "rtdetr",
                             "auto_label",
                             "image",
-                            "monai_vista3d",
-                            "monai_vista2d",
-                            "monai_segmentation",
-                            "monai_annotation",
-                            "monai_classification",
-                            "monai_detection",
-                            "monai_automl",
-                            "monai_custom",
-                            "monai_genai",
-                            "monai_maisi",
-                            "monai_automl_generated",
                             "maxine_eye_contact"
                         ],
                         "type": "string"
@@ -1269,16 +1250,6 @@
                     },
                     "read_only": {
                         "type": "boolean"
-                    },
-                    "realtime_infer": {
-                        "type": "boolean"
-                    },
-                    "realtime_infer_request_timeout": {
-                        "format": "int64",
-                        "maximum": 9223372036854775807,
-                        "minimum": 0,
-                        "nullable": true,
-                        "type": "integer"
                     },
                     "retry_experiment_id": {
                         "format": "uuid",
@@ -1318,7 +1289,6 @@
                     "type": {
                         "enum": [
                             "vision",
-                            "medical",
                             "maxine"
                         ],
                         "type": "string"
@@ -1441,12 +1411,6 @@
                         ],
                         "type": "string"
                     },
-                    "bundle_url": {
-                        "format": "regex",
-                        "maxLength": 1000,
-                        "nullable": true,
-                        "type": "string"
-                    },
                     "calibration_dataset": {
                         "format": "uuid",
                         "maxLength": 36,
@@ -1495,8 +1459,7 @@
                                 "classification_pyt",
                                 "classification_tf2",
                                 "visual_changenet_segment",
-                                "visual_changenet_classify",
-                                "monai"
+                                "visual_changenet_classify"
                             ],
                             "type": "string"
                         },
@@ -1642,17 +1605,6 @@
                             "rtdetr",
                             "auto_label",
                             "image",
-                            "monai_vista3d",
-                            "monai_vista2d",
-                            "monai_segmentation",
-                            "monai_annotation",
-                            "monai_classification",
-                            "monai_detection",
-                            "monai_automl",
-                            "monai_custom",
-                            "monai_genai",
-                            "monai_maisi",
-                            "monai_automl_generated",
                             "maxine_eye_contact"
                         ],
                         "type": "string"
@@ -1666,34 +1618,6 @@
                         "type": "boolean"
                     },
                     "read_only": {
-                        "type": "boolean"
-                    },
-                    "realtime_infer": {
-                        "nullable": true,
-                        "type": "boolean"
-                    },
-                    "realtime_infer_endpoint": {
-                        "format": "regex",
-                        "maxLength": 1000,
-                        "nullable": true,
-                        "type": "string",
-                        "writeOnly": true
-                    },
-                    "realtime_infer_model_name": {
-                        "format": "regex",
-                        "maxLength": 1000,
-                        "nullable": true,
-                        "type": "string",
-                        "writeOnly": true
-                    },
-                    "realtime_infer_request_timeout": {
-                        "format": "int64",
-                        "maximum": 86400,
-                        "minimum": 0,
-                        "nullable": true,
-                        "type": "integer"
-                    },
-                    "realtime_infer_support": {
                         "type": "boolean"
                     },
                     "sha256_digest": {
@@ -1741,7 +1665,6 @@
                     "type": {
                         "enum": [
                             "vision",
-                            "medical",
                             "maxine"
                         ],
                         "nullable": true,
@@ -4316,8 +4239,7 @@
                         "required": false,
                         "schema": {
                             "enum": [
-                                "vision",
-                                "medical"
+                                "vision"
                             ],
                             "type": "string"
                         }
@@ -6516,8 +6438,7 @@
                         "required": false,
                         "schema": {
                             "enum": [
-                                "vision",
-                                "medical"
+                                "vision"
                             ],
                             "type": "string"
                         }
@@ -6890,7 +6811,6 @@
                         "required": false,
                         "schema": {
                             "enum": [
-                                "monai",
                                 "unet",
                                 "custom"
                             ],

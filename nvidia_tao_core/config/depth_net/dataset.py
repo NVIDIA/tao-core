@@ -44,35 +44,29 @@ class DNDatasetConvertConfig:
         description="Path to where the converted dataset is serialized.",
         display_name="results directory"
     )
-    image_dir_name: str = STR_FIELD(
-        value="",
-        default_value="",
-        description="Name of the image directory relative to the dataset root.",
-        display_name="image directory name"
+    image_dir_pattern: list = LIST_FIELD(
+        arrList=[],
+        description="""List of patterns for any path that should be included"
+                    in the image path list, relative to the dataset root""",
+        display_name="Image Path Pattern List"
     )
-    right_image_dir_name: str = STR_FIELD(
-        value="",
-        default_value="",
-        description="Name of the right image directory relative to the dataset root.",
-        display_name="right image directory name"
+    right_dir_pattern: list = LIST_FIELD(
+        arrList=[],
+        description="""List of patterns for any path that should be included"
+                    in the right image path list, relative to the dataset root""",
+        display_name="Right Image Path Pattern List"
     )
-    depth_dir_name: str = STR_FIELD(
-        value="",
-        default_value="",
-        description="Name of the directory containing the depth image, relative to the dataset root.",
-        display_name="depth directory name"
+    depth_dir_pattern: list = LIST_FIELD(
+        arrList=[],
+        description="""List of patterns for any path that should be included"
+                    in the depth path list, relative to the dataset root""",
+        display_name="Depth Map Path Pattern List"
     )
-    directory_depth: int = INT_FIELD(
-        value=1,
-        default_value=1,
-        description="Directory depth to image directory from root",
-        display_name="directory depth to image directory from root"
-    )
-    image_dir_depth: int = INT_FIELD(
-        value=1,
-        default_value=1,
-        description="Directory depth to image directory from root",
-        display_name="directory depth to image directory from root"
+    nocc_dir_pattern: list = LIST_FIELD(
+        arrList=[],
+        description="""List of patterns for any path that should be included"
+                    in the non-occluded map path list, relative to the dataset root""",
+        display_name="Non-Occluded Path Pattern List"
     )
     split_ratio: float = FLOAT_FIELD(
         value=0.0,
@@ -289,7 +283,6 @@ class BaseDepthNetDatasetConfig:
         valid_min=1,
         valid_max="inf",
         description="The batch size for training and validation",
-        automl_enabled="TRUE",
         display_name="batch size"
     )
     workers: int = INT_FIELD(
@@ -298,7 +291,6 @@ class BaseDepthNetDatasetConfig:
         valid_min=1,
         valid_max="inf",
         description="The number of parallel workers processing data",
-        automl_enabled="TRUE",
         display_name="batch size"
     )
     pin_memory: bool = BOOL_FIELD(

@@ -25,7 +25,7 @@ from nvidia_tao_core.microservices.handlers.encrypt import NVVaultEncryption
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     get_handler_metadata, get_jobs_root, get_user, get_workspace_string_identifier
 )
-from nvidia_tao_core.microservices.handlers.cloud_storage import create_cs_instance
+from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
 from nvidia_tao_core.microservices.utils import (
     sha256_checksum, read_network_config,
     retry_method, get_admin_key
@@ -199,6 +199,37 @@ def create_model(org_name, team_name, handler_metadata, source_file, ngc_key, di
     return status_code, message
 
 
+def _configure_ngc_client(ngc_key, org_name, team_name="", allow_fallback=False):
+    """Configure NGC SDK client with proper error handling.
+
+    Args:
+        ngc_key (str): NGC API key for authentication.
+        org_name (str): Organization name.
+        team_name (str): Team name (optional).
+        allow_fallback (bool): If True, continue without credentials on validation errors.
+
+    Returns:
+        tuple: (client, success) where client is the NGC Client and success is bool.
+    """
+    from ngcsdk import Client  # pylint: disable=C0415
+    clt = Client()
+
+    try:
+        clt.configure(api_key=ngc_key, org_name=org_name, team_name=team_name)
+        return clt, True
+    except Exception as e:
+        if (allow_fallback and ("Invalid org" in str(e) or "Invalid team" in str(e) or
+                                "doesn't match organization" in str(e))):
+            logger.info(
+                "Can't validate the passed NGC KEY for Org %s, team %s, "
+                "continuing without configuring credentials", org_name, team_name
+            )
+            return clt, True
+        logger.error("Can't configure the passed NGC KEY for Org %s, team %s", org_name, team_name)
+        logger.error("Error: %s", e)
+        return None, False
+
+
 def upload_model(org_name, team_name, handler_metadata, source_files, ngc_key, job_id, job_action):
     """Upload model to ngc private registry"""
     logger.info("Publishing %s", source_files)
@@ -228,9 +259,11 @@ def upload_model(org_name, team_name, handler_metadata, source_files, ngc_key, j
 
     try:
         os.environ["NGC_CLI_HOME"] = "/tmp/.ngc"
-        from ngcsdk import Client  # pylint: disable=C0415
-        clt = Client()
-        clt.configure(api_key=ngc_key, org_name=org_name, team_name=team_name)
+        clt, success = _configure_ngc_client(ngc_key, org_name, team_name)
+        if not success:
+            shutil.rmtree(local_dir)
+            return 404, "Failed to configure NGC client"
+
         clt.registry.model.upload_version(target=target_version, source=local_dir, num_epochs=num_epochs_trained)
         clt.clear_config()
     except Exception as e:
@@ -273,22 +306,9 @@ def download_ngc_model(ngc_path, ptm_root, key):
         return False
 
     # Download model with ngc sdk
-    from ngcsdk import Client  # pylint: disable=C0415
-    clt = Client()
-
-    try:
-        clt.configure(api_key=key, org_name=org, team_name=team)
-    except Exception as e:
-        if not ("Invalid org" in str(e) or "Invalid team" in str(e)):
-            logger.error(
-                "Can't configure the passed NGC KEY for Org {}, team {}".format(org, team)  # noqa pylint: disable=C0209
-            )
-            return False
-        msg = (
-            "Can't validate the passed NGC KEY for Org {}, team {}, "
-            "going to try download without configuring credentials"
-        ).format(org, team)
-        logger.info(msg)  # noqa pylint: disable=C0209
+    clt, success = _configure_ngc_client(key, org, team, allow_fallback=True)
+    if not success:
+        return False
 
     try:
         if not os.path.exists(ptm_root):
@@ -414,9 +434,53 @@ def get_org_products(user_id, org_name):
         org_metadata = response.json().get("organizations", {})
         product_enablements = org_metadata.get("productEnablements", [])
         for product_enablement in product_enablements:
-            if product_enablement.get("productName", "") in ("TAO", "MONAI", "MAXINE"):
+            if product_enablement.get("productName", "") in ("TAO", "MAXINE"):
                 products.append(product_enablement.get("productName"))
     return products
+
+
+def get_model_size_info(ngc_path, ngc_key):
+    """Get model size information from NGC registry.
+
+    Args:
+        ngc_path (str): The NGC path to the desired model in the format 'org/team/model:version'.
+        ngc_key (str): NGC API key for authentication.
+
+    Returns:
+        tuple: (total_size_bytes, file_count) or (None, None) if failed.
+    """
+    if not ngc_path or not ngc_key:
+        logger.error("Invalid ngc_path or ngc_key provided")
+        return None, None
+
+    # Check if running in air-gapped mode
+    if os.getenv("AIRGAPPED_MODE", "false").lower() == "true":
+        logger.info("Air-gapped mode detected, cannot get size info from NGC registry")
+        return None, None
+
+    try:
+        # Parse NGC path to get org and team
+        org, team, _, _ = split_ngc_path(ngc_path)
+
+        # Configure NGC SDK client
+        clt, success = _configure_ngc_client(ngc_key, org, team)
+        if not success:
+            return None, None
+
+        # Get model version info
+        response = clt.registry.model.info(ngc_path)
+
+        if response and response.modelVersion:
+            total_size_bytes = response.modelVersion.totalSizeInBytes
+            file_count = response.modelVersion.totalFileCount
+            logger.info("Model %s: size=%s bytes, files=%s", ngc_path, total_size_bytes, file_count)
+            return total_size_bytes, file_count
+        logger.error("Failed to get model version info for %s", ngc_path)
+        return None, None
+
+    except Exception as e:
+        logger.error("Failed to get model size info for %s. Error: %s", ngc_path, e)
+        return None, None
 
 
 def get_ngc_token_from_api_key(ngc_api_key, org=None, team=None):

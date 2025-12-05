@@ -33,7 +33,10 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import (
 )
 from nvidia_tao_core.microservices.handlers.utilities import Code, decrypt_handler_metadata
 from nvidia_tao_core.microservices.handlers.docker_images import DOCKER_IMAGE_MAPPER
-from nvidia_tao_core.microservices.job_utils import executor as jobDriver
+from nvidia_tao_core.microservices.job_utils.executor import (
+    JobExecutor,
+    StatefulSetExecutor
+)
 
 # TODO Make sure the image name is current docker tag of the API
 image = DOCKER_IMAGE_MAPPER["API"]
@@ -133,7 +136,7 @@ class AutoMLHandler:
         if platform_id:
             run_command = f"{run_command} --platform_id={platform_id}"
 
-        jobDriver.create(
+        JobExecutor().create_job(
             org_name,
             job_id,
             image,
@@ -159,8 +162,8 @@ class AutoMLHandler:
         logger.info("Stopping automl")
 
         try:
-            jobDriver.delete(job_id, use_ngc=False)
-            k8s_status = jobDriver.status(
+            StatefulSetExecutor().delete_statefulset(job_id, use_ngc=False)
+            k8s_status = JobExecutor().get_job_status(
                 org_name,
                 experiment_id,
                 job_id,
@@ -171,7 +174,7 @@ class AutoMLHandler:
             while k8s_status in ("Done", "Error", "Running", "Pending"):
                 if k8s_status in ("Done", "Error"):
                     break
-                k8s_status = jobDriver.status(
+                k8s_status = JobExecutor().get_job_status(
                     org_name,
                     experiment_id,
                     job_id,
@@ -187,8 +190,8 @@ class AutoMLHandler:
                     if recommendation.get("status") in ("pending", "running", "started"):
                         recommendation["status"] = "canceling"
                         save_automl_controller_info(job_id, recommendations)
-                    jobDriver.delete(recommendation_job_id)
-                    rec_k8s_status = jobDriver.status(
+                    StatefulSetExecutor().delete_statefulset(recommendation_job_id)
+                    rec_k8s_status = JobExecutor().get_job_status(
                         org_name,
                         experiment_id,
                         recommendation_job_id,
@@ -198,7 +201,7 @@ class AutoMLHandler:
                     while rec_k8s_status in ("Done", "Error", "Running", "Pending"):
                         if rec_k8s_status in ("Done", "Error"):
                             break
-                        rec_k8s_status = jobDriver.status(
+                        rec_k8s_status = JobExecutor().get_job_status(
                             org_name,
                             experiment_id,
                             recommendation_job_id,
@@ -280,4 +283,7 @@ class AutoMLHandler:
         )
         if platform_id:
             run_command = f"{run_command} --platform_id={platform_id}"
-        jobDriver.create(org_name, job_id, image, run_command, num_gpu=0, automl_brain=True, automl_exp_job=False)
+        JobExecutor().create_job(
+            org_name, job_id, image, run_command, num_gpu=0,
+            automl_brain=True, automl_exp_job=False
+        )

@@ -153,3 +153,8 @@ class ExperimentConfig(CommonExperimentConfig):
     model: MALModelConfig = DATACLASS_FIELD(MALModelConfig())
     inference: MALInferenceExpConfig = DATACLASS_FIELD(MALInferenceExpConfig())
     evaluate: MALEvalExpConfig = DATACLASS_FIELD(MALEvalExpConfig())
+
+    def __post_init__(self):
+        """Set default model name for MAL."""
+        if self.model_name is None:
+            self.model_name = "mal"

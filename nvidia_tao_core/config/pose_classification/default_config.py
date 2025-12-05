@@ -504,3 +504,8 @@ class ExperimentConfig(CommonExperimentConfig):
         description="The configuration for dataset conversion.",
         display_name="dataset conversion configuration"
     )
+
+    def __post_init__(self):
+        """Set default model name for Pose Classification."""
+        if self.model_name is None:
+            self.model_name = "pose_classification"

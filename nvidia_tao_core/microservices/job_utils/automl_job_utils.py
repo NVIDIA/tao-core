@@ -23,7 +23,7 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     get_job
 )
 from nvidia_tao_core.microservices.job_utils.workflow import Workflow, Job, Dependency
-from nvidia_tao_core.microservices.job_utils import executor as jobDriver
+from nvidia_tao_core.microservices.job_utils.executor import StatefulSetExecutor
 
 # Configure logging
 logging.basicConfig(
@@ -125,4 +125,4 @@ def on_delete_automl_job(job_id):
 
 def on_cancel_automl_job(job_id):
     """Delete the job from k8's jobs"""
-    jobDriver.delete(job_id)
+    StatefulSetExecutor().delete_statefulset(job_id)
