@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,402 +12,572 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataset upload modules"""
-import tarfile
+"""Dataset handler module for managing dataset operations"""
+import copy
 import os
-import glob
+import shutil
+import threading
+import traceback
+import uuid
 import logging
+from datetime import datetime, timezone
 
-from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
-from nvidia_tao_core.microservices.handlers.stateless_handlers import get_handler_metadata
-from nvidia_tao_core.microservices.utils import read_network_config
+from nvidia_tao_core.microservices.enum_constants import DatasetType
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
+    resolve_metadata,
+    check_read_access,
+    check_write_access,
+    get_handler_metadata,
+    get_public_datasets,
+    printc,
+    sanitize_handler_metadata,
+    write_handler_metadata,
+    add_public_dataset,
+    remove_public_dataset
+)
+from nvidia_tao_core.microservices.utils.encrypt_utils import NVVaultEncryption
+from nvidia_tao_core.microservices.utils.dataset_utils import validate_dataset
+from nvidia_tao_core.microservices.utils.handler_utils import (
+    Code,
+    download_dataset
+)
+from nvidia_tao_core.microservices.utils.core_utils import (
+    read_network_config,
+)
+
+if os.getenv("BACKEND"):
+    from .mongo_handler import MongoHandler
+
+from ..utils.basic_utils import (
+    get_org_datasets,
+    get_user_datasets,
+    get_dataset_actions,
+    handler_level_access_control
+)
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
-# Simple helper class for ease of code migration
-class SimpleHandler:
-    """Helper class holding dataset information"""
+class DatasetHandler:
+    """Handles dataset creation, updating, deletion and retrieval."""
 
-    def __init__(self, org_name, handler_metadata, temp_dir="", workspace_metadata=None):
-        """Initialize the Handler helper class"""
-        self.root = temp_dir
-        self.type = handler_metadata.get("type")
-        self.format = handler_metadata.get("format")
-        self.intent = handler_metadata.get("use_for", [])
-        assert type(self.intent) is list, "Intent must be a list"
-        self.cloud_instance = None
-        self.cloud_file_path = handler_metadata.get("cloud_file_path", "")
-        if workspace_metadata:
-            self.cloud_instance, _ = create_cs_instance(workspace_metadata)
+    @staticmethod
+    def list_datasets(user_id, org_name):
+        """Retrieve a list of datasets accessible by the given user.
 
-    def check_for_file_existence(self, path, file_type="file", file_extension=""):
-        """Check for existence of file"""
-        if self.cloud_instance:
-            # Use cloud_file_path for cloud operations, not local temp path
-            if path in [".", ""]:
-                cloud_path = self.cloud_file_path.strip("/")
+        Args:
+            user_id (str): UUID representing the user.
+            org_name (str): Name of the organization.
+
+        Returns:
+            list[dict]: A list of dataset metadata dictionaries.
+        """
+        # Collect all metadatas
+        metadatas = []
+        for dataset_id in list(set(get_org_datasets(org_name) + get_public_datasets())):
+            handler_metadata = get_handler_metadata(dataset_id, 'datasets')
+            shared_dataset = handler_metadata.get("shared", False)
+            if handler_metadata:
+                if shared_dataset or handler_metadata.get("user_id") == user_id:
+                    handler_metadata = sanitize_handler_metadata(handler_metadata)
+                    metadatas.append(handler_metadata)
             else:
-                cloud_path = f"{self.cloud_file_path.strip('/')}/{path}"
+                # Something is wrong. The user metadata has a dataset that doesn't exist in the system.
+                contexts = {"user_id": user_id, "org_name": org_name, "handler_id": dataset_id}
+                printc("Dataset not found. Skipping.", contexts)
+        return metadatas
 
-            if file_type == "file":
-                return self.cloud_instance.is_file(cloud_path)
-            if file_type == "folder":
-                return self.cloud_instance.is_folder(cloud_path)
-            if file_type == "regex":
-                # file_extension contains the full regex pattern, not just extension
-                if path in [".", ""]:
-                    pattern = f"{self.cloud_file_path.strip('/')}/{file_extension}"
-                else:
-                    pattern = f"{cloud_path}/{file_extension}"
-                return any(self.cloud_instance.glob_files(pattern))
+    @staticmethod
+    def get_dataset_formats(dataset_type):
+        """Retrieve available dataset formats for a given dataset type.
+
+        Args:
+            dataset_type (str): The type of dataset.
+
+        Returns:
+            list[str]: A list of supported dataset formats.
+        """
+        try:
+            dataset_formats = []
+            accepted_dataset_intents = []
+            api_params = read_network_config(dataset_type).get("api_params", {})
+            if api_params:
+                if api_params.get("formats", []):
+                    dataset_formats += api_params.get("formats", [])
+                if api_params.get("accepted_ds_intents", []):
+                    accepted_dataset_intents += api_params.get("accepted_ds_intents", [])
+            return Code(
+                200,
+                {
+                    "dataset_formats": dataset_formats,
+                    "accepted_dataset_intents": accepted_dataset_intents
+                },
+                ""
+            )
+        except Exception:
+            logger.error("Exception caught during getting dataset formats: %s", traceback.format_exc())
+            return Code(404, [], "Exception caught during getting dataset formats")
+
+    @staticmethod
+    def create_dataset(user_id, org_name, request_dict, dataset_id=None, from_ui=False):
+        """Creates a new dataset with the given parameters.
+
+        Args:
+            user_id (str): The unique identifier of the user.
+            org_name (str): The name of the organization.
+            request_dict (dict): Dictionary containing dataset creation parameters.
+                - "type" (str): Required dataset type.
+                - "format" (str): Required dataset format.
+            dataset_id (str, optional): A predefined dataset ID. Defaults to None.
+            from_ui (bool, optional): Flag indicating if the request is from UI. Defaults to False.
+
+        Returns:
+            Code: Response object containing status and metadata of the created dataset.
+        """
+        workspace_id = request_dict.get("workspace", None)
+        if workspace_id and not check_read_access(user_id, org_name, workspace_id, kind="workspaces"):
+            return Code(404, None, f"Workspace {workspace_id} not found")
+
+        # Gather type,format fields from request
+        ds_type = request_dict.get("type", None)
+        if ds_type == "ocrnet":
+            intention = request_dict.get("use_for", [])
+            if not (intention in (["training"], ["evaluation"])):
+                return Code(
+                    400,
+                    {},
+                    "Use_for in dataset metadata is not set ['training'] or ['evaluation']. "
+                    "Please set use_for appropriately"
+                )
+
+        ds_format = request_dict.get("format", None)
+        # Perform basic checks - valid type and format?
+        if ds_type not in DatasetType.__members__.values():
+            msg = "Invalid dataset type"
+            return Code(400, {}, msg)
+
+        if ds_format not in read_network_config(ds_type)["api_params"]["formats"]:
+            msg = "Incompatible dataset format and type"
+            return Code(400, {}, msg)
+
+        intention = request_dict.get("use_for", [])
+        if ds_format in ("raw", "coco_raw") and intention:
+            if intention != ["testing"] and ds_type != "maxine_dataset":
+                msg = "raw or coco_raw's format should be associated with ['testing'] intent"
+                return Code(400, {}, msg)
+
+        # Create a dataset ID and its root
+        pull = False
+        if not dataset_id:
+            pull = True
+            dataset_id = str(uuid.uuid4())
+
+        if request_dict.get("public", False):
+            add_public_dataset(dataset_id)
+
+        dataset_actions = get_dataset_actions(ds_type, ds_format)
+
+        # Create metadata dict and create some initial folders
+        metadata = {"id": dataset_id,
+                    "user_id": user_id,
+                    "org_name": org_name,
+                    "authorized_party_nca_id": request_dict.get("authorized_party_nca_id", ""),
+                    "created_on": datetime.now(tz=timezone.utc),
+                    "last_modified": datetime.now(tz=timezone.utc),
+                    "name": request_dict.get("name", "My Dataset"),
+                    "shared": request_dict.get("shared", False),
+                    "description": request_dict.get("description", "My TAO Dataset"),
+                    "version": request_dict.get("version", "1.0.0"),
+                    "docker_env_vars": request_dict.get("docker_env_vars", {}),
+                    "logo": request_dict.get("logo", "https://www.nvidia.com"),
+                    "type": ds_type,
+                    "format": ds_format,
+                    "actions": dataset_actions,
+                    "client_url": request_dict.get("client_url", None),
+                    "client_id": request_dict.get("client_id", None),
+                    "client_secret": request_dict.get("client_secret", None),  # TODO:: Store Secrets in Vault
+                    "filters": request_dict.get("filters", None),
+                    "cloud_file_path": request_dict.get("cloud_file_path"),
+                    "url": request_dict.get("url"),
+                    "workspace": request_dict.get("workspace"),
+                    "use_for": intention,
+                    "base_experiment_ids": request_dict.get("base_experiment_ids", []),
+                    }
+
+        if not handler_level_access_control(user_id, org_name, dataset_id, "datasets", handler_metadata=metadata):
+            return Code(403, {}, "Not allowed to work with this org")
+
+        # Set status based on skip_validation flag
+        skip_validation = request_dict.get("skip_validation", False)
+        if skip_validation:
+            metadata["status"] = "pull_complete"
         else:
-            if file_type == "file":
-                return os.path.isfile(path)
-            if file_type == "folder":
-                return os.path.isdir(path)
-            if file_type == "regex":
-                # file_extension contains the full regex pattern, not just extension
-                if path in [".", ""]:
-                    pattern = f"{self.cloud_file_path.strip('/')}/{file_extension}"
-                else:
-                    pattern = os.path.join(path, file_extension)
-                return bool(glob.glob(pattern))
-        return False
+            metadata["status"] = request_dict.get("status", "starting")
 
+        if metadata.get("url", ""):
+            if not metadata.get("url").startswith("https"):
+                return Code(400, {}, "Invalid pull URL passed")
 
-def _untar_file(tar_path, dest, strip_components=0):
-    """Function to untar a file"""
-    os.makedirs(dest, exist_ok=True)
-    with tarfile.open(tar_path, 'r') as tar:
-        for member in tar.getmembers():
-            # Remove leading directory components using strip_components
-            components = member.name.split(os.sep)
-            if len(components) > strip_components:
-                member.name = os.path.join(*components[strip_components:])
-            if member.isdir():
-                # Make subdirs ahead because tarfile extracts them with user permissions only
-                os.makedirs(os.path.join(dest, member.name), exist_ok=True)
-            tar.extract(member, path=dest, set_attrs=False)
+        # Encrypt the MLOPs keys
+        config_path = os.getenv("VAULT_SECRET_PATH", None)
+        if config_path and metadata["docker_env_vars"]:
+            encryption = NVVaultEncryption(config_path)
+            for key, value in metadata["docker_env_vars"].items():
+                if encryption.check_config()[0]:
+                    metadata["docker_env_vars"][key] = encryption.encrypt(value)
+                elif not os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
+                    return Code(400, {}, "Vault service does not work, can't enable MLOPs services")
 
+        write_handler_metadata(dataset_id, metadata, "dataset")
+        mongo_users = MongoHandler("tao", "users")
+        user_query = {'id': user_id}
+        datasets = get_user_datasets(user_id, mongo_users)
+        datasets.append(dataset_id)
+        mongo_users.upsert(user_query, {'id': user_id, 'datasets': datasets})
 
-def _extract_images(tar_path, dest):
-    """Function to extract images, other directories on same level as images to root of dataset"""
-    # Infer how many components to strip to get images,labels to top of dataset directory
-    # Assumes: images, other necessary directories are in the same level
-    with tarfile.open(tar_path) as tar:
-        strip_components = 0
-        names = [tinfo.name for tinfo in tar.getmembers()]
-        for name in names:
-            if "/images/" in name:
-                strip_components = name.split("/").index("images")
-                break
-    # Build shell command for untarring
-    logger.info("Untarring data started")
-    _untar_file(tar_path, dest, strip_components)
-    logger.info("Untarring data complete")
+        # Pull dataset in background if known URL and not skipping validation
+        if pull and not skip_validation:
+            job_run_thread = threading.Thread(target=DatasetHandler.pull_dataset, args=(user_id, org_name, dataset_id,))
+            job_run_thread.start()
 
-    # Remove .tar.gz file
-    logger.info("Removing data tar file")
-    os.remove(tar_path)
-    logger.info("Deleted data tar file")
+        # Read this metadata from saved file...
+        return_metadata = sanitize_handler_metadata(metadata)
+        ret_Code = Code(200, return_metadata, "Dataset created")
+        return ret_Code
 
+    @staticmethod
+    def create_dataset_dict_from_experiment_metadata(dataset_id, action, handler_metadata):
+        """Generates a dataset request dictionary from existing experiment metadata.
 
-def _get_actual_files_in_dataset(handler):
-    """Get list of actual files present in the dataset"""
-    files = []
-    try:
-        if handler.cloud_instance:
-            # For cloud storage, list files in the cloud_file_path
-            folder_path = handler.cloud_file_path.strip("/")
-            if folder_path:
-                cloud_files, _ = handler.cloud_instance.list_files_in_folder(folder_path)
-                files = cloud_files
-            else:
-                files = []
+        Args:
+            dataset_id (str): The unique identifier of the new dataset.
+            action (str): The action performed that triggered dataset creation.
+            handler_metadata (dict): Metadata from the source dataset or experiment.
+
+        Returns:
+            dict: A request dictionary containing dataset creation parameters.
+        """
+        infer_ds = handler_metadata.get("inference_dataset", None)
+        if infer_ds:
+            dataset_metadata = get_handler_metadata(infer_ds, "datasets")
         else:
-            # For local storage, use glob to find files
-            if os.path.exists(handler.root):
-                files = [
-                    os.path.relpath(f, handler.root)
-                    for f in glob.glob(os.path.join(handler.root, "**", "*"), recursive=True)
-                    if os.path.isfile(f)
-                ]
-    except Exception as e:
-        logger.warning("Could not list files in dataset: %s", str(e))
-        files = []
+            dataset_metadata = copy.deepcopy(handler_metadata)
+        request_dict = {}
+        output_dataset_type = dataset_metadata.get("type")
+        output_dataset_format = dataset_metadata.get("format")
+        use_for = dataset_metadata.get("use_for")
+        request_dict["type"] = output_dataset_type
+        request_dict["status"] = dataset_metadata.get("status", "pull_complete")
+        request_dict["format"] = output_dataset_format
+        request_dict["use_for"] = use_for
+        request_dict["workspace"] = dataset_metadata.get("workspace")
+        request_dict["cloud_file_path"] = os.path.join("/results/", dataset_id)
+        request_dict["name"] = f"{dataset_metadata.get('name')} (created from Data services {action} action)"
+        request_dict["shared"] = dataset_metadata.get("shared", False)
+        request_dict["use_for"] = dataset_metadata.get("use_for", [])
+        request_dict["docker_env_vars"] = dataset_metadata.get("docker_env_vars", {})
+        return request_dict
 
-    return sorted(files)
+    @staticmethod
+    def update_dataset(org_name, dataset_id, request_dict):
+        """Updates an existing dataset with new metadata.
 
+        Args:
+            org_name (str): The name of the organization.
+            dataset_id (str): The unique identifier of the dataset.
+            request_dict (dict): Dictionary containing update parameters.
+                - "type" (str): Required dataset type (unchangeable).
+                - "format" (str): Required dataset format (unchangeable).
 
-def write_dir_contents(directory, file):
-    """Write contents of a directory to a file"""
-    with open(file, "w", encoding='utf-8') as f:
-        for dir_files in sorted(glob.glob(directory + "/*")):
-            f.write(dir_files + "\n")
+        Returns:
+            Code: Response object indicating success (200) or failure (404 or 400).
+        """
+        metadata = resolve_metadata("dataset", dataset_id)
+        if not metadata:
+            return Code(404, {}, "Dataset not found")
 
-
-def _get_format_requirements(validation_config, dataset_format):
-    """Get format-specific requirements with support for multiple formats and wildcards
-
-    Args:
-        validation_config (dict): The dataset validation configuration
-        dataset_format (str): The dataset format (can be single format, comma-separated, or wildcard)
-    Returns:
-        list: List of validation requirements
-    """
-    required_files_config = validation_config.get("required_files", {})
-    # Handle wildcard case - return requirements from "*" key or collect from all formats
-    if dataset_format == "*":
-        # First try to get requirements from the "*" key directly
-        wildcard_reqs = required_files_config.get("*", [])
-        if wildcard_reqs:
-            return wildcard_reqs
-        # If no "*" key, collect requirements from all other format keys
-        all_requirements = []
-        for format_key, requirements in required_files_config.items():
-            if format_key not in ["default", "*"]:
-                all_requirements.extend(requirements)
-        # If no specific format requirements found, use default
-        if not all_requirements:
-            all_requirements = required_files_config.get("default", [])
-        return all_requirements
-    # Handle comma-separated formats
-    if "," in dataset_format:
-        formats = [fmt.strip() for fmt in dataset_format.split(",")]
-        combined_requirements = []
-        for fmt in formats:
-            # Try to get requirements for this specific format
-            fmt_reqs = required_files_config.get(fmt, [])
-            if fmt_reqs:
-                combined_requirements.extend(fmt_reqs)
+        user_id = metadata.get("user_id")
+        if not handler_level_access_control(user_id, org_name, dataset_id, "datasets", handler_metadata=metadata):
+            return Code(403, {}, "Not allowed to work with this org")
+        if not check_write_access(user_id, org_name, dataset_id, kind="datasets"):
+            return Code(404, {}, "Dataset not available")
+        if request_dict.get("public", None):
+            if request_dict["public"]:
+                add_public_dataset(dataset_id)
             else:
-                # If no specific requirements for this format, use default or wildcard
-                fallback_reqs = required_files_config.get("default", required_files_config.get("*", []))
-                combined_requirements.extend(fallback_reqs)
-        return combined_requirements
-    # Handle single format (original behavior)
-    return required_files_config.get(
-        dataset_format,
-        required_files_config.get("default", required_files_config.get("*", []))
-    )
+                remove_public_dataset(dataset_id)
+        pull = False
+        for key in request_dict.keys():
 
+            # Cannot process the update, so return 400
+            if key in ["type", "format"]:
+                if request_dict[key] != metadata.get(key):
+                    msg = f"Cannot change dataset {key}"
+                    return Code(400, {}, msg)
 
-def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
-    """Generic dataset validator using config
+            if key in [
+                "name", "description", "version", "logo", "shared",
+                "base_experiment_ids", "authorized_party_nca_id"
+            ]:
+                requested_value = request_dict[key]
+                if requested_value:
+                    metadata[key] = requested_value
+                    metadata["last_modified"] = datetime.now(tz=timezone.utc)
 
-    Args:
-        org_name (str): Organization name
-        handler_metadata (dict): Dataset metadata containing type, format, cloud_file_path, etc.
-        temp_dir (str): Local temp directory path (empty for cloud-only validation)
-        workspace_metadata (dict): Workspace metadata for cloud storage access
+            if key == "cloud_file_path":
+                if metadata["status"] not in ("pull_complete", "invalid_pull"):
+                    return Code(
+                        400,
+                        {},
+                        f"Cloud file_path can be updated only when status is pull_complete or "
+                        f"invalid_pull, the current status is {metadata['status']}. Try again after sometime"
+                    )
+                pull = True
+                metadata["status"] = "starting"
+                metadata["cloud_file_path"] = request_dict[key]
 
-    Returns:
-        tuple: (is_valid, validation_result)
-            - is_valid (bool): True if validation passes, False otherwise
-            - validation_result (dict): Detailed validation information including:
-                - success (bool): Same as is_valid
-                - expected_structure (dict): What the service expects
-                - actual_structure (list): What files were found
-                - missing_files (list): Files that are required but missing
-                - error_details (str): Human-readable error description
-    """
-    # For cloud-based datasets, workspace_metadata may need to be resolved from handler_metadata
-    if not workspace_metadata and handler_metadata.get("workspace"):
-        workspace_metadata = get_handler_metadata(handler_metadata.get("workspace"), kind="workspace")
-
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
-
-    # Initialize detailed validation result
-    validation_result = {
-        "success": False,
-        "expected_structure": {},
-        "actual_structure": [],
-        "missing_files": [],
-        "error_details": "",
-        "network_type": handler.type,
-        "dataset_format": handler.format,
-        "dataset_intent": handler.intent
-    }
-
-    try:
-        # Load network config
-        logger.debug("handler.type: %s", handler.type)
-        network_config = read_network_config(handler.type)
-        logger.debug("network_config: %s", network_config)
-        validation_config = network_config.get("dataset_validation", {})
-
-        # Get format-specific requirements with support for multiple formats and wildcards
-        format_reqs = _get_format_requirements(validation_config, handler.format)
-
-        # Store expected structure
-        validation_result["expected_structure"] = {
-            "format": handler.format,
-            "requirements": format_reqs
-        }
-
-        # Get actual files in dataset
-        actual_files = _get_actual_files_in_dataset(handler)
-        validation_result["actual_structure"] = actual_files
-
-        # Validate each requirement and collect detailed errors
-        validation_errors = []
-        missing_files = []
-
-        for req in format_reqs:
-            if "path" in req:
-                # For cloud validation, use the relative path directly instead of joining with temp_dir
-                if handler.cloud_instance:
-                    path = req["path"]
+            if key == "docker_env_vars":
+                # Encrypt the MLOPs keys
+                requested_value = request_dict[key]
+                config_path = os.getenv("VAULT_SECRET_PATH", None)
+                if config_path:
+                    encryption = NVVaultEncryption(config_path)
+                    for mlops_key, value in requested_value.items():
+                        if encryption.check_config()[0]:
+                            metadata["docker_env_vars"][mlops_key] = encryption.encrypt(value)
+                        elif not os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
+                            return Code(400, {}, "Vault service does not work, can't enable MLOPs services")
                 else:
-                    path = os.path.join(handler.root, req["path"])
-                file_type = req.get("type", "file")
-                file_extension = req.get("regex", "") if file_type == "regex" else ""
+                    metadata["docker_env_vars"] = requested_value
 
-                if not handler.check_for_file_existence(
-                    path, file_type=file_type, file_extension=file_extension
-                ):
-                    missing_files.append({
-                        "path": req["path"],
-                        "type": file_type,
-                        "regex": file_extension if file_type == "regex" else None
-                    })
-                    validation_errors.append(f"Required file not found: {req['path']} (type: {file_type})")
-            elif "all_of" in req:
-                # Check if all requirements are met
-                all_of_missing = []
-                for subreq in req["all_of"]:
-                    # For cloud validation, use the relative path directly instead of joining with temp_dir
-                    if handler.cloud_instance:
-                        path = subreq["path"]
+        # Pull dataset in background if known URL
+        if pull:
+            job_run_thread = threading.Thread(target=DatasetHandler.pull_dataset, args=(user_id, org_name, dataset_id,))
+            job_run_thread.start()
+
+        write_handler_metadata(dataset_id, metadata, "dataset")
+        # Read this metadata from saved file...
+        return_metadata = sanitize_handler_metadata(metadata)
+        ret_Code = Code(200, return_metadata, "Dataset updated")
+        return ret_Code
+
+    @staticmethod
+    def retrieve_dataset(org_name, dataset_id):
+        """Retrieves metadata for an existing dataset.
+
+        Args:
+            org_name (str): The name of the organization.
+            dataset_id (str): The unique identifier of the dataset.
+
+        Returns:
+            Code: Response object containing dataset metadata if found (200) or an error (404).
+        """
+        handler_metadata = resolve_metadata("dataset", dataset_id)
+        if not handler_metadata:
+            return Code(404, {}, "Dataset not found")
+
+        user_id = handler_metadata.get("user_id")
+        if not check_read_access(user_id, org_name, dataset_id, kind="datasets"):
+            return Code(404, {}, "Dataset not found")
+
+        return_metadata = sanitize_handler_metadata(handler_metadata)
+        if return_metadata.get("status") == "invalid_pull":
+            # Include detailed validation error information if available
+            validation_details = return_metadata.get("validation_details", {})
+            if validation_details:
+                error_msg = validation_details.get("error_details", "Dataset validation failed")
+                return Code(404, return_metadata, error_msg, use_data_as_response=True)
+            return Code(404, return_metadata, "Dataset pulled from cloud doesn't match folder structure required")
+        return Code(200, return_metadata, "Dataset retrieved")
+
+    @staticmethod
+    def delete_dataset(org_name, dataset_id):
+        """Deletes a dataset if it is not in use or restricted.
+
+        Args:
+            org_name (str): Name of the organization requesting the deletion.
+            dataset_id (str): UUID of the dataset to be deleted.
+
+        Returns:
+            Code: Response object containing:
+                - 200 with metadata of the deleted dataset if successful.
+                - 404 if the user lacks access to the dataset.
+                - 400 if the dataset is in use by a running job or an active experiment.
+        """
+        handler_metadata = resolve_metadata("dataset", dataset_id)
+        if not handler_metadata:
+            return Code(200, {}, f"Dataset {dataset_id} not exists, should have been deleted already")
+
+        user_id = handler_metadata.get("user_id")
+        if not check_write_access(user_id, org_name, dataset_id, kind="datasets"):
+            return Code(404, {}, f"Dataset {dataset_id} is not owned by you")
+
+        # Check if any job running
+        for job in handler_metadata.get("jobs", {}):
+            if handler_metadata["jobs"][job]["status"] == "Running":
+                return Code(400, {}, f"Dataset {dataset_id} in use by job {job}")
+
+        # Check if dataset is public, then someone could be running it
+        if handler_metadata.get("public", False):
+            return Code(400, {}, f"Dataset {dataset_id} is Public. Cannot delete")
+
+        # Check if dataset is read only, if yes, cannot delete
+        if handler_metadata.get("read_only", False):
+            return Code(400, {}, f"Dataset {dataset_id} is read only. Cannot delete")
+
+        mongo_users = MongoHandler("tao", "users")
+        datasets = get_user_datasets(user_id, mongo_users)
+        if dataset_id in datasets:
+            datasets.remove(dataset_id)
+        user_query = {'id': user_id}
+        mongo_users.upsert(user_query, {'id': user_id, 'datasets': datasets})
+
+        mongo_datasets = MongoHandler("tao", "datasets")
+        dataset_query = {'id': dataset_id}
+        mongo_datasets.delete_one(dataset_query)
+        from ..utils.basic_utils import delete_jobs_for_handler
+        delete_jobs_for_handler(dataset_id, "dataset")
+        # TODO: Delete logs for dataset
+        return_metadata = sanitize_handler_metadata(handler_metadata)
+        return Code(200, return_metadata, "Dataset deleted")
+
+    @staticmethod
+    def validate_dataset(user_id, org_name, dataset_id, temp_dir=None, file_path=None):
+        """Validates a dataset and updates its status accordingly.
+
+        Args:
+            user_id (str): UUID of the user requesting validation.
+            org_name (str): Name of the organization.
+            dataset_id (str): UUID of the dataset to be validated.
+            temp_dir (str, optional): Path to the temporary directory for dataset processing.
+            file_path (str, optional): Path to the dataset file or folder.
+
+        Returns:
+            Code: Response object containing:
+                - 200 with an empty dictionary if validation starts successfully.
+                - 404 if the dataset is not found or access is denied.
+                - 400 if validation fails due to structural issues.
+        """
+        metadata = resolve_metadata("dataset", dataset_id)
+        if not metadata:
+            return Code(404, {}, "Dataset not found")
+
+        if not check_write_access(user_id, org_name, dataset_id, kind="datasets"):
+            return Code(404, {}, "Dataset not available")
+
+        try:
+            metadata["status"] = "in_progress"
+            write_handler_metadata(dataset_id, metadata, "dataset")
+
+            def validate_dataset_thread():
+                try:
+                    # For cloud-based validation, resolve workspace metadata
+                    workspace_metadata = None
+                    if metadata.get("workspace"):
+                        workspace_metadata = resolve_metadata("workspace", metadata.get("workspace"))
+
+                    valid_dataset_structure, validation_result = validate_dataset(
+                        org_name,
+                        metadata,
+                        temp_dir=temp_dir,
+                        workspace_metadata=workspace_metadata
+                    )
+                    # Only remove temp_dir if it was actually created (not empty for cloud validation)
+                    if temp_dir and os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir)
+
+                    if valid_dataset_structure:
+                        metadata["status"] = "pull_complete"
                     else:
-                        path = os.path.join(handler.root, subreq["path"])
-                    file_type = subreq.get("type", "file")
-                    file_extension = subreq.get("regex", "") if file_type == "regex" else ""
+                        metadata["status"] = "invalid_pull"
+                        # Store detailed validation information in metadata for user feedback
+                        metadata["validation_details"] = {
+                            "error_details": validation_result.get("error_details", "Unknown validation error"),
+                            "expected_structure": validation_result.get("expected_structure", {}),
+                            "actual_structure": validation_result.get("actual_structure", []),
+                            "missing_files": validation_result.get("missing_files", []),
+                            "network_type": validation_result.get("network_type", ""),
+                            "dataset_format": validation_result.get("dataset_format", ""),
+                            "dataset_intent": validation_result.get("dataset_intent", [])
+                        }
+                        logger.error(
+                            "Dataset structure validation failed for dataset %s. "
+                            "Expected structure: %s. Actual files: %s. Missing files: %s. Error: %s",
+                            dataset_id,
+                            validation_result.get("expected_structure", {}),
+                            validation_result.get("actual_structure", []),
+                            validation_result.get("missing_files", []),
+                            validation_result.get("error_details", ""))
 
-                    if not handler.check_for_file_existence(
-                        path, file_type=file_type, file_extension=file_extension
-                    ):
-                        all_of_missing.append({
-                            "path": subreq["path"],
-                            "type": file_type,
-                            "regex": file_extension if file_type == "regex" else None
-                        })
+                    write_handler_metadata(dataset_id, metadata, "dataset")
+                except Exception as e:
+                    logger.error("Exception thrown in validate_dataset_thread is %s", str(e))
+                    logger.error(traceback.format_exc())
+                    metadata["status"] = "invalid_pull"
+                    metadata["validation_details"] = {
+                        "error_details": f"Validation process failed: {str(e)}",
+                        "expected_structure": {},
+                        "actual_structure": [],
+                        "missing_files": [],
+                        "network_type": metadata.get("type", ""),
+                        "dataset_format": metadata.get("format", ""),
+                        "dataset_intent": metadata.get("use_for", [])
+                    }
+                    write_handler_metadata(dataset_id, metadata, "dataset")
 
-                if all_of_missing:
-                    missing_files.extend(all_of_missing)
-                    paths_str = ", ".join([f["path"] for f in all_of_missing])
-                    validation_errors.append(f"Missing required files (all required): {paths_str}")
-            elif "any_of" in req:
-                # Check if any of the requirements are met
-                any_valid = False
-                any_of_options = []
+            thread = threading.Thread(target=validate_dataset_thread)
+            thread.start()
+            return Code(200, {}, "Server recieved file and upload process started")
+        except Exception as e:
+            logger.error("Exception thrown in validate_dataset is %s", str(e))
+            logger.error(traceback.format_exc())
+            metadata["status"] = "invalid_pull"
+            write_handler_metadata(dataset_id, metadata, "dataset")
+            return Code(404, [], "Exception caught during upload")
 
-                for subreq in req["any_of"]:
-                    if "path" in subreq:
-                        # For cloud validation, use the relative path directly instead of joining with temp_dir
-                        if handler.cloud_instance:
-                            path = subreq["path"]
-                        else:
-                            path = os.path.join(handler.root, subreq["path"])
-                        file_type = subreq.get("type", "file")
-                        file_extension = subreq.get("regex", "") if file_type == "regex" else ""
-                        any_of_options.append(subreq["path"])
-                        if handler.check_for_file_existence(
-                            path, file_type=file_type, file_extension=file_extension
-                        ):
-                            any_valid = True
-                            break
-                    elif "all_of" in subreq:
-                        # Check if all sub-requirements are met
-                        all_valid = True
-                        subreq_paths = []
-                        # First collect all paths for error message
-                        for subsubreq in subreq["all_of"]:
-                            subreq_paths.append(subsubreq["path"])
-                        # Then check if all files exist
-                        for subsubreq in subreq["all_of"]:
-                            # For cloud validation, use the relative path directly instead of joining with temp_dir
-                            if handler.cloud_instance:
-                                path = subsubreq["path"]
-                            else:
-                                path = os.path.join(handler.root, subsubreq["path"])
-                            file_type = subsubreq.get("type", "file")
-                            file_extension = subsubreq.get("regex", "") if file_type == "regex" else ""
-                            if not handler.check_for_file_existence(
-                                path, file_type=file_type, file_extension=file_extension
-                            ):
-                                all_valid = False
-                                break
-                        any_of_options.append(f"({', '.join(subreq_paths)})")
-                        if all_valid:
-                            any_valid = True
-                            break
+    @staticmethod
+    def pull_dataset(user_id, org_name, dataset_id):
+        """Initiates the process of validating a dataset, optimizing for cloud-based datasets.
 
-                if not any_valid:
-                    # For any_of validation, show the complete requirement options, not just missing files
-                    options_str = " OR ".join(any_of_options)
-                    validation_errors.append(f"Dataset must contain one of the following combinations: {options_str}")
-            elif "intent_based_path" in req:
-                # Check if intent exists
-                if not handler.intent:
-                    validation_errors.append("Intent is required for this dataset")
-                    continue
-                if len(handler.intent) != 1:
-                    validation_errors.append("Only one intent is allowed")
-                    continue
+        Args:
+            user_id (str): UUID of the user requesting the dataset pull.
+            org_name (str): Name of the organization.
+            dataset_id (str): UUID of the dataset to be pulled.
 
-                intent = handler.intent[0]
-                # Get path requirement for this intent
-                intent_req = req["intent_based_path"].get(intent)
-                if not intent_req:
-                    validation_errors.append(f"No path requirement found for intent: {intent}")
-                    continue
+        Notes:
+            - For cloud-based datasets: validates structure directly without downloading.
+            - For public URLs/HuggingFace: downloads first then validates.
+            - Updates dataset status upon failure.
+        """
+        try:
+            metadata = resolve_metadata("dataset", dataset_id)
+            if not metadata:
+                logger.error("Dataset metadata not found for %s", dataset_id)
+                return
 
-                # For cloud validation, use the relative path directly instead of joining with temp_dir
-                if handler.cloud_instance:
-                    path = intent_req["path"]
-                else:
-                    path = os.path.join(handler.root, intent_req["path"])
-                file_type = intent_req.get("type", "file")
-                file_extension = intent_req.get("regex", "") if file_type == "regex" else ""
+            # Check if this is a cloud-based dataset that can use cloud peek validation
+            cloud_file_path = metadata.get("cloud_file_path")
+            workspace_id = metadata.get("workspace")
+            dataset_url = metadata.get("url")
 
-                if not handler.check_for_file_existence(
-                    path, file_type=file_type, file_extension=file_extension
-                ):
-                    missing_files.append({
-                        "path": intent_req["path"],
-                        "type": file_type,
-                        "regex": file_extension if file_type == "regex" else None,
-                        "intent": intent
-                    })
-                    validation_errors.append(f"Required file for intent '{intent}' not found: {intent_req['path']}")
-            if "intent_restriction" in req:
-                if handler.intent:
-                    if handler.intent != req["intent_restriction"]:
-                        validation_errors.append(
-                            f"Intent mismatch: handler intent {handler.intent} does not match "
-                            f"required intent {req['intent_restriction']}"
-                        )
+            # Determine if we can use cloud peek validation (avoid download)
+            can_use_cloud_peek = (
+                cloud_file_path and
+                workspace_id and
+                not dataset_url  # No external URL means it's cloud storage based
+            )
 
-        # Compile validation results
-        validation_result["missing_files"] = missing_files
-        if validation_errors:
-            validation_result["error_details"] = "; ".join(validation_errors)
-            validation_result["success"] = False
-            logger.error("Dataset validation failed: %s", validation_result["error_details"])
-            return False, validation_result
-        validation_result["success"] = True
-        validation_result["error_details"] = "Dataset structure is valid"
-        return True, validation_result
-
-    except Exception as e:
-        logger.error("Error occurred during validation: %s", str(e))
-        validation_result["error_details"] = f"Validation error: {str(e)}"
-        validation_result["success"] = False
-        return False, validation_result
+            if can_use_cloud_peek:
+                # Validate directly from cloud without downloading
+                DatasetHandler.validate_dataset(user_id, org_name, dataset_id, temp_dir="", file_path="")
+            else:
+                logger.info("Using download validation for dataset %s (url: %s)", dataset_id, dataset_url)
+                temp_dir, file_path = download_dataset(dataset_id)
+                DatasetHandler.validate_dataset(user_id, org_name, dataset_id, temp_dir=temp_dir, file_path=file_path)
+        except Exception as e:
+            logger.error("Exception thrown in pull_dataset is %s", str(e))
+            logger.error(traceback.format_exc())
+            metadata = resolve_metadata("dataset", dataset_id)
+            metadata["status"] = "invalid_pull"
+            write_handler_metadata(dataset_id, metadata, "dataset")

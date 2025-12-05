@@ -1,7 +1,7 @@
 {
     "api_params": {
         "dataset_type": "vlm",
-        "actions": ["train", "inference", "evaluate", "inference_microservice"],
+        "actions": ["train", "inference", "evaluate", "inference_microservice", "quantize"],
         "formats": ["llava"],
         "accepted_ds_intents": ["training", "evaluation", "testing"],
         "image": "COSMOS_RL",
@@ -9,7 +9,8 @@
         "actions_pipe": {
             "train": "train",
             "inference":"inference",
-            "evaluate": "evaluate"
+            "evaluate": "evaluate",
+            "quantize": "train"
         }
     },
 
@@ -26,7 +27,9 @@
 
     "cloud_upload": {
         "exclude_patterns": {
-            "train": ["\\.pth$"]
+            "train": ["\\.pth$"],
+            "evaluate": ["/merged/"],
+            "inference": ["/merged/"]
         },
         "upload_strategy": {
             "evaluate": "tarball_after_completion"
@@ -35,13 +38,26 @@
 
     "data_sources": {
         "train": {
-            "custom.dataset.annotation_path": {
+            "custom.train_dataset.annotation_path": {
                 "source": "train_datasets",
                 "multiple_sources": false,
                 "path": "annotations.json"
             },
-            "custom.dataset.media_path": {
+            "custom.train_dataset.media_path": {
                 "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "llava": ["images.tar.gz", "videos.tar.gz"],
+                    "*": "images.tar.gz"
+                }
+            },
+            "custom.val_dataset.annotation_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "custom.val_dataset.media_path": {
+                "source": "eval_dataset",
                 "multiple_sources": false,
                 "path_from_format": {
                     "llava": ["images.tar.gz", "videos.tar.gz"],
@@ -67,12 +83,29 @@
                 "source": "parent_job_specs",
                 "check_key_exists": "policy.lora"
             }
+        },
+        "quantize": {
+            "calibration_dataset.annotation_path": {
+                "source": "calibration_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "calibration_dataset.media_dir": {
+                "source": "calibration_dataset",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "llava": ["images.tar.gz", "videos.tar.gz"],
+                    "*": "images.tar.gz"
+                }
+            }
         }
     },
+    "preserve_source_path_params": ["train.output_dir"],
     "spec_params":{
         "train": {
             "results_dir":"output_dir",
-            "train.output_dir":"output_dir"
+            "train.output_dir":"output_dir",
+            "train.resume": "resume_model_bool"
         },
         "inference": {
             "results_dir":"output_dir",
@@ -81,11 +114,16 @@
         "evaluate": {
             "results_dir":"output_dir",
             "model.model_name":"parent_model_folder"
+        },
+        "quantize": {
+            "results_dir":"output_dir",
+            "model.model_path":"parent_model_folder"
         }
     },
 
     "automl_spec_params":{
         "results_dir":"automl_output_dir",
+        "train.resume": "automl_resume_model_bool",
         "train.output_dir":"automl_output_dir",
         "train.ckpt.save_freq_in_epoch": "assign_const_value,train.epoch",
         "validation.freq_in_epoch": "assign_const_value,train.epoch,train.ckpt.save_freq_in_epoch"
@@ -93,51 +131,41 @@
 
     "metrics": {
         "available_metrics": [
-            "train/iteration_time",
-            "train/loss_avg",
-            "train/loss_max",
-            "train/learning_rate",
-            "train/grad_norm",
-            "train/model_flops",
-            "train/mfu",
-            "val/loss",
-            "val/step",
             "steps_per_epoch",
             "operation",
             "component",
             "status",
-            "error_type",
-            "error_message",
-            "interrupted",
-            "step_name",
-            "replica_type",
             "event",
-            "max_epochs",
-            "current_epoch",
-            "training_phase",
-            "training_completed",
             "accuracy",
             "config",
-            "correct_samples",
-            "detailed_results",
-            "error",
-            "evaluation_phase",
-            "evaluation_status",
-            "inference_time_seconds",
-            "model_name",
-            "prepared_inputs",
-            "results_dir",
-            "results_path",
-            "shard_id",
-            "tasks_processed",
-            "total_samples",
-            "total_shards",
-            "total_tasks",
-            "lora_enabled",
-            "lora_merge_status",
-            "lora_merge_error",
-            "merged_model_path"
+            "detailed_results"
         ],
-        "monitoring_metric": "val/loss"
+        "monitoring_metric": "val/loss",
+        "dynamic_metric_patterns": [
+            "^train/(iteration_time|loss_avg|loss_max|learning_rate|grad_norm|model_flops|mfu)$",
+            "^val/(loss|step)$",
+            "^(error|error_type|error_message)$",
+            "^(interrupted|step_name|replica_type)$",
+            "^(max_epochs|current_epoch)$",
+            "^(training_phase|training_completed)$",
+            "^(correct_samples|total_samples)$",
+            "^(evaluation_phase|evaluation_status)$",
+            "^(validation_phase|dataset_size|total_batches|batches_processed|progress_percent)$",
+            "^(inference_time_seconds|total_inference_time_seconds|model_name|prepared_inputs)$",
+            "^(results_dir|results_path)$",
+            "^(shard_id|total_shards|total_tasks|tasks_processed)$",
+            "^lora_(enabled|merge_status|merge_error)$",
+            "^merged_model_path$",
+            "^soft_(accuracy|correct|threshold)$",
+            "^weighted_score$",
+            "^bleu$",
+            "^rouge[0-9]+$",
+            "^rougel(sum)?$",
+            "^bertscore_(precision|recall|f1)$",
+            "^(count|distance|left_right|mcq|quantitative|qualitative)_(accuracy|total|correct)$",
+            "^(going.straight|turning.left|turning.right)_(accuracy|total|correct)$",
+            "^(quantization_status|quantization_scheme|num_calibration_samples|smoothing_strength)$",
+            "^model_path$"
+        ]
     }
 }

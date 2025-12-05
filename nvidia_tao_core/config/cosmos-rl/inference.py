@@ -59,6 +59,14 @@ class InferenceConfig:
         display_name="Max new tokens",
         description="Max new tokens for inference"
     )
+    num_gpus: Optional[int] = INT_FIELD(
+        default_value=1,
+        value=1,
+        valid_min=1,
+        valid_max=8,
+        display_name="Number of GPUs",
+        description="Number of GPUs to use for inference (enables multi-GPU tensor parallelism)"
+    )
     enable_lora: bool = BOOL_FIELD(
         default_value=False,
         value=False,

@@ -14,7 +14,7 @@
 
 """Unit tests for automl/utils.py custom parameter ranges feature"""
 
-from nvidia_tao_core.microservices.automl.utils import (
+from nvidia_tao_core.microservices.utils.automl_utils import (
     get_valid_range,
     get_valid_options,
     clamp_value,

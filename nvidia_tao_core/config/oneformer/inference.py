@@ -15,6 +15,7 @@
 
 from typing import List
 from dataclasses import dataclass
+from nvidia_tao_core.config.common.common_config import InferenceConfig
 
 from nvidia_tao_core.config.utils.types import (
     INT_FIELD,
@@ -24,7 +25,7 @@ from nvidia_tao_core.config.utils.types import (
 
 
 @dataclass
-class OneFormerInferenceConfig:
+class OneFormerInferenceConfig(InferenceConfig):
     """Evaluation configuration for OneFormer."""
 
     num_gpus: int = INT_FIELD(
@@ -37,7 +38,7 @@ class OneFormerInferenceConfig:
     gpu_ids: List[int] = LIST_FIELD(
         arrList=[0],
         display_name="GPU IDs",
-        description="List of GPU IDs to run the evaluation on",
+        description="List of GPU IDs to run the evaluation on. The length must equal evaluate.num_gpus.",
         popular="yes",
     )
     checkpoint: str = STR_FIELD(
@@ -56,13 +57,18 @@ class OneFormerInferenceConfig:
         display_name="Mode",
         valid_options="semantic,instance,panoptic"
     )
-    images_dir: str = STR_FIELD(
-        value="",
-        description="Path to the images directory.",
-        display_name="Images directory",
-    )
     image_size: List[int] = LIST_FIELD(
         arrList=[1024, 1024],
         description="Size of the image.",
         display_name="Image size",
+    )
+    trt_engine: str = STR_FIELD(
+        value="",
+        description="Path to the TensorRT engine to be used for inference.",
+        display_name="TensorRT Engine",
+    )
+    images_dir: str = STR_FIELD(
+        value="",
+        description="Path to the images directory.",
+        display_name="Images directory",
     )

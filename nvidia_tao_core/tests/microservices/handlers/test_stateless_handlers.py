@@ -16,7 +16,7 @@
 
 from unittest.mock import Mock, patch
 
-from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     get_automl_custom_param_ranges,
     save_automl_custom_param_ranges
 )
@@ -25,7 +25,7 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import (
 class TestGetAutoMLCustomParamRanges:
     """Test get_automl_custom_param_ranges function"""
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_get_custom_param_ranges_exists(self, mock_mongo_handler):
         """Test getting custom parameter ranges when they exist"""
         # Mock the MongoHandler
@@ -67,7 +67,7 @@ class TestGetAutoMLCustomParamRanges:
         mock_mongo_handler.assert_called_once_with("tao", "experiments")
         mock_handler_instance.find_one.assert_called_once_with({'id': 'exp123'})
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_get_custom_param_ranges_empty(self, mock_mongo_handler):
         """Test getting custom parameter ranges when they don't exist"""
         # Mock the MongoHandler
@@ -91,7 +91,7 @@ class TestGetAutoMLCustomParamRanges:
         mock_mongo_handler.assert_called_once_with("tao", "experiments")
         mock_handler_instance.find_one.assert_called_once_with({'id': 'exp123'})
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_get_custom_param_ranges_experiment_not_found(self, mock_mongo_handler):
         """Test getting custom parameter ranges when experiment doesn't exist"""
         # Mock the MongoHandler
@@ -111,7 +111,7 @@ class TestGetAutoMLCustomParamRanges:
         mock_mongo_handler.assert_called_once_with("tao", "experiments")
         mock_handler_instance.find_one.assert_called_once_with({'id': 'nonexistent_exp'})
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_get_custom_param_ranges_with_various_types(self, mock_mongo_handler):
         """Test getting custom parameter ranges with various data types"""
         # Mock the MongoHandler
@@ -158,7 +158,7 @@ class TestGetAutoMLCustomParamRanges:
 class TestSaveAutoMLCustomParamRanges:
     """Test save_automl_custom_param_ranges function"""
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_save_custom_param_ranges(self, mock_mongo_handler):
         """Test saving custom parameter ranges"""
         # Mock the MongoHandler
@@ -187,7 +187,7 @@ class TestSaveAutoMLCustomParamRanges:
             {"custom_param_ranges": custom_ranges}
         )
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_save_empty_custom_param_ranges(self, mock_mongo_handler):
         """Test saving empty custom parameter ranges"""
         # Mock the MongoHandler
@@ -204,7 +204,7 @@ class TestSaveAutoMLCustomParamRanges:
             {"custom_param_ranges": {}}
         )
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_save_complex_custom_param_ranges(self, mock_mongo_handler):
         """Test saving complex custom parameter ranges with various types"""
         # Mock the MongoHandler
@@ -244,7 +244,7 @@ class TestSaveAutoMLCustomParamRanges:
             {"custom_param_ranges": custom_ranges}
         )
 
-    @patch('nvidia_tao_core.microservices.handlers.stateless_handlers.MongoHandler')
+    @patch('nvidia_tao_core.microservices.utils.stateless_handler_utils.MongoHandler')
     def test_save_and_get_roundtrip(self, mock_mongo_handler):
         """Test saving and then getting custom parameter ranges"""
         # Mock the MongoHandler

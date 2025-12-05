@@ -20,7 +20,7 @@ import pytest
 
 from nvidia_tao_core.microservices.constants import TAO_NETWORKS
 from nvidia_tao_core.microservices.enum_constants import _get_network_architectures
-from nvidia_tao_core.microservices.utils import get_microservices_network_and_action
+from nvidia_tao_core.microservices.utils.core_utils import get_microservices_network_and_action
 from nvidia_tao_core.scripts.generate_schema import generate_schema
 
 EXCLUDED_KEYWORDS = [

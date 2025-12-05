@@ -184,7 +184,7 @@ class DepthNetTrainExpConfig(TrainConfig):
         DDP (Distributed Data Parallel) and Fully Sharded DDP are supported.""",
     )
     activation_checkpoint: bool = BOOL_FIELD(
-        value=True,
+        value=False,
         display_name="enable activation checkpointing",
         description="""
         A True value instructs train to recompute in backward pass to save GPU memory,

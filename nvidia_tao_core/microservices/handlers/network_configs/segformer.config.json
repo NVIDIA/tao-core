@@ -35,7 +35,7 @@
         },
         "evaluate": {
             "dataset.segment.root_dir": {
-                "source": "train_datasets",
+                "source": "eval_dataset",
                 "multiple_sources": false,
                 "path": ""
             }
@@ -49,7 +49,7 @@
         },
         "inference": {
             "dataset.segment.root_dir": {
-                "source": "train_datasets",
+                "source": "eval_dataset",
                 "multiple_sources": false,
                 "path": ""
             }

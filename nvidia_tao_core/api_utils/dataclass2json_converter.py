@@ -22,10 +22,13 @@ import logging
 from dataclasses import asdict, fields, is_dataclass
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 __type_mapping = {
@@ -359,12 +362,67 @@ def additional_parameters_fix(json_schema, parameter_name, additional_param_list
             set(schema[param_list[idx]][parameter_name])
         )
 
+    def extract_default_values(schema_props, default_dict, param_list, idx):
+        """Recursively extract default values for parameters marked with parameter_name.
+
+        Args:
+            schema_props (dict): The schema properties to traverse.
+            default_dict (dict): The default values dictionary to build.
+            param_list (list): list of parameters in the path
+            idx (int): parameter index to point to.
+
+        Returns: dict or value
+        """
+        if idx >= len(param_list):
+            return None
+
+        param = param_list[idx]
+        if param not in schema_props:
+            return None
+
+        if idx == len(param_list) - 1:
+            # This is the leaf parameter - return its default value
+            return schema_props[param].get("default")
+
+        # Recursively process nested structure
+        nested_props = schema_props[param].get("properties", {})
+
+        result = extract_default_values(nested_props, {}, param_list, idx + 1)
+        return result
+
     base_param = set()
     for additional_param in additional_param_list:
         additional_param_split = additional_param.split(".")
         rectify_schema(json_schema["properties"], additional_param_split, 0)
         base_param.add(additional_param_split[0])
-    json_schema[parameter_name] = list(base_param)
+
+    # For 'popular' parameter, build a dictionary of default values
+    if parameter_name == "popular":
+        popular_dict = {}
+        for additional_param in additional_param_list:
+            additional_param_split = additional_param.split(".")
+            # Build nested dictionary structure
+            current_dict = popular_dict
+            schema_props = json_schema["properties"]
+
+            for i, param in enumerate(additional_param_split):
+                if i == len(additional_param_split) - 1:
+                    # Leaf parameter - get its default value
+                    if param in schema_props and "default" in schema_props[param]:
+                        current_dict[param] = schema_props[param]["default"]
+                else:
+                    # Intermediate level - ensure nested structure exists
+                    if param not in current_dict:
+                        current_dict[param] = {}
+                    current_dict = current_dict[param]
+                    # Update schema_props to the nested properties
+                    if param in schema_props and "properties" in schema_props[param]:
+                        schema_props = schema_props[param]["properties"]
+
+        json_schema[parameter_name] = popular_dict
+    else:
+        # For 'required' and other parameters, keep as list
+        json_schema[parameter_name] = list(base_param)
 
     return json_schema
 
@@ -422,6 +480,7 @@ def create_json_schema(json_data):
         valid_min = param_meta.get("valid_min")
         valid_max = param_meta.get("valid_max")
         valid_options = param_meta.get("valid_options")
+        option_weights = param_meta.get("option_weights")
         required = param_meta.get("required")
         math_cond = param_meta.get("math_cond")
         parent_param = param_meta.get("parent_param")
@@ -506,6 +565,8 @@ def create_json_schema(json_data):
             props[param_name]["depends_on"] = depends_on
         if valid_options:
             props[param_name]["enum"] = valid_options
+        if option_weights is not None:
+            props[param_name]["option_weights"] = option_weights
         if regex and mapped_value_type == "string":
             props[param_name]["pattern"] = regex
         if link and link.startswith("http"):

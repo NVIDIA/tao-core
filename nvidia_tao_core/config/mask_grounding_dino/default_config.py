@@ -41,13 +41,6 @@ from nvidia_tao_core.config.grounding_dino.default_config import (
 class MaskGDINOEvalExpConfig(GDINOEvalExpConfig):
     """eval config"""
 
-    save_mask: bool = BOOL_FIELD(
-        value=False,
-        default_value=False,
-        display_name="save mask",
-        description="Flag to save mask of groundtruth and prediction from dataset and model."
-    )
-
     ioi_threshold: float = FLOAT_FIELD(
         value=0.5,
         default_value=0.5,

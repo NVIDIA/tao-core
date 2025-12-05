@@ -1,9 +1,9 @@
 import pytest
 
 from nvidia_tao_core.microservices.constants import TAO_NETWORKS
-from nvidia_tao_core.microservices.utils import read_network_config
+from nvidia_tao_core.microservices.utils.core_utils import read_network_config
 from nvidia_tao_core.scripts.generate_schema import generate_schema
-from nvidia_tao_core.microservices.utils import get_microservices_network_and_action
+from nvidia_tao_core.microservices.utils.core_utils import get_microservices_network_and_action
 
 
 @pytest.mark.parametrize("network", TAO_NETWORKS)

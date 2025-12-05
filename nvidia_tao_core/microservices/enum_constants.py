@@ -15,15 +15,19 @@
 """Defining enums for dataset and model formats and types"""
 import enum
 import json
+import os
 import pathlib
 from typing import Set
 import logging
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -346,6 +350,24 @@ class BaseMetrics(str, enum.Enum):
     val_mprecision = 'val_mprecision'
     val_mrecall = 'val_mrecall'
 
+    # Mask Grounding DINO metrics
+    val_gIoU = 'val_gIoU'
+    val_cIoU = 'val_cIoU'
+    val_T_acc = 'val_T_acc'
+    val_N_acc = 'val_N_acc'
+    val_Pr_0_7 = 'val_Pr@0.7'
+    val_Pr_0_8 = 'val_Pr@0.8'
+    val_Pr_0_9 = 'val_Pr@0.9'
+
+    # Mask Grounding DINO test metrics
+    test_gIoU = 'test_gIoU'
+    test_cIoU = 'test_cIoU'
+    test_T_acc = 'test_T_acc'
+    test_N_acc = 'test_N_acc'
+    test_Pr_0_7 = 'test_Pr@0.7'
+    test_Pr_0_8 = 'test_Pr@0.8'
+    test_Pr_0_9 = 'test_Pr@0.9'
+
     # Data Service Analytics KPI metrics
     num_objects = 'num_objects'
     object_count_index = 'object_count_index'
@@ -412,6 +434,8 @@ class BaseExperimentLicense(enum.Enum):
 
 
 # Create Enums
+
+
 dataset_types, _ = _scan_config_files()
 DatasetType = enum.Enum('DatasetType', {name: name for name in dataset_types}, type=str)
 

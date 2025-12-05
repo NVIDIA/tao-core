@@ -259,29 +259,27 @@ class PPDenseHeadConfig:
                 'unmatched_threshold': 0.45
             },
             {
-                'class_name': 'Pedestrian',
-                'anchor_sizes': [[0.8, 0.6, 1.73]],
+                'class_name': 'Truck',
+                'anchor_sizes': [[3.9, 1.6, 1.56]],
                 'anchor_rotations': [0, 1.57],
-                'anchor_bottom_heights': [-0.6],
+                'anchor_bottom_heights': [-1.78],
                 'align_center': False,
                 'feature_map_stride': 2,
-                'matched_threshold': 0.5,
-                'unmatched_threshold': 0.35
+                'matched_threshold': 0.6,
+                'unmatched_threshold': 0.45
             },
             {
-                'class_name': 'Cyclist',
-                'anchor_sizes': [[1.76, 0.6, 1.73]],
+                'class_name': 'Van',
+                'anchor_sizes': [[3.9, 1.6, 1.56]],
                 'anchor_rotations': [0, 1.57],
-                'anchor_bottom_heights': [-0.6],
+                'anchor_bottom_heights': [-1.78],
                 'align_center': False,
                 'feature_map_stride': 2,
-                'matched_threshold': 0.5,
-                'unmatched_threshold': 0.35
-            }
-        ],
-        default_value=[
+                'matched_threshold': 0.6,
+                'unmatched_threshold': 0.45
+            },
             {
-                'class_name': 'Car',
+                'class_name': 'Tram',
                 'anchor_sizes': [[3.9, 1.6, 1.56]],
                 'anchor_rotations': [0, 1.57],
                 'anchor_bottom_heights': [-1.78],
@@ -303,6 +301,88 @@ class PPDenseHeadConfig:
             {
                 'class_name': 'Cyclist',
                 'anchor_sizes': [[1.76, 0.6, 1.73]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-0.6],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.5,
+                'unmatched_threshold': 0.35
+            },
+            {
+                'class_name': 'Misc',
+                'anchor_sizes': [[0.8, 0.6, 1.73]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-0.6],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.5,
+                'unmatched_threshold': 0.35
+            }
+        ],
+        default_value=[
+            {
+                'class_name': 'Car',
+                'anchor_sizes': [[3.9, 1.6, 1.56]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-1.78],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.6,
+                'unmatched_threshold': 0.45
+            },
+            {
+                'class_name': 'Truck',
+                'anchor_sizes': [[3.9, 1.6, 1.56]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-1.78],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.6,
+                'unmatched_threshold': 0.45
+            },
+            {
+                'class_name': 'Van',
+                'anchor_sizes': [[3.9, 1.6, 1.56]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-1.78],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.6,
+                'unmatched_threshold': 0.45
+            },
+            {
+                'class_name': 'Tram',
+                'anchor_sizes': [[3.9, 1.6, 1.56]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-1.78],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.6,
+                'unmatched_threshold': 0.45
+            },
+            {
+                'class_name': 'Pedestrian',
+                'anchor_sizes': [[0.8, 0.6, 1.73]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-0.6],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.5,
+                'unmatched_threshold': 0.35
+            },
+            {
+                'class_name': 'Cyclist',
+                'anchor_sizes': [[1.76, 0.6, 1.73]],
+                'anchor_rotations': [0, 1.57],
+                'anchor_bottom_heights': [-0.6],
+                'align_center': False,
+                'feature_map_stride': 2,
+                'matched_threshold': 0.5,
+                'unmatched_threshold': 0.35
+            },
+            {
+                'class_name': 'Misc',
+                'anchor_sizes': [[0.8, 0.6, 1.73]],
                 'anchor_rotations': [0, 1.57],
                 'anchor_bottom_heights': [-0.6],
                 'align_center': False,
@@ -366,8 +446,8 @@ class PPPostprocessingConfig:
     """Postprocessing config."""
 
     recall_thresh_list: List[float] = LIST_FIELD(
-        [0.3, 0.5, 0.7],
-        default_value=[0.3, 0.5, 0.7],
+        [0.3, 0.5, 0.7, 0.3, 0.3, 0.3, 0.3],
+        default_value=[0.3, 0.5, 0.7, 0.3, 0.3, 0.3, 0.3],
         display_name="recall_thresh_list",
         description="List of recall thresholds."
     )
@@ -442,9 +522,11 @@ class PPDataAugmentorConfig:
             "limit_whole_scene": False,
             "name": "gt_sampling",
             "num_point_features": 4,
-            "preface": {"filter_by_min_points": ["Car:5", "Pedestrian:5", "Cyclist:5"]},
+            "preface": {
+                "filter_by_min_points": ["Car:5", "Truck:5", "Van:5", "Tram:5", "Pedestrian:5", "Cyclist:5", "Misc:5"]
+            },
             "remove_extra_width": [0.0, 0.0, 0.0],
-            "sample_groups": ["Car:15", "Pedestrian:15", "Cyclist:15"]
+            "sample_groups": ["Car:15", "Truck:15", "Van:15", "Tram:15", "Pedestrian:15", "Cyclist:15", "Misc:15"]
         }],
         display_name="aug_config_list",
         description="List of configurations of augmentations."
@@ -456,8 +538,8 @@ class PPDatasetConfig:
     """Dataset config."""
 
     class_names: List[str] = LIST_FIELD(
-        ['Car', 'Pedestrian', 'Cyclist'],
-        default_value=['Car', 'Pedestrian', 'Cyclist'],
+        ['Car', 'Truck', 'Van', 'Tram', 'Pedestrian', 'Cyclist', 'Misc'],
+        default_value=['Car', 'Truck', 'Van', 'Tram', 'Pedestrian', 'Cyclist', 'Misc'],
         display_name="class_names",
         description="List of names of object classes."
     )
@@ -506,7 +588,7 @@ class PPDatasetConfig:
         description="Point feature encoding configurations."
     )
     point_cloud_range: Optional[List[float]] = LIST_FIELD(
-        arrList=[0, -39.68, -3, 69.12, 39.68, 1],
+        arrList=[5.245, -25.983, -3.854, 79.485, 48.257, 2.908],
         display_name="point_cloud_range",
         description="Point cloud's coordinate range."
     )
@@ -525,7 +607,7 @@ class PPDatasetConfig:
                 "max_number_of_voxels": {"test": 10000, "train": 16000},
                 "max_points_per_voxel": 32,
                 "name": "transform_points_to_voxels",
-                "voxel_size": [0.16, 0.16, 4]
+                "voxel_size": [0.16, 0.16, 6.762]
             }
         ],
         display_name="data_processor",
@@ -553,7 +635,7 @@ class PPTrainConfig:
     )
     num_epochs: int = INT_FIELD(
         value=80,
-        default_valeu=80,
+        default_value=80,
         display_name="num_epochs",
         description="Number of epochs to train for.",
         valid_min=1,
@@ -799,8 +881,8 @@ class PPInferConfig:
         description="Path to checkpoint to do inference on."
     )
     viz_conf_thresh: float = FLOAT_FIELD(
-        value=0.3,
-        default_value=0.3,
+        value=0.1,
+        default_value=0.1,
         display_name="viz_conf_thresh",
         description="Confidence threshold for visualization.",
         valid_min=0.0,

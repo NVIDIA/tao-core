@@ -21,22 +21,28 @@ import time
 import traceback
 import uuid
 import logging
+import re
 
-from nvidia_tao_core.microservices.automl.utils import delete_lingering_checkpoints, wait_for_job_completion
+from nvidia_tao_core.microservices.utils.automl_utils import (
+    delete_lingering_checkpoints,
+    wait_for_job_completion,
+    update_automl_details_metadata
+)
 from nvidia_tao_core.microservices.constants import (
     _DATA_GENERATE_ACTIONS,
     _DATA_SERVICES_ACTIONS,
     NETWORK_CONTAINER_MAPPING,
     COPY_MODEL_PARAMS_FROM_TRAIN_NETWORKS
 )
-from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
-from nvidia_tao_core.microservices.handlers.ngc_handler import get_user_key
-from nvidia_tao_core.microservices.handlers.nvcf_handler import get_available_nvcf_instances
-from nvidia_tao_core.microservices.handlers.docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
-from nvidia_tao_core.microservices.handlers.infer_data_sources import apply_data_source_config
-from nvidia_tao_core.microservices.handlers.infer_params import CLI_CONFIG_TO_FUNCTIONS
-from nvidia_tao_core.microservices.handlers.encrypt import NVVaultEncryption
-from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+from nvidia_tao_core.microservices.utils.cloud_utils import create_cs_instance
+from nvidia_tao_core.microservices.utils.handler_utils import get_files_from_cloud
+from nvidia_tao_core.microservices.utils.ngc_utils import get_user_key
+from nvidia_tao_core.microservices.utils.nvcf_utils import get_available_nvcf_instances
+from .docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
+from .infer_data_sources import apply_data_source_config
+from .infer_params import CLI_CONFIG_TO_FUNCTIONS
+from nvidia_tao_core.microservices.utils.encrypt_utils import NVVaultEncryption
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     BACKEND,
     base_exp_uuid,
     get_base_experiment_metadata,
@@ -60,7 +66,7 @@ from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     update_job_details_with_microservices_response,
     get_user_telemetry_opt_out
 )
-from nvidia_tao_core.microservices.handlers.utilities import (
+from nvidia_tao_core.microservices.utils.handler_utils import (
     StatusParser,
     build_cli_command,
     get_num_nodes_from_spec,
@@ -71,7 +77,7 @@ from nvidia_tao_core.microservices.handlers.utilities import (
     write_nested_dict,
     get_cloud_metadata
 )
-from nvidia_tao_core.microservices.utils import (
+from nvidia_tao_core.microservices.utils.core_utils import (
     remove_key_by_flattened_string,
     read_network_config,
     get_admin_key,
@@ -80,14 +86,15 @@ from nvidia_tao_core.microservices.utils import (
     get_monitoring_metric,
     get_microservices_network_and_action
 )
-from nvidia_tao_core.microservices.job_utils.executor import (
+from nvidia_tao_core.microservices.utils.job_utils.executor import (
     JobExecutor,
     StatefulSetExecutor,
     MicroserviceExecutor
 )
-from nvidia_tao_core.microservices.job_utils.executor.utils import get_cluster_ip
-from nvidia_tao_core.microservices.network_utils.network_constants import ptm_mapper
-from nvidia_tao_core.microservices.specs_utils import json_to_kitti, json_to_yaml, json_to_toml
+from nvidia_tao_core.microservices.utils.executor_utils import get_cluster_ip
+from nvidia_tao_core.microservices.utils.network_utils.network_constants import ptm_mapper
+from nvidia_tao_core.microservices.utils.specs_utils import json_to_kitti, json_to_yaml, json_to_toml
+from nvidia_tao_core.microservices.utils.log_monitor_service import start_monitoring_job, stop_monitoring_job
 
 SPEC_BACKEND_TO_FUNCTIONS = {
     "protobuf": json_to_kitti.kitti,
@@ -97,10 +104,13 @@ SPEC_BACKEND_TO_FUNCTIONS = {
 HOST_PLATFORM = os.getenv("HOST_PLATFORM", "local-k8s")
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -223,6 +233,8 @@ class ActionPipeline:
         )
         self.num_nodes = get_num_nodes_from_spec(self.job_context.specs, self.action, network=self.network)
         self.recursive_dataset_file_download = self.api_params.get("recursive_dataset_file_download", False)
+        self.retain_checkpoints_for_resume = self.job_context.retain_checkpoints_for_resume
+        self.early_stop_epoch = self.job_context.early_stop_epoch
         # add an entry on the docker image mapper for trt engine generation MAXINE DEPLOY
         # if action is trt engine generation and network is a maxine network, override image from docker image mapper
         # TODO: robbie add image mpping fix for trt engine gen
@@ -252,6 +264,35 @@ class ActionPipeline:
                 if encryption.check_config()[0]:
                     docker_env_vars[docker_env_var_key] = encryption.decrypt(docker_env_var_value)
 
+    def get_epoch_numbers_from_job(self):
+        """Extract epoch numbers from checkpoint files and store in job metadata"""
+        try:
+            job_files, _, _, _ = get_files_from_cloud(self.handler_metadata, self.job_name)
+            epoch_numbers = []
+            for job_file in job_files:
+                # Extract numbers before the extension using regex
+                match = re.search(r'(\d+)(?=\.(pth|hdf5|tlt)$)', job_file)
+                if match:
+                    epoch_number = match.group(1)
+                    if epoch_number not in epoch_numbers:
+                        epoch_numbers.append(epoch_number)
+
+            # Sort epoch numbers as integers
+            if epoch_numbers:
+                epoch_numbers = sorted([int(e) for e in epoch_numbers])
+                # Update job metadata with epoch numbers
+                update_job_metadata(
+                    self.handler_id,
+                    self.job_name,
+                    metadata_key="epoch_numbers",
+                    data=epoch_numbers,
+                    kind=self.handler_kind
+                )
+                self.detailed_print(f"Stored epoch numbers for job {self.job_name}: {epoch_numbers}")
+        except Exception as e:
+            logger.error("Exception while extracting epoch numbers: %s", str(e))
+            self.detailed_print(f"Failed to extract epoch numbers: {str(e)}")
+
     def generate_env_variables(self, automl_brain_job_id=None, experiment_number=None, automl_exp_job_id=None):
         """Generate env variables required for a job"""
         host_base_url = os.getenv("HOSTBASEURL", "no_url")
@@ -276,19 +317,16 @@ class ActionPipeline:
             if cluster_ip and cluster_port:
                 host_base_url = f"http://{cluster_ip}:{cluster_port}"
 
-        handler_kind = "experiments"
-        if (not self.handler_metadata.get("train_datasets", [])) and self.job_context.network not in (
-            ["auto_label", "image"]
-        ):
-            handler_kind = "datasets"
+        # Pluralize handler_kind for API endpoint (experiment -> experiments, dataset -> datasets)
+        handler_kind_plural = f"{self.handler_kind}s" if not self.handler_kind.endswith('s') else self.handler_kind
 
         status_url = (
-            f"{host_base_url}/api/v1/orgs/{org_name}/{handler_kind}/"
+            f"{host_base_url}/api/v1/orgs/{org_name}/{handler_kind_plural}/"
             f"{self.handler_id}/jobs/{self.job_context.id}"
         )
         if automl_brain_job_id:
             status_url = (
-                f"{host_base_url}/api/v1/orgs/{org_name}/{handler_kind}/"
+                f"{host_base_url}/api/v1/orgs/{org_name}/{handler_kind_plural}/"
                 f"{self.handler_id}/jobs/{automl_brain_job_id}"
             )
             if experiment_number:
@@ -299,6 +337,11 @@ class ActionPipeline:
             self.job_context.org_name
         )
         self.job_env_variables["CLOUD_BASED"] = "True"
+        # Pass BACKEND to container so it knows whether to use server-side log streaming
+        # Set TAO_EXECUTION_BACKEND env variable so container knows its execution environment
+        # NOTE: We use TAO_EXECUTION_BACKEND instead of BACKEND to avoid conflicts
+        # BACKEND is used to detect if code is running in service pods vs job containers
+        self.job_env_variables["TAO_EXECUTION_BACKEND"] = BACKEND
         user_key = get_user_key(
             self.job_context.user_id,
             self.job_context.org_name,
@@ -311,6 +354,9 @@ class ActionPipeline:
         self.job_env_variables["TAO_API_SERVER"] = host_base_url
         self.job_env_variables["TAO_API_JOB_ID"] = log_callback_job_id
         self.job_env_variables["TAO_LOGGING_SERVER_URL"] = status_url
+        self.job_env_variables["RETAIN_CHECKPOINTS_FOR_RESUME"] = str(self.retain_checkpoints_for_resume)
+        if self.early_stop_epoch is not None:
+            self.job_env_variables["EARLY_STOP_EPOCH"] = str(self.early_stop_epoch)
 
     def generate_nv_job_metadata(self, nv_job_metadata):
         """Convert run command generated into format that"""
@@ -392,7 +438,7 @@ class ActionPipeline:
 
     def handle_ptm_anomalies(self):
         """Remove one of end-end or backbone related PTM field based on the Handler metadata info"""
-        for base_experiment_id in self.handler_metadata.get("base_experiment", []):
+        for base_experiment_id in self.handler_metadata.get("base_experiment_ids", []):
             base_experiment_metadata = get_base_experiment_metadata(base_experiment_id)
             if base_experiment_metadata.get("base_experiment_metadata", {}).get("is_backbone"):
                 # if ptm is a backbone remove end_to_end field from config and spec
@@ -404,7 +450,7 @@ class ActionPipeline:
                 remove_key_by_flattened_string(self.spec, parameter_to_remove)
                 remove_key_by_flattened_string(self.config, parameter_to_remove)
 
-        if not self.handler_metadata.get("base_experiment", []):
+        if not self.handler_metadata.get("base_experiment_ids", []):
             parameters_to_remove = [
                 ptm_mapper.get("end_to_end", {}).get(self.network),
                 ptm_mapper.get("backbone", {}).get(self.network),
@@ -485,7 +531,8 @@ class ActionPipeline:
             StatefulSetExecutor().delete_statefulset(self.job_name, use_ngc=self.ngc_runner)
 
         # Monitor job status
-        while k8s_status in ["Done", "Error", "Running", "Pending"]:
+        cur_status_line = 0
+        while k8s_status in ["Done", "Error", "Running", "Pending", "Pausing"]:
             # If Done, try running self.post_run()
             # Poll every 30 seconds
             time.sleep(30)
@@ -522,15 +569,45 @@ class ActionPipeline:
                             f"latest_model_{self.job_name}"
                         ] = latest_checkpoint_epoch_number
                         write_handler_metadata(self.handler_id, self.handler_metadata, self.handler_kind)
+                        # Extract and store epoch numbers in job metadata
+                        self.get_epoch_numbers_from_job()
                     if not os.path.exists(f"{self.jobs_root}/{self.job_name}"):
                         os.makedirs(f"{self.jobs_root}/{self.job_name}")
                     update_job_status(self.handler_id, self.job_name, status="Done", kind=self.handler_kind)
+
+                    # Stop log monitoring when job is done
+                    logger.debug(f"[ACTIONS] Job {self.job_name} completed, checking if should stop log monitoring")
+                    if BACKEND in ("local-k8s", "local-docker"):
+                        try:
+                            logger.info(
+                                f"[ACTIONS] Stopping log monitoring for completed job {self.job_name}"
+                            )
+                            stop_monitoring_job(self.job_name)
+                            logger.info(
+                                f"[ACTIONS] Successfully stopped log monitoring for completed job "
+                                f"{self.job_name}"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"[ACTIONS] Failed to stop log monitoring for job {self.job_name}: "
+                                f"{type(e).__name__}: {e}"
+                            )
+
                     break
                 except Exception as e:
                     # If post run fails, call it Error
                     logger.error("Exception thrown in post run after done status %s", str(e))
                     self.detailed_print(traceback.format_exc())
                     update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+
+                    # Stop log monitoring when job errors
+                    if BACKEND in ("local-k8s", "local-docker"):
+                        try:
+                            stop_monitoring_job(self.job_name)
+                            logger.info(f"Stopped log monitoring for errored job {self.job_name}")
+                        except Exception as stop_err:
+                            logger.warning(f"Failed to stop log monitoring for job {self.job_name}: {stop_err}")
+
                     break
             # If running in K8s, update results to job_context
             elif k8s_status == "Running":
@@ -560,8 +637,24 @@ class ActionPipeline:
                 )
                 continue
 
+            elif k8s_status == "Pausing":
+                lines_to_process = get_dnn_status(self.job_name, automl=False, experiment_number=None)[cur_status_line:]
+                for status_dict in lines_to_process:
+                    cur_status_line += 1
+                    toolkit_job_completed = False
+                    if status_dict.get("status") in ("SUCCESS", "FAILURE"):
+                        k8s_status = "Error"
+                        if status_dict.get("status") == "SUCCESS":
+                            k8s_status = "Done"
+                        toolkit_job_completed = True
+                        logger.info("toolkit job completed with status %s", status_dict.get("status"))
+                        # update_job_status(self.handler_id, self.job_name, status=k8s_status, kind=self.handler_kind)
+                        break
+                if toolkit_job_completed:
+                    break
             # If the job never submitted or errored out!
-            else:
+            if k8s_status == "Error":
+                logger.info("K8s error status")
                 new_results = status_parser.update_results(total_epochs=total_epochs, job_id=self.job_name)
                 update_job_metadata(
                     self.handler_id,
@@ -596,8 +689,12 @@ class ActionPipeline:
 
         self.detailed_print(f"Job Done: {self.job_name} Final status: {metadata_status}")
         if self.ngc_runner or BACKEND in ("local-k8s", "local-docker"):
-            if metadata_status not in ("Canceled", "Canceling", "Paused", "Pausing"):
+            logger.info(f"Metadata status is {metadata_status}")
+            logger.info(f'Bool is {metadata_status not in ("Canceled", "Canceling", "Paused")}')
+            if metadata_status not in ("Canceled", "Canceling", "Paused"):
                 StatefulSetExecutor().delete_statefulset(self.job_name)
+            if metadata_status == "Pausing":
+                update_job_status(self.handler_id, self.job_name, status="Paused", kind=self.handler_kind)
 
     def run(self):
         """Calls necessary setup functions and calls job creation"""
@@ -678,6 +775,61 @@ class ActionPipeline:
                     automl_exp_job=False,
                 )
             self.detailed_print("Job created", self.job_name)
+
+            # Start log monitoring for K8s and Docker backends
+            logger.debug(
+                f"[ACTIONS] Checking if log monitoring should start for job {self.job_name}, "
+                f"BACKEND={BACKEND}"
+            )
+            if BACKEND in ("local-k8s", "local-docker"):
+                try:
+                    logger.debug(f"[ACTIONS] Starting log monitoring setup for job {self.job_name}")
+                    # Get callback URL if available
+                    callback_url = self.job_env_variables.get("TAO_LOGGING_SERVER_URL")
+                    logger.debug(f"[ACTIONS] Callback URL from env: {callback_url}")
+                    if callback_url:
+                        callback_url = callback_url + ":log_update"
+                        logger.debug(f"[ACTIONS] Full callback URL: {callback_url}")
+
+                    # Get namespace for K8s
+                    namespace = None
+                    if BACKEND == "local-k8s":
+                        namespace = os.getenv("NAMESPACE")
+                        logger.debug(f"[ACTIONS] K8s namespace from env: {namespace}")
+                        if not namespace:
+                            try:
+                                namespace_file = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+                                logger.debug(f"[ACTIONS] Reading namespace from {namespace_file}")
+                                with open(namespace_file, 'r', encoding='utf-8') as f:
+                                    namespace = f.read().strip()
+                                logger.debug(f"[ACTIONS] Got namespace from service account: {namespace}")
+                            except Exception as e:
+                                namespace = "default"
+                                logger.debug(f"[ACTIONS] Using default namespace (error: {e})")
+
+                    # Start monitoring
+                    logger.info(f"[ACTIONS] Starting log monitoring for job {self.job_name}, namespace={namespace}")
+                    start_monitoring_job(
+                        self.job_name,
+                        callback_url=callback_url,
+                        namespace=namespace,
+                        metadata={
+                            'handler_id': self.handler_id,
+                            'handler_kind': 'experiment',
+                            'action': self.action,
+                            'network': self.network
+                        }
+                    )
+                    logger.info(f"[ACTIONS] Successfully started log monitoring for job {self.job_name}")
+                except Exception as e:
+                    logger.warning(
+                        f"[ACTIONS] Failed to start log monitoring for job {self.job_name}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    logger.debug("[ACTIONS] Exception details:", exc_info=True)
+            else:
+                logger.debug(f"[ACTIONS] Skipping log monitoring for backend {BACKEND}")
+
             self.monitor_job()
             return
 
@@ -767,6 +919,8 @@ class CLIPipeline(ActionPipeline):
 
 
 # Specs are modified as well => Train, Evaluate, Retrain Actions
+
+
 class TrainVal(CLIPipeline):
     """Class for experiment actions which involves both spec file as well as cli params"""
 
@@ -806,7 +960,7 @@ class TrainVal(CLIPipeline):
                     break
                 if parent_action in ("train", "distill", "quantize"):
                     # pylint: disable=C0415
-                    from nvidia_tao_core.microservices.app_handlers.spec_handler import SpecHandler
+                    from .spec_handler import SpecHandler
                     default_spec_schema_response = SpecHandler.get_spec_schema(
                         self.job_context.user_id,
                         self.job_context.org_name,
@@ -889,7 +1043,7 @@ class TrainVal(CLIPipeline):
         # These actions create a new dataset as part of their actions
         if action in _DATA_GENERATE_ACTIONS:
             # pylint: disable=C0415
-            from nvidia_tao_core.microservices.app_handlers.dataset_handler import DatasetHandler
+            from .dataset_handler import DatasetHandler
             handler_metadata = get_handler_metadata(self.handler_id, self.handler_kind)
             request_dict = DatasetHandler.create_dataset_dict_from_experiment_metadata(
                 self.job_context.id,
@@ -922,7 +1076,9 @@ class AutoMLPipeline(ActionPipeline):
         """Initialize the AutoMLPipeline class"""
         super().__init__(job_context)
         self.network, self.action = get_microservices_network_and_action(self.network, self.action)
-        self.automl_brain_job_id = self.job_context.id
+        # For AutoML experiments: job_context.id is the experiment job ID
+        # and job_context.parent_id is the brain job ID
+        self.automl_brain_job_id = self.job_context.parent_id if self.job_context.parent_id else self.job_context.id
         self.job_root = os.path.join(
             get_jobs_root(self.job_context.user_id, self.job_context.org_name),
             self.automl_brain_job_id
@@ -938,6 +1094,7 @@ class AutoMLPipeline(ActionPipeline):
             self.detailed_print("New job id being assigned to recommendation", self.job_name)
             self.recs_dict[self.rec_number]["job_id"] = self.job_name
             save_automl_controller_info(self.automl_brain_job_id, self.recs_dict)
+            update_automl_details_metadata(self.automl_brain_job_id, self.handler_id, self.handler_kind)
 
         if not os.path.exists(self.expt_root):
             os.makedirs(self.expt_root)
@@ -952,7 +1109,7 @@ class AutoMLPipeline(ActionPipeline):
                     ptm_id = dep.name
                     break
         if ptm_id:
-            recommended_values["base_experiment"] = search_for_base_experiment(
+            recommended_values["base_experiment_ids"] = search_for_base_experiment(
                 get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, ptm_id)
             )
 
@@ -1118,6 +1275,7 @@ class AutoMLPipeline(ActionPipeline):
         if k8s_status == "Error":
             self.recs_dict[self.rec_number]["status"] = "failure"
             save_automl_controller_info(self.automl_brain_job_id, self.recs_dict)
+            update_automl_details_metadata(self.automl_brain_job_id, self.handler_id, self.handler_kind)
 
     def run(self):
         """Calls necessary setup functions and calls job creation"""
@@ -1169,6 +1327,72 @@ class AutoMLPipeline(ActionPipeline):
                 f"AutoML recommendation with experiment id {self.rec_number} "
                 f"and job id {self.job_name} submitted"
             )
+
+            # Start log monitoring for AutoML recommendation job
+            logger.debug(
+                f"[ACTIONS] Checking if log monitoring should start for AutoML rec job "
+                f"{self.job_name}, BACKEND={BACKEND}"
+            )
+            if BACKEND in ("local-k8s", "local-docker"):
+                try:
+                    logger.debug(
+                        f"[ACTIONS] Starting log monitoring setup for AutoML rec job "
+                        f"{self.job_name} (experiment {self.rec_number})"
+                    )
+                    # Get callback URL if available
+                    callback_url = self.job_env_variables.get("TAO_LOGGING_SERVER_URL")
+                    logger.debug(f"[ACTIONS] AutoML callback URL from env: {callback_url}")
+                    if callback_url:
+                        callback_url = callback_url + ":log_update"
+                        logger.debug(f"[ACTIONS] AutoML full callback URL: {callback_url}")
+
+                    # Get namespace for K8s
+                    namespace = None
+                    if BACKEND == "local-k8s":
+                        namespace = os.getenv("NAMESPACE")
+                        logger.debug(f"[ACTIONS] AutoML K8s namespace from env: {namespace}")
+                        if not namespace:
+                            try:
+                                namespace_file = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+                                logger.debug(f"[ACTIONS] Reading namespace from {namespace_file}")
+                                with open(namespace_file, 'r', encoding='utf-8') as f:
+                                    namespace = f.read().strip()
+                                logger.debug(f"[ACTIONS] Got namespace from service account: {namespace}")
+                            except Exception as e:
+                                namespace = "default"
+                                logger.debug(f"[ACTIONS] Using default namespace (error: {e})")
+
+                    # Start monitoring for this recommendation job
+                    logger.info(
+                        f"[ACTIONS] Starting log monitoring for AutoML recommendation job {self.job_name} "
+                        f"(experiment {self.rec_number}), namespace={namespace}"
+                    )
+                    start_monitoring_job(
+                        self.job_name,
+                        callback_url=callback_url,
+                        namespace=namespace,
+                        metadata={
+                            'handler_id': self.handler_id,
+                            'handler_kind': 'experiment',
+                            'action': self.action,
+                            'network': self.network,
+                            'automl_brain_job_id': self.automl_brain_job_id,
+                            'experiment_number': str(self.rec_number)
+                        }
+                    )
+                    logger.info(
+                        f"[ACTIONS] Successfully started log monitoring for AutoML recommendation job {self.job_name} "
+                        f"(experiment {self.rec_number})"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[ACTIONS] Failed to start log monitoring for AutoML job {self.job_name}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    logger.debug("[ACTIONS] Exception details:", exc_info=True)
+            else:
+                logger.debug(f"[ACTIONS] Skipping log monitoring for backend {BACKEND}")
+
             self.monitor_job(nv_job_metadata)
 
             return True
@@ -1199,6 +1423,7 @@ class AutoMLPipeline(ActionPipeline):
 
             self.recs_dict[self.rec_number]["status"] = "failure"
             save_automl_controller_info(self.automl_brain_job_id, self.recs_dict)
+            update_automl_details_metadata(self.automl_brain_job_id, self.handler_id, self.handler_kind)
 
             update_job_status(self.handler_id, self.job_context.id, status="Error", kind=self.handler_kind)
             StatefulSetExecutor().delete_statefulset(self.job_context.id, use_ngc=False)
@@ -1206,6 +1431,8 @@ class AutoMLPipeline(ActionPipeline):
 
 
 # Each Element can be called with a job_context and returns an ActionPipeline (or its derivative) object
+
+
 ACTIONS_TO_FUNCTIONS = {"train": TrainVal,
                         "evaluate": TrainVal,
                         "prune": CLIPipeline,

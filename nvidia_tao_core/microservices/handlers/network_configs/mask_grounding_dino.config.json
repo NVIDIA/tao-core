@@ -82,13 +82,16 @@
                 "mapping": {
                     "image_dir": {
                         "path": "images.tar.gz",
-                        "transform": [
-                            "handle_tar_path",
-                            "wrap_in_list"
-                        ]
+                        "transform": "handle_tar_path"
                     },
                     "classmap": {
                         "path": "label_map.txt"
+                    },
+                    "json_file": {
+                        "path": "inference.jsonl"
+                    },
+                    "captions": {
+                        "path": "inference.jsonl"
                     }
                 }
             }

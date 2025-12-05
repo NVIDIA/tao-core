@@ -17,7 +17,7 @@
 """Start API workflow"""
 import threading
 
-from nvidia_tao_core.microservices.job_utils.workflow import Workflow
+from nvidia_tao_core.microservices.utils.job_utils.workflow import Workflow
 
 Workflow.start()
 

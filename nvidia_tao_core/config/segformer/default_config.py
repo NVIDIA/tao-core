@@ -71,15 +71,17 @@ class SFOptimConfig:
     momentum: float = FLOAT_FIELD(
         value=0.9,
         default_value=0.9,
-        math_cond="> 0.0",
-        display_name="momentum - AdamW",
-        description="The momentum for the AdamW optimizer.",
+        valid_min=0.0,
+        valid_max=1.0,
+        display_name="momentum - AdamW (beta1)",
+        description="The momentum (beta1) for the AdamW optimizer.",
         automl_enabled="TRUE"
     )
     weight_decay: float = FLOAT_FIELD(
         value=0.01,
         default_value=0.01,
-        math_cond="> 0.0",
+        valid_min=0.0,
+        valid_max=1.0,
         display_name="weight decay",
         description="The weight decay coefficient.",
         automl_enabled="TRUE"
@@ -227,29 +229,33 @@ class RandomColor:
     brightness: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
-        math_cond="> 0.0",
-        description="Random Color Brightness",
+        valid_min=0.0,
+        valid_max=2.0,
+        description="Random Color Brightness (torchvision ColorJitter range)",
         automl_enabled="TRUE"
     )
     contrast: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
-        math_cond="> 0.0",
-        description="Random Color Contrast",
+        valid_min=0.0,
+        valid_max=2.0,
+        description="Random Color Contrast (torchvision ColorJitter range)",
         automl_enabled="TRUE"
     )
     saturation: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
-        math_cond="> 0.0",
-        description="Random Color Saturation",
+        valid_min=0.0,
+        valid_max=2.0,
+        description="Random Color Saturation (torchvision ColorJitter range)",
         automl_enabled="TRUE"
     )
     hue: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
-        math_cond="> 0.0",
-        description="Random Color Hue",
+        valid_min=0.0,
+        valid_max=0.5,
+        description="Random Color Hue (torchvision ColorJitter requires 0 <= hue <= 0.5)",
         automl_enabled="TRUE"
     )
     enable: bool = BOOL_FIELD(
@@ -462,6 +468,9 @@ class SFTrainExpConfig(TrainConfig):
     )
     segment: SFTrainSegmentConfig = DATACLASS_FIELD(SFTrainSegmentConfig())
     tensorboard: Optional[TensorBoardLogger] = DATACLASS_FIELD(TensorBoardLogger())
+
+    checkpointer: Optional[Dict[str, Any]] = None
+    enable_lr_monitor: Optional[bool] = False
 
 
 @dataclass

@@ -19,14 +19,20 @@ import random
 import logging
 
 
-from nvidia_tao_core.microservices.automl.utils import fix_input_dimension, fix_power_of_factor, get_valid_options
+from nvidia_tao_core.microservices.utils.automl_utils import (
+    fix_input_dimension,
+    fix_power_of_factor,
+    get_valid_options,
+    get_option_weights
+)
 from nvidia_tao_core.microservices.automl import network_utils
-from nvidia_tao_core.microservices.network_utils import network_constants
-from nvidia_tao_core.microservices.network_utils import automl_helper
-from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+from nvidia_tao_core.microservices.utils.network_utils import network_constants
+from nvidia_tao_core.microservices.utils.network_utils import automl_helper
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     get_job_specs,
     get_automl_custom_param_ranges
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +99,92 @@ class AutoMLAlgorithmBase:
         logger.warning(f"No valid powers of {factor} found in range [{v_min}, {v_max}]")
         return v_min
 
+    def _apply_relational_constraint(self, value, math_cond, depends_on, parameter_name, v_min, v_max):
+        """Apply relational constraints based on depends_on parameter value.
+
+        Supports math_cond operators:
+        - "> depends_on": value must be greater than depends_on parameter
+        - ">= depends_on": value must be greater than or equal to depends_on parameter
+        - "< depends_on": value must be less than depends_on parameter
+        - "<= depends_on": value must be less than or equal to depends_on parameter
+
+        Args:
+            value: The sampled value to constrain
+            math_cond: The math condition string (e.g., "> depends_on")
+            depends_on: The parameter name this depends on
+            parameter_name: Current parameter name (for logging)
+            v_min: Minimum valid value for this parameter
+            v_max: Maximum valid value for this parameter
+
+        Returns:
+            Constrained value that satisfies the relational constraint
+        """
+        if "depends_on" not in math_cond:
+            return value
+
+        # Check if depends_on parameter has been sampled
+        if depends_on not in self.parent_params:
+            logger.info(f"{parameter_name}: depends_on '{depends_on}' not yet sampled, skipping constraint")
+            return value
+
+        parent_value = self.parent_params[depends_on]
+        parts = math_cond.strip().split()
+
+        if len(parts) >= 2:
+            operator = parts[0]
+            constrained_value = value
+
+            # Apply the relational constraint
+            if operator == ">":
+                # Value must be strictly greater than parent
+                min_allowed = parent_value + 1
+                if value <= parent_value:
+                    constrained_value = max(min_allowed, v_min)
+                    logger.warning(
+                        f"CONSTRAINT: {parameter_name}={value} must be > {depends_on}={parent_value}. "
+                        f"Adjusted to {constrained_value}"
+                    )
+                else:
+                    logger.info(f"{parameter_name}={value} satisfies > {depends_on}={parent_value}")
+
+            elif operator == ">=":
+                # Value must be greater than or equal to parent
+                if value < parent_value:
+                    constrained_value = max(parent_value, v_min)
+                    logger.warning(
+                        f"CONSTRAINT: {parameter_name}={value} must be >= {depends_on}={parent_value}. "
+                        f"Adjusted to {constrained_value}"
+                    )
+                else:
+                    logger.info(f"{parameter_name}={value} satisfies >= {depends_on}={parent_value}")
+
+            elif operator == "<":
+                # Value must be strictly less than parent
+                max_allowed = parent_value - 1
+                if value >= parent_value:
+                    constrained_value = min(max_allowed, v_max)
+                    logger.warning(
+                        f"CONSTRAINT: {parameter_name}={value} must be < {depends_on}={parent_value}. "
+                        f"Adjusted to {constrained_value}"
+                    )
+                else:
+                    logger.info(f"{parameter_name}={value} satisfies < {depends_on}={parent_value}")
+
+            elif operator == "<=":
+                # Value must be less than or equal to parent
+                if value > parent_value:
+                    constrained_value = min(parent_value, v_max)
+                    logger.warning(
+                        f"CONSTRAINT: {parameter_name}={value} must be <= {depends_on}={parent_value}. "
+                        f"Adjusted to {constrained_value}"
+                    )
+                else:
+                    logger.info(f"{parameter_name}={value} satisfies <= {depends_on}={parent_value}")
+
+            return constrained_value
+
+        return value
+
     def generate_automl_param_rec_value(self, parameter_config):
         """Generate a random value for the parameter passed"""
         parameter_name = parameter_config.get("parameter")
@@ -120,8 +212,11 @@ class AutoMLAlgorithmBase:
             # Check if this parameter has a dependency and math_cond for calculation
             depends_on = parameter_config.get("depends_on", None)
             if depends_on and math_cond and type(math_cond) is str:
-                # Calculate value based on dependency
-                if depends_on in self.parent_params:
+                # Skip if this is a relational constraint (handled later)
+                if "depends_on" in math_cond:
+                    pass  # Will be handled by _apply_relational_constraint
+                # Calculate value based on dependency for numeric operations
+                elif depends_on in self.parent_params:
                     parent_value = self.parent_params[depends_on]
                     parts = math_cond.split(" ")
                     if len(parts) >= 2:
@@ -149,7 +244,9 @@ class AutoMLAlgorithmBase:
                 v_max = int(default_value)
             else:
                 v_max = int(v_max)
-            if math_cond and type(math_cond) is str:
+            if math_cond and type(math_cond) is str and "depends_on" not in math_cond:
+                # Only process numeric math_cond here (like "/ 2", "^ 2")
+                # Relational constraints (like "> depends_on") are handled later
                 parts = math_cond.split(" ")
                 if len(parts) >= 2:
                     operator = parts[0]
@@ -166,14 +263,32 @@ class AutoMLAlgorithmBase:
                             # Multiple/factor constraint (existing behavior)
                             random_int = fix_input_dimension(random_int, factor)
             else:
-                # No math condition, regular sampling
+                # No math condition, or relational constraint (handled later), regular sampling
                 random_int = np.random.randint(v_min, v_max + 1)
+
+            # Apply relational constraints based on depends_on parameter
+            depends_on = parameter_config.get("depends_on", None)
+            if depends_on and math_cond and type(math_cond) is str:
+                random_int = self._apply_relational_constraint(
+                    random_int, math_cond, depends_on, parameter_name, v_min, v_max
+                )
 
             if not (type(parent_param) is float and math.isnan(parent_param)):
                 if (isinstance(parent_param, str) and parent_param != "nan" and parent_param == "TRUE") or (
                     isinstance(parent_param, bool) and parent_param
                 ):
                     self.parent_params[parameter_name] = random_int
+
+            # Apply network-specific parameter logic
+            random_int = network_utils.apply_network_specific_param_logic(
+                network=self.network,
+                data_type=data_type,
+                parameter_name=parameter_name,
+                value=random_int,
+                v_max=v_max,
+                default_train_spec=self.default_train_spec,
+                parent_params=self.parent_params
+            )
 
             return random_int
 
@@ -184,14 +299,30 @@ class AutoMLAlgorithmBase:
             valid_values = get_valid_options(parameter_config, self.custom_ranges)
             if not valid_values or valid_values == "":
                 return default_value
-            sample = int(np.random.choice(valid_values))
+            # Get weights for weighted sampling
+            weights = get_option_weights(parameter_config, self.custom_ranges)
+            if weights and len(weights) == len(valid_values):
+                # Normalize weights
+                total_weight = sum(weights)
+                probabilities = [w / total_weight for w in weights]
+                sample = int(np.random.choice(valid_values, p=probabilities))
+            else:
+                sample = int(np.random.choice(valid_values))
             return sample
 
         if data_type in ("categorical", "ordered"):
             valid_values = get_valid_options(parameter_config, self.custom_ranges)
             if not valid_values or valid_values == "":
                 return default_value
-            sample = np.random.choice(valid_values)
+            # Get weights for weighted sampling
+            weights = get_option_weights(parameter_config, self.custom_ranges)
+            if weights and len(weights) == len(valid_values):
+                # Normalize weights
+                total_weight = sum(weights)
+                probabilities = [w / total_weight for w in weights]
+                sample = np.random.choice(valid_values, p=probabilities)
+            else:
+                sample = np.random.choice(valid_values)
             return sample
 
         if data_type == "subset_list":
@@ -210,6 +341,12 @@ class AutoMLAlgorithmBase:
             # Randomly decide whether to include items (30% chance for empty list)
             selected_items = []
             if np.random.random() < 0.3:
+                # Handle LoRA target_modules with constraints even for empty list
+                if self.network == "cosmos-rl" and "target_modules" in parameter_name:
+                    # Constraint function will return "all-linear" if list is empty
+                    return network_utils.apply_lora_constraints(
+                        self.parent_params, selected_items
+                    )
                 return selected_items
             # Randomly select 1 or more items
             num_items = np.random.randint(1, len(valid_options) + 1)
@@ -369,5 +506,15 @@ class AutoMLAlgorithmBase:
                     automl_suggested_value = [random_integer, random_integer]
                     return automl_suggested_value
                 return []
+
+        if data_type in ("dict", "collection"):
+            # Handle dictionary-type parameters via network-specific handlers
+            return network_utils.apply_network_specific_param_logic(
+                network=self.network,
+                data_type=data_type,
+                parameter_name=parameter_name,
+                value=None,
+                parent_params=self.parent_params
+            )
 
         return default_value

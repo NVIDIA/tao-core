@@ -22,23 +22,26 @@ Each function takes as input:
 import os
 import logging
 
-from nvidia_tao_core.microservices.handlers.utilities import (
+from nvidia_tao_core.microservices.utils.handler_utils import (
     get_model_results_path,
     get_file_list_from_cloud_storage, search_for_checkpoint, filter_files
 )
 from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import search_for_ptm
-from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
-from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+from nvidia_tao_core.microservices.utils.cloud_utils import create_cs_instance
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     get_handler_root, get_jobs_root, get_handler_job_metadata,
     get_handler_metadata, get_handler_kind, get_base_experiment_metadata,
     get_automl_brain_info, get_workspace_string_identifier
 )
 
 # Configure logging
+TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
+tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Root logger: suppress third-party DEBUG logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
@@ -109,11 +112,13 @@ def infer_automl_output_dir(
 
 
 # NOTE: Only supports those with ngc_path to be PTMs
+
+
 def infer_ptm(job_context, handler_metadata):
     """Returns a list of path of the ptm files of a network"""
     network = job_context.network
-    handler_ptms = handler_metadata.get("base_experiment", None)
-    if handler_ptms is None:
+    handler_ptms = handler_metadata.get("base_experiment_ids", [])
+    if not handler_ptms:
         return None
     ptm_file = []
     for handler_ptm in handler_ptms:
@@ -131,7 +136,10 @@ def infer_ptm(job_context, handler_metadata):
 
                 # Check if this is a Hugging Face model or NGC model
                 source_type = base_experiment_metadata.get("source_type", "ngc")
-                if source_type == "huggingface" or (":" not in ngc_path and "/" in ngc_path):
+                is_hf_model = False
+                if ngc_path is not None:
+                    is_hf_model = (isinstance(ngc_path, str) and ":" not in ngc_path and "/" in ngc_path)
+                if source_type == "huggingface" or is_hf_model:
                     # Handle Hugging Face models
                     model_name = ngc_path.replace("/", "_")
                     root_path = f"{model_registry}/huggingface/{model_name}"
@@ -207,6 +215,22 @@ def infer_pruned_model(job_context, handler_metadata):
     if parent_action == "retrain":
         pruned_model = f'{workspace_identifier}results/{job_context.parent_id}/pruned_model.pth'
     return pruned_model
+
+
+def infer_resume_model_bool(job_context, handler_metadata):
+    """Returns path of the weight file of the parent job"""
+    resume_model = get_model_results_path(handler_metadata, job_context.id)
+    return resume_model is not None
+
+
+def infer_automl_resume_model_bool(job_context, handler_metadata, job_root,
+                                   rec_number,
+                                   exp_job_id):
+    """Returns path of the weight file of the automl job"""
+    resume_model = get_model_results_path(
+        handler_metadata, job_context.id, automl=True, automl_experiment_id=rec_number
+    )
+    return resume_model is not None
 
 
 def infer_parent_model(job_context, handler_metadata):
@@ -422,6 +446,7 @@ def infer_create_inference_result_file_json(job_context, handler_metadata):
 
 # OD helper functions
 
+
 def infer_od_dir(job_context, handler_metadata, dirname):
     """Returns joined-path of handler_root and dirname"""
     handler_root = get_jobs_root(user_id=job_context.user_id, org_name=job_context.org_name)
@@ -455,6 +480,8 @@ CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
                            "automl_output_dir": infer_automl_output_dir,
                            "key": infer_key,
                            "pruned_model": infer_pruned_model,
+                           "resume_model_bool": infer_resume_model_bool,
+                           "automl_resume_model_bool": infer_automl_resume_model_bool,
                            "parent_model": infer_parent_model,
                            "parent_model_folder": infer_parent_model_folder,
                            "parent_model_evaluate": infer_parent_model_evaluate,

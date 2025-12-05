@@ -2,7 +2,7 @@ import os
 import shutil
 import pytest
 
-from nvidia_tao_core.microservices.handlers.ngc_handler import split_ngc_path, download_ngc_model
+from nvidia_tao_core.microservices.utils.ngc_utils import split_ngc_path, download_ngc_model
 
 # import logging
 # logging.basicConfig()

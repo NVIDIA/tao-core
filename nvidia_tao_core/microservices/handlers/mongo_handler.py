@@ -12,216 +12,382 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MongoDB handler."""
-
-import functools
-import time
-import pymongo
+"""MongoDB backup and restore handler module"""
 import os
-from urllib import parse
-from pymongo.errors import WriteError, AutoReconnect
 import logging
+import traceback
+import json
+import gzip
+from datetime import datetime
+from bson import ObjectId
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# MongoDB connection setup
+from nvidia_tao_core.microservices.utils.handler_utils import Code
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_root
+from nvidia_tao_core.microservices.utils.cloud_utils import create_cs_instance
 
 if os.getenv("BACKEND"):
-    if os.getenv("HOST_PLATFORM") == "local-docker":
-        mongo_secret = os.getenv("MONGOSECRET", "")
-        mongo_namespace = "default"
-        mongo_operator_enabled = False
-        encoded_secret = parse.quote(mongo_secret, safe='')
-        mongo_uri_prefix = "mongodb"
-        mongo_connection_string = (
-            f"{mongo_uri_prefix}://default-user:{encoded_secret}@mongodb:27017/tao"
-            "?authSource=admin"
-        )
-        mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
-    else:  # k8s
-        mongo_secret = os.getenv("MONGOSECRET", "")
-        mongo_namespace = os.getenv("NAMESPACE", "default")
-        mongo_operator_enabled = os.getenv('MONGO_OPERATOR_ENABLED', 'true') == 'true'
-        encoded_secret = parse.quote(mongo_secret, safe='')
-        mongo_uri_prefix = "mongodb+srv" if mongo_operator_enabled else "mongodb"
-        mongo_connection_string = (
-            f"{mongo_uri_prefix}://default-user:{encoded_secret}@mongodb-svc.{mongo_namespace}"
-            ".svc.cluster.local/tao?replicaSet=mongodb&ssl=false&authSource=admin"
-        )
-        mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
-
-NUM_RETRY = 5
+    from nvidia_tao_core.microservices.utils.mongo_utils import mongo_client, MongoHandler
+else:
+    # Define stub for when BACKEND is not set
+    MongoHandler = None
 
 
-def retry_method(func):
-    """Decorator to retry DB methods for a specified number of times."""
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        retries = kwargs.pop('retries', NUM_RETRY)
-        for i in range(retries):
-            try:
-                return func(*args, **kwargs)
-            except AutoReconnect as e:
-                logger.error("AutoReconnect exception in %s: %s", func.__name__, e)
-            except WriteError as e:
-                logger.error(
-                    "WriteError exception in %s: %s \n"
-                    "With arguments %s and %s",
-                    func.__name__, e, args, kwargs
-                )
-            except Exception as e:
-                # Log or handle the exception as needed
-                logger.error("Exception in %s: %s", func.__name__, e)
-            if i != retries - 1:
-                time.sleep(30)
-        # If all retries fail, raise an exception or handle it accordingly
-        raise ValueError(f"Failed to execute {func.__name__} after multiple retries")
-    return wrapper
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
-class MongoHandler:
-    """Handler class for MongoDB operations with retry capability."""
+class MongoBackupHandler:
+    """Handles MongoDB backup and restore operations."""
 
-    @retry_method
-    def __init__(self, db_name, collection_name):
-        """Initialize MongoHandler with specified database and collection.
+    @staticmethod
+    def _create_workspace_metadata_from_cli(access_key, secret_key, s3_bucket_name, region=None, endpoint_url=None):
+        """Create workspace metadata dictionary from CLI parameters.
 
         Args:
-            db_name (str): Name of the database to connect to.
-            collection_name (str): Name of the collection within the database.
+            access_key (str): AWS access key
+            secret_key (str): AWS secret key
+            s3_bucket_name (str): S3 bucket name
+            region (str, optional): AWS region
+            endpoint_url (str, optional): Custom S3 endpoint URL
+
+        Returns:
+            dict: Workspace metadata dictionary
         """
-        global mongo_client  # pylint: disable=global-statement
-        self.mongo_client = mongo_client  # pylint: disable=E0606
-        self.db = self.mongo_client[db_name]
-        self.collection = self.db[collection_name]
+        return {
+            "cloud_type": "aws",
+            "cloud_details": {
+                "aws_access_key_id": access_key,
+                "aws_secret_access_key": secret_key,
+                "s3_bucket": s3_bucket_name,
+                "aws_default_region": region or "us-east-1",
+                "endpoint_url": endpoint_url
+            }
+        }
+
+    @staticmethod
+    def _serialize_document(doc):
+        """Convert MongoDB document to JSON-serializable format."""
+        if isinstance(doc, dict):
+            return {k: MongoBackupHandler._serialize_document(v) for k, v in doc.items()}
+        if isinstance(doc, list):
+            return [MongoBackupHandler._serialize_document(item) for item in doc]
+        if isinstance(doc, ObjectId):
+            return {"$oid": str(doc)}
+        if isinstance(doc, datetime):
+            return {"$date": doc.isoformat()}
+        return doc
+
+    @staticmethod
+    def _deserialize_document(doc):
+        """Convert JSON document back to MongoDB format."""
+        if isinstance(doc, dict):
+            if "$oid" in doc:
+                return ObjectId(doc["$oid"])
+            if "$date" in doc:
+                return datetime.fromisoformat(doc["$date"])
+            return {k: MongoBackupHandler._deserialize_document(v) for k, v in doc.items()}
+        if isinstance(doc, list):
+            return [MongoBackupHandler._deserialize_document(item) for item in doc]
+        return doc
+
+    @staticmethod
+    def _setup_backup_file_path(backup_file_name="mongodb_backup..gz"):
+        """Setup backup file path and ensure directory exists.
+
+        Returns:
+            str: Full path to backup file
+        """
+        root = get_root()
+        dump_dir = os.path.join(root, "dump", "archive")
+        os.makedirs(dump_dir, exist_ok=True)
+        return os.path.join(dump_dir, backup_file_name)
+
+    @staticmethod
+    def _perform_mongodb_backup():
+        """Perform the actual MongoDB backup operation.
+
+        Returns:
+            dict: Backup data structure
+        """
+        # Get all database names (excluding admin, config, local)
+        db_names = [name for name in mongo_client.list_database_names()
+                    if name not in ['admin', 'config', 'local']]
+
+        backup_data = {
+            "backup_timestamp": datetime.utcnow().isoformat(),
+            "databases": {}
+        }
+
+        # Backup each database
+        for db_name in db_names:
+            logger.info("Backing up database: %s", db_name)
+            database = mongo_client[db_name]
+            backup_data["databases"][db_name] = {
+                "collections": {},
+                "indexes": {}
+            }
+
+            # Backup collections and their documents
+            for collection_name in database.list_collection_names():
+                logger.info("Backing up collection: %s.%s", db_name, collection_name)
+                collection = database[collection_name]
+
+                # Backup documents
+                documents = list(collection.find())
+                serialized_docs = [MongoBackupHandler._serialize_document(doc) for doc in documents]
+                backup_data["databases"][db_name]["collections"][collection_name] = serialized_docs
+
+                # Backup indexes
+                indexes = list(collection.list_indexes())
+                backup_data["databases"][db_name]["indexes"][collection_name] = [
+                    MongoBackupHandler._serialize_document(idx) for idx in indexes
+                ]
+
+        return backup_data
+
+    @staticmethod
+    def _save_and_upload_backup(backup_data, backup_file_path, cs_instance):
+        """Save backup data to file and upload to cloud storage.
+
+        Args:
+            backup_data (dict): The backup data to save
+            backup_file_path (str): Local file path to save to
+            cs_instance: Cloud storage instance for upload
+        """
+        # Write compressed backup file
+        with gzip.open(backup_file_path, 'wt', encoding='utf-8') as f:
+            json.dump(backup_data, f, indent=2)
+
+        # Upload to cloud storage
+        cs_instance.upload_file(backup_file_path, backup_file_path)
+
+        # Clean up local file
+        os.remove(backup_file_path)
+
+    @staticmethod
+    def mongo_backup(cs_instance, backup_file_name=None):
+        """Backup MongoDB data using PyMongo.
+
+        Args:
+            cs_instance: Cloud storage instance for uploading backup.
+            backup_file_name (str, optional): Name of the backup file.
+
+        Returns:
+            Response: A response indicating the outcome of the operation.
+        """
         try:
-            self.create_unique_index("id")
-        except AutoReconnect as e:
-            mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
-            raise e
+            logger.info("Starting PyMongo-based MongoDB backup")
 
-    @retry_method
-    def upsert(self, query, new_data):
-        """Insert or update a document based on the query.
+            # Setup backup file path
+            backup_file_path = MongoBackupHandler._setup_backup_file_path(backup_file_name)
 
-        Args:
-            query (dict): Query criteria for selecting the document.
-            new_data (dict): Data to insert or update in the document.
-        """
-        self.collection.update_one(query, {'$set': new_data}, upsert=True)
+            # Perform MongoDB backup
+            backup_data = MongoBackupHandler._perform_mongodb_backup()
 
-    @retry_method
-    def update_many(self, query, new_data):
-        """Update multiple documents based on the query.
+            # Save and upload backup
+            MongoBackupHandler._save_and_upload_backup(backup_data, backup_file_path, cs_instance)
 
-        Args:
-            query (dict): Query criteria for selecting the documents.
-            new_data (dict): Data to update in the documents.
-        """
-        self.collection.update_many(query, {'$set': new_data})
+            logger.info("Successfully backed up MongoDB using PyMongo to cloud storage")
+            return Code(200, {"message": "MongoDB backup successful"}, "MongoDB backup successful")
 
-    @retry_method
-    def upsert_append(self, query, new_data):
-        """Append new data to the 'status' field in a document.
+        except Exception as e:
+            logger.error("Exception thrown in mongo_backup: %s", str(e))
+            logger.error(traceback.format_exc())
+            return Code(400, {}, "Error in MongoDB backup")
 
-        If a document matching the query exists, the new data is appended to the 'status' array.
-        If no document matches, a new one is created with the given query and 'status' field.
+    @staticmethod
+    def backup_for_workspace(workspace_metadata, backup_file_name=None):
+        """Backup MongoDB data using workspace metadata (high-level method for app.py).
 
         Args:
-            query (dict): The filter criteria to find the document.
-            new_data (Any): The data to append to the 'status' field.
+            workspace_metadata (dict): Workspace metadata containing cloud credentials
+            backup_file_name (str, optional): Name of the backup file
 
         Returns:
-            None
+            Response: A response indicating the outcome of the operation
         """
-        append_data = {'$push': {'status': new_data}}
-        self.collection.update_one(query, append_data, upsert=True)
+        try:
+            # Validate workspace metadata
+            if not workspace_metadata:
+                return Code(400, {}, "Workspace metadata not provided")
 
-    def delete_one(self, query):
-        """Delete a single document matching the query.
+            cloud_type = workspace_metadata.get("cloud_type")
+            if cloud_type not in ["aws", "azure"]:
+                return Code(400, {}, "MongoDB backup/restore is only supported for AWS and Azure workspaces")
+
+            # Create cloud storage instance
+            cs_instance, _ = create_cs_instance(workspace_metadata)
+            if not cs_instance:
+                return Code(404, {}, "Unable to create cloud storage instance")
+
+            # Perform backup
+            return MongoBackupHandler.mongo_backup(cs_instance, backup_file_name)
+
+        except Exception as e:
+            logger.error("Exception in backup_for_workspace: %s", str(e))
+            logger.error(traceback.format_exc())
+            return Code(400, {}, f"Error in workspace backup: {str(e)}")
+
+    @staticmethod
+    def backup_from_cli(access_key, secret_key, s3_bucket_name, region=None, endpoint_url=None):
+        """CLI-friendly backup method using PyMongo.
 
         Args:
-            query (dict): Query criteria for selecting the document.
-        """
-        self.collection.delete_one(query)
-
-    def delete_many(self, query):
-        """Delete multiple documents matching the query.
-
-        Args:
-            query (dict): Query criteria for selecting documents.
-        """
-        self.collection.delete_many(query)
-
-    def find(self, query):
-        """Find documents that match the query.
-
-        Args:
-            query (dict): Query criteria for selecting documents.
+            access_key (str): AWS access key
+            secret_key (str): AWS secret key
+            s3_bucket_name (str): S3 bucket name
+            region (str, optional): AWS region
+            endpoint_url (str, optional): Custom S3 endpoint URL
 
         Returns:
-            list: List of documents that match the query.
+            bool: True if backup successful, False otherwise
         """
-        if not query:
-            result = list(self.collection.find())
-        else:
-            result = list(self.collection.find(query))
+        try:
+            logger.info("Starting CLI backup")
 
-        return result if result else []
+            # Create workspace metadata from CLI parameters
+            workspace_metadata = MongoBackupHandler._create_workspace_metadata_from_cli(
+                access_key, secret_key, s3_bucket_name, region, endpoint_url
+            )
 
-    def find_one(self, query=None):
-        """Find a single document that matches the query.
+            # Use the workspace backup method
+            result = MongoBackupHandler.backup_for_workspace(workspace_metadata)
+            return result.status_code == 200
+
+        except Exception as e:
+            logger.error("Exception in backup_from_cli: %s", str(e))
+            logger.error(traceback.format_exc())
+            return False
+
+    @staticmethod
+    def mongo_restore(cs_instance, backup_file_name=None):
+        """Restore MongoDB data using PyMongo.
 
         Args:
-            query (dict, optional): Query criteria for selecting the document. Defaults to None.
+            cs_instance: Cloud storage instance for downloading backup.
+            backup_file_name (str, optional): Name of the backup file.
 
         Returns:
-            dict: The first document that matches the query.
+            Response: A response indicating the outcome of the operation.
         """
-        if not query:
-            result = self.collection.find_one()
-        else:
-            result = self.collection.find_one(query)
+        try:
+            logger.info("Starting PyMongo-based MongoDB restore")
 
-        return result if result else {}
+            backup_file_path = MongoBackupHandler._setup_backup_file_path(backup_file_name)
 
-    def find_latest(self):
-        """Retrieve the latest document from the collection.
+            # Download backup file from cloud storage
+            cs_instance.download_file(backup_file_path, backup_file_path)
+            logger.info("Downloaded backup file to %s", backup_file_path)
 
-        The latest document is determined based on the '_id' field in descending order.
+            # Read and decompress backup file
+            with gzip.open(backup_file_path, 'rt', encoding='utf-8') as f:
+                backup_data = json.load(f)
+
+            # Restore each database
+            for db_name, db_data in backup_data["databases"].items():
+                database = mongo_client[db_name]
+
+                # Restore collections
+                for collection_name, documents in db_data["collections"].items():
+                    collection = database[collection_name]
+
+                    # Clear existing data (optional - you might want to make this configurable)
+                    collection.drop()
+
+                    if documents:  # Only insert if there are documents
+                        # Deserialize documents
+                        deserialized_docs = [MongoBackupHandler._deserialize_document(doc) for doc in documents]
+                        collection.insert_many(deserialized_docs)
+
+                # Restore indexes (skip the default _id index)
+                if "indexes" in db_data:
+                    for collection_name, indexes in db_data["indexes"].items():
+                        collection = database[collection_name]
+                        for index_info in indexes:
+                            try:
+                                if index_info.get("name") != "_id_":  # Skip default index
+                                    deserialized_index = MongoBackupHandler._deserialize_document(index_info)
+                                    # Extract index specification
+                                    if "key" in deserialized_index:
+                                        index_spec = list(deserialized_index["key"].items())
+                                        index_options = {k: v for k, v in deserialized_index.items()
+                                                         if k not in ["key", "v", "ns"]}
+                                        collection.create_index(index_spec, **index_options)
+                            except Exception as idx_error:
+                                logger.warning("Failed to restore index %s: %s",
+                                               index_info.get("name", "unknown"), str(idx_error))
+
+            # Clean up backup file
+            os.remove(backup_file_path)
+
+            logger.info("Restored MongoDB from backup file using PyMongo")
+            return Code(200, {"message": "MongoDB restore successful"}, "MongoDB restore successful")
+
+        except Exception as e:
+            logger.error("Exception thrown in mongo_restore: %s", str(e))
+            logger.error(traceback.format_exc())
+            return Code(400, {}, "Error in MongoDB restore")
+
+    @staticmethod
+    def restore_for_workspace(workspace_metadata, backup_file_name=None):
+        """Restore MongoDB data using workspace metadata (high-level method for app.py).
+
+        Args:
+            workspace_metadata (dict): Workspace metadata containing cloud credentials
+            backup_file_name (str, optional): Name of the backup file
 
         Returns:
-            dict: The latest document if found, otherwise an empty dictionary.
+            Response: A response indicating the outcome of the operation
         """
-        result = self.collection.find_one(sort=[('_id', pymongo.DESCENDING)])
-        return result if result else {}
+        try:
+            # Validate workspace metadata
+            if not workspace_metadata:
+                return Code(400, {}, "Workspace metadata not provided")
 
-    def create_unique_index(self, index):
-        """Create a unique index on the specified field.
+            cloud_type = workspace_metadata.get("cloud_type")
+            if cloud_type not in ["aws", "azure"]:
+                return Code(400, {}, "MongoDB backup/restore is only supported for AWS and Azure workspaces")
 
-        Args:
-            index (str): Field to create the unique index on.
-        """
-        self.collection.create_index(index, unique=True)
+            # Create cloud storage instance
+            cs_instance, _ = create_cs_instance(workspace_metadata)
+            if not cs_instance:
+                return Code(404, {}, "Unable to create cloud storage instance")
 
-    def create_text_index(self, index):
-        """Create a text index on the specified field.
+            # Perform restore
+            return MongoBackupHandler.mongo_restore(cs_instance, backup_file_name)
 
-        Args:
-            index (str): Field to create the text index on.
-        """
-        self.collection.create_index([(index, pymongo.TEXT)])
+        except Exception as e:
+            logger.error("Exception in restore_for_workspace: %s", str(e))
+            logger.error(traceback.format_exc())
+            return Code(400, {}, f"Error in workspace restore: {str(e)}")
 
-    def create_ttl_index(self, index, ttl_time_in_seconds):
-        """Create a TTL (time-to-live) index on the specified field.
 
-        Args:
-            index (str): Field to create the TTL index on.
-            ttl_time_in_seconds (int): Time in seconds after which the document will expire.
-        """
-        self.collection.create_index(index, expireAfterSeconds=ttl_time_in_seconds)
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="MongoDB backup using MongoBackupHandler (PyMongo-based)")
+    parser.add_argument("--access-key", required=True, help="AWS S3 access key")
+    parser.add_argument("--secret-key", required=True, help="AWS S3 secret key")
+    parser.add_argument("--s3-bucket-name", required=True, help="AWS S3 bucket name")
+    parser.add_argument("--region", help="AWS S3 region", default="us-east-1")
+    parser.add_argument("--endpoint-url", help="AWS S3 endpoint URL", default=None)
+
+    args = parser.parse_args()
+
+    success = MongoBackupHandler.backup_from_cli(
+        args.access_key,
+        args.secret_key,
+        args.s3_bucket_name,
+        args.region,
+        args.endpoint_url
+    )
+
+    if not success:
+        sys.exit(1)
+
+    logger.info("Backup completed successfully")
+
+
+# Export both classes for external imports
+__all__ = ['MongoBackupHandler', 'MongoHandler']

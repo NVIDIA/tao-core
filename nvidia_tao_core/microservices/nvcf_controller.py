@@ -23,7 +23,7 @@ from kubernetes import client, config
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from nvidia_tao_core.microservices.handlers.nvcf_handler import (
+from nvidia_tao_core.microservices.utils.nvcf_utils import (
     invoke_function,
     get_status_of_invoked_function,
     create_function,
@@ -31,14 +31,14 @@ from nvidia_tao_core.microservices.handlers.nvcf_handler import (
     get_function,
     delete_function_version
 )
-from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     update_job_message,
     update_job_details_with_microservices_response,
     update_status_json,
     get_log_file_path
 )
-from nvidia_tao_core.microservices.handlers.utilities import get_cloud_metadata
-from nvidia_tao_core.microservices.utils import safe_load_file
+from nvidia_tao_core.microservices.utils.handler_utils import get_cloud_metadata
+from nvidia_tao_core.microservices.utils.core_utils import safe_load_file
 
 if not os.getenv("CI_PROJECT_DIR", None):
     config.load_incluster_config()
