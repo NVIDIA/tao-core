@@ -597,3 +597,8 @@ class ExperimentConfig(CommonExperimentConfig):
         OCRNetGenTrtEngineExpConfig(),
         description="Configurable parameters for the TensorRT engine generation.",
     )
+
+    def __post_init__(self):
+        """Set default model name for OCRNet."""
+        if self.model_name is None:
+            self.model_name = "ocrnet"

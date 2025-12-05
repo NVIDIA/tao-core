@@ -53,11 +53,7 @@ def get_datasets_from_metadata(metadata, source_key):
         list: List of dataset IDs, or empty list if not found
     """
     dataset = metadata.get(source_key)
-    if dataset:
-        if isinstance(dataset, list):
-            return dataset
-        return [dataset]
-    return []
+    return dataset if isinstance(dataset, list) else [dataset] if dataset else []
 
 
 def get_nested_config_value(config, path):
@@ -150,8 +146,9 @@ def get_job_id_of_action(dataset_id, kind, action):
 def get_dataset_convert_downloaded_locally(network_config):
     """Get if dataset convert is downloaded locally"""
     dataset_convert_downloaded_locally = False
-    if network_config and "upload_strategy" in network_config:
-        upload_strategy = network_config["upload_strategy"]
+    if network_config and "cloud_upload" in network_config:
+        cloud_upload = network_config["cloud_upload"]
+        upload_strategy = cloud_upload.get("upload_strategy", {})
         dataset_convert_strategy = upload_strategy.get("dataset_convert")
         # If dataset_convert has tarball strategy, it will be downloaded locally
         if (dataset_convert_strategy == "tarball_after_completion" or
@@ -230,52 +227,119 @@ def get_dataset_metadata_and_paths(source_ds, workspace_cache, kind="datasets"):
     return source_ds_metadata, workspace_identifier, source_root
 
 
+def get_source_datasets_from_config(config_source, handler_metadata):
+    """Helper function to get source datasets from config."""
+    if config_source == "id":
+        return [handler_metadata.get("id")]
+    return get_datasets_from_metadata(handler_metadata, config_source)
+
+
+def process_convert_job_spec_path(spec_config, source_ds, dataset_convert_action):
+    """Helper function to process path from convert job spec."""
+    spec_path = spec_config.get("spec_path")
+    mapping = spec_config.get("mapping", {})
+
+    # Get the dataset convert job for this dataset
+    dataset_convert_job_id = get_job_id_of_action(
+        source_ds, kind="datasets", action=dataset_convert_action
+    )
+
+    if not dataset_convert_job_id:
+        return None, None
+
+    # Get the job metadata to access specs
+    convert_job_metadata = get_handler_job_metadata(dataset_convert_job_id)
+    if not convert_job_metadata:
+        return None, None
+
+    # Get the spec value from the convert job
+    job_specs = convert_job_metadata.get("specs", {})
+    spec_value = get_nested_config_value(job_specs, spec_path)
+
+    # Use the mapping to determine the path
+    path_template = (mapping.get(spec_value, mapping.get("*", ""))
+                     if spec_value else mapping.get("*", ""))
+
+    return path_template, dataset_convert_job_id
+
+
+def process_mapping_path_and_transforms(mapping, source_root, source_ds, dataset_convert_action,
+                                        workspace_identifier, dataset_convert_downloaded_locally):
+    """Helper function to process mapping path and apply transforms."""
+    # Skip optional paths that don't exist
+    if mapping.get("optional") and not check_file_exists(source_root, mapping["path"]):
+        return None
+
+    # Get the path value
+    value = os.path.join(source_root, mapping["path"]) if mapping.get("path") else source_root
+
+    # Apply any transforms
+    if "transform" in mapping:
+        value = apply_transforms(
+            value, mapping["transform"],
+            source_root, source_ds, dataset_convert_action,
+            workspace_identifier, dataset_convert_downloaded_locally)
+
+    return value
+
+
+def apply_workspace_identifier_to_results_path(path, workspace_identifier):
+    """Helper function to prepend workspace identifier to results paths."""
+    if path and path.startswith("/results/"):
+        return workspace_identifier + path
+    return path
+
+
+def replace_placeholder_and_apply_workspace_id(value, placeholder, replacement, workspace_identifier):
+    """Helper function to replace placeholders and apply workspace identifier."""
+    if isinstance(value, str) and placeholder in value:
+        value = value.replace(placeholder, replacement)
+        # If this is a path to results, prepend workspace identifier
+        if "results/" in value:
+            value = workspace_identifier + value
+    return value
+
+
 def process_mapping_entry(mapping, source_root, source_ds, dataset_convert_action,
                           workspace_identifier, dataset_convert_downloaded_locally=False):
     """Process a single mapping entry.
 
-    Handles two types of mappings:
+    Handles three types of mappings:
     1. Simple mappings with direct path and transform (like ann_file)
     2. Nested mappings with sub-mappings (like data_prefix with pts and img)
+    3. String mappings that reference dataset metadata fields (like dataset_format)
     """
+    # Handle string mappings that reference dataset metadata fields
+    if isinstance(mapping, str):
+        # Get dataset metadata to resolve the field reference
+        source_ds_metadata = get_handler_metadata(source_ds, kind="datasets")
+        if mapping == "dataset_format":
+            return source_ds_metadata.get("format")
+        if mapping == "dataset_type":
+            return source_ds_metadata.get("type")
+        if mapping == "dataset_intent":
+            use_for = source_ds_metadata.get("use_for", [])
+            return use_for[0] if use_for else None
+        # For any other string, try to get it directly from metadata
+        return source_ds_metadata.get(mapping)
     # Check if this is a nested mapping (like data_prefix with pts and img)
     if any(isinstance(v, dict) and "path" in v for k, v in mapping.items()):
         # This is a nested mapping (e.g., data_prefix with pts and img)
         result = {}
         for key, sub_mapping in mapping.items():
             if isinstance(sub_mapping, dict) and "path" in sub_mapping:
-                # Skip optional paths that don't exist
-                if sub_mapping.get("optional") and not check_file_exists(source_root, sub_mapping["path"]):
-                    continue
-
-                # Get the path value
-                value = os.path.join(source_root, sub_mapping["path"]) if sub_mapping.get("path") else source_root
-
-                # Apply any transforms
-                if "transform" in sub_mapping:
-                    value = apply_transforms(
-                        value, sub_mapping["transform"],
-                        source_root, source_ds, dataset_convert_action,
-                        workspace_identifier, dataset_convert_downloaded_locally)
-                result[key] = value
+                value = process_mapping_path_and_transforms(
+                    sub_mapping, source_root, source_ds, dataset_convert_action,
+                    workspace_identifier, dataset_convert_downloaded_locally)
+                if value is not None:
+                    result[key] = value
         return result if result else None
 
     # This is a simple mapping (e.g., ann_file with direct path and transform)
     if "path" in mapping:
-        # Skip optional paths that don't exist
-        if mapping.get("optional") and not check_file_exists(source_root, mapping["path"]):
-            return None
-
-        # Get the path value
-        value = os.path.join(source_root, mapping["path"]) if mapping.get("path") else source_root
-
-        # Apply any transforms
-        if "transform" in mapping:
-            value = apply_transforms(
-                value, mapping["transform"],
-                source_root, source_ds, dataset_convert_action,
-                workspace_identifier, dataset_convert_downloaded_locally)
-        return value
+        return process_mapping_path_and_transforms(
+            mapping, source_root, source_ds, dataset_convert_action,
+            workspace_identifier, dataset_convert_downloaded_locally)
 
     return None
 
@@ -285,11 +349,7 @@ def get_metadata_value(metadata, path_type):
     if path_type == "intent":
         use_for = metadata.get("use_for", [])
         return use_for[0] if use_for else None
-    if path_type == "type":
-        return metadata.get("type", None)
-    if path_type == "format":
-        return metadata.get("format", None)
-    return None
+    return metadata.get(path_type) if path_type in ["type", "format"] else None
 
 
 def process_additional_downloads(
@@ -300,17 +360,15 @@ def process_additional_downloads(
 
     # Auto-generate additional downloads based on upload strategy for dataset_convert
     if job_context.action in ["train", "evaluate", "inference", "retrain", "prune", "export"]:
-        upload_strategy = network_config.get("upload_strategy", {})
+        cloud_upload = network_config.get("cloud_upload", {})
+        upload_strategy = cloud_upload.get("upload_strategy", {})
         dataset_convert_strategy = upload_strategy.get("dataset_convert")
 
         if dataset_convert_strategy:
             # Get datasets that might have dataset_convert results
-            train_datasets = get_datasets_from_metadata(handler_metadata, "train_datasets")
-            eval_datasets = get_datasets_from_metadata(handler_metadata, "eval_dataset")
-            inference_datasets = get_datasets_from_metadata(handler_metadata, "inference_dataset")
-
-            # Use the first available dataset to get dataset_convert_job_id
-            source_datasets = train_datasets or eval_datasets or inference_datasets
+            source_datasets = (get_datasets_from_metadata(handler_metadata, "train_datasets") or
+                               get_datasets_from_metadata(handler_metadata, "eval_dataset") or
+                               get_datasets_from_metadata(handler_metadata, "inference_dataset"))
             if source_datasets:
                 dataset_convert_job_id = get_job_id_of_action(
                     source_datasets[0], kind="datasets", action=dataset_convert_action
@@ -344,12 +402,9 @@ def process_additional_downloads(
 
     for download_config in downloads_config:
         # Get source datasets
-        if download_config["source"] == "id":
-            source_datasets = [handler_metadata.get("id")]
-        else:
-            source_datasets = get_datasets_from_metadata(handler_metadata, download_config["source"])
-            if not source_datasets:
-                continue
+        source_datasets = get_source_datasets_from_config(download_config["source"], handler_metadata)
+        if not source_datasets:
+            continue
 
         # Process each source dataset
         for source_ds in source_datasets:
@@ -359,44 +414,23 @@ def process_additional_downloads(
 
             # Handle path from convert job spec
             if "path_from_convert_job_spec" in download_config:
-                convert_spec_config = download_config["path_from_convert_job_spec"]
-                spec_path = convert_spec_config.get("spec_path")
-                mapping = convert_spec_config.get("mapping", {})
-
-                # Get the dataset convert job for this dataset
-                dataset_convert_job_id = get_job_id_of_action(
-                    source_ds, kind="datasets", action=dataset_convert_action
+                path_template, dataset_convert_job_id = process_convert_job_spec_path(
+                    download_config["path_from_convert_job_spec"], source_ds, dataset_convert_action
                 )
 
-                if dataset_convert_job_id:
-                    # Get the job metadata to access specs
-                    convert_job_metadata = get_handler_job_metadata(dataset_convert_job_id)
-                    if convert_job_metadata:
-                        # Get the spec value from the convert job
-                        job_specs = convert_job_metadata.get("specs", {})
-                        spec_value = get_nested_config_value(job_specs, spec_path)
+                if path_template:
+                    # Replace {dataset_convert_job_id} with actual job ID
+                    download_path = path_template.replace("{dataset_convert_job_id}", dataset_convert_job_id)
 
-                        # Use the mapping to determine the path
-                        if spec_value and spec_value in mapping:
-                            path_template = mapping[spec_value]
-                        else:
-                            path_template = mapping.get("*", "")
+                    # Replace {dataset_path} with dataset-specific path
+                    if "{dataset_path}" in download_path:
+                        # Use dataset ID or a default path component
+                        dataset_path = source_ds_metadata.get("cloud_file_path", source_ds)
+                        download_path = download_path.replace("{dataset_path}", dataset_path)
 
-                        if path_template:
-                            # Replace {dataset_convert_job_id} with actual job ID
-                            download_path = path_template.replace("{dataset_convert_job_id}", dataset_convert_job_id)
-
-                            # Replace {dataset_path} with dataset-specific path
-                            if "{dataset_path}" in download_path:
-                                # Use dataset ID or a default path component
-                                dataset_path = source_ds_metadata.get("cloud_file_path", source_ds)
-                                download_path = download_path.replace("{dataset_path}", dataset_path)
-
-                            # Prepend workspace identifier if this is a results path
-                            if download_path.startswith("/results/"):
-                                download_path = workspace_identifier + download_path
-
-                            additional_downloads.append(download_path)
+                    # Prepend workspace identifier if this is a results path
+                    download_path = apply_workspace_identifier_to_results_path(download_path, workspace_identifier)
+                    additional_downloads.append(download_path)
 
             # Handle direct path (fallback)
             elif "path" in download_config:
@@ -414,11 +448,10 @@ def process_additional_downloads(
                         # Use dataset ID or a default path component
                         dataset_path = source_ds_metadata.get("cloud_file_path", source_ds)
                         path = path.replace("{dataset_path}", dataset_path)
-
-                    # Prepend workspace identifier if this is a results path
-                    if path.startswith("/results/"):
                         path = workspace_identifier + path
 
+                    # Prepend workspace identifier if this is a results path
+                    path = apply_workspace_identifier_to_results_path(path, workspace_identifier)
                     additional_downloads.append(path)
 
     return list(set(additional_downloads))
@@ -429,11 +462,8 @@ def apply_data_source_config(config, job_context, handler_metadata):
     workspace_cache = {}
     dataset_convert_action = "dataset_convert"
 
-    job_network = job_context.network
-    job_action = job_context.action
-    if job_action == "validate_images":
-        job_network = "image"
-        job_action = "validate"
+    job_network, job_action = (("image", "validate") if job_context.action == "validate_images"
+                               else (job_context.network, job_context.action))
     network_config = read_network_config(job_network)
     dataset_convert_downloaded_locally = get_dataset_convert_downloaded_locally(network_config)
 
@@ -465,45 +495,33 @@ def apply_data_source_config(config, job_context, handler_metadata):
                         cond = rules["conditional"]
                         if "metadata_key" in cond:
                             meta_value = handler_metadata.get(cond["metadata_key"], None)
-                            if "equals" in cond and meta_value != cond["equals"]:
-                                conditional_pass = False
-                            if "not_equals" in cond and meta_value == cond["not_equals"]:
-                                conditional_pass = False
+                            conditional_pass = not (("equals" in cond and meta_value != cond["equals"]) or
+                                                    ("not_equals" in cond and meta_value == cond["not_equals"]))
                         elif "config_path" in cond:
                             config_value = get_nested_config_value(config, cond["config_path"])
-                            if "equals" in cond and config_value != cond["equals"]:
-                                conditional_pass = False
-                            if "not_equals" in cond and config_value == cond["not_equals"]:
-                                conditional_pass = False
+                            conditional_pass = not (("equals" in cond and config_value != cond["equals"]) or
+                                                    ("not_equals" in cond and config_value == cond["not_equals"]))
 
                     if conditional_pass:
                         for config_path, value in rules["set_value"].items():
                             # Check if this config_path is restricted to specific actions
                             if action_restriction:
-                                if isinstance(action_restriction, list):
-                                    # Simple list of allowed actions
-                                    if job_action not in action_restriction:
-                                        continue
-                                elif isinstance(action_restriction, dict):
-                                    # Dict mapping config paths to allowed actions
-                                    if config_path in action_restriction:
-                                        if job_action not in action_restriction[config_path]:
-                                            continue
-                                    else:
-                                        # If config_path not in action_restriction dict, apply to all actions
-                                        pass
+                                is_list_restriction = (isinstance(action_restriction, list) and
+                                                       job_action not in action_restriction)
+                                is_dict_restriction = (isinstance(action_restriction, dict) and
+                                                       config_path in action_restriction and
+                                                       job_action not in action_restriction[config_path])
+                                if is_list_restriction or is_dict_restriction:
+                                    continue
 
                             # Replace {parent_id} with actual parent ID if present
-                            if isinstance(value, str) and "{parent_id}" in value:
-                                value = value.replace("{parent_id}", job_context.parent_id)
-
-                                # If this is a path to results, prepend workspace identifier
-                                if "results/" in value:
-                                    workspace_identifier = get_workspace_string_identifier(
-                                        handler_metadata.get('workspace'),
-                                        workspace_cache
-                                    )
-                                    value = workspace_identifier + value
+                            workspace_identifier = get_workspace_string_identifier(
+                                handler_metadata.get('workspace'),
+                                workspace_cache
+                            )
+                            value = replace_placeholder_and_apply_workspace_id(
+                                value, "{parent_id}", job_context.parent_id, workspace_identifier
+                            )
 
                             set_nested_config_value(config, config_path, value)
                             already_configured_paths.add(config_path)
@@ -543,16 +561,13 @@ def apply_data_source_config(config, job_context, handler_metadata):
                                                 pass
 
                                     # Replace {parent_id} with actual parent ID if present
-                                    if isinstance(value, str) and "{parent_id}" in value:
-                                        value = value.replace("{parent_id}", job_context.parent_id)
-
-                                        # If this is a path to results, prepend workspace identifier
-                                        if "results/" in value:
-                                            workspace_identifier = get_workspace_string_identifier(
-                                                handler_metadata.get('workspace'),
-                                                workspace_cache
-                                            )
-                                            value = workspace_identifier + value
+                                    workspace_identifier = get_workspace_string_identifier(
+                                        handler_metadata.get('workspace'),
+                                        workspace_cache
+                                    )
+                                    value = replace_placeholder_and_apply_workspace_id(
+                                        value, "{parent_id}", job_context.parent_id, workspace_identifier
+                                    )
 
                                     set_nested_config_value(config, config_path, value)
                                     already_configured_paths.add(config_path)
@@ -601,12 +616,25 @@ def apply_data_source_config(config, job_context, handler_metadata):
         # Get source datasets
         if config_path in already_configured_paths:
             continue
-        if source_config["source"] == "id":
-            source_datasets = [handler_metadata.get("id")]
-        else:
-            source_datasets = get_datasets_from_metadata(handler_metadata, source_config["source"])
-            if not source_datasets:
-                continue
+
+        # Handle special source: parent_job_specs
+        if source_config["source"] == "parent_job_specs":
+            if job_context.parent_id and "check_key_exists" in source_config:
+                parent_job_metadata = get_handler_job_metadata(job_context.parent_id)
+                if parent_job_metadata:
+                    parent_specs = parent_job_metadata.get("specs", {})
+                    key_path = source_config["check_key_exists"]
+
+                    # Check if the key exists in parent specs
+                    key_exists = get_nested_config_value(parent_specs, key_path) is not None
+                    set_nested_config_value(config, config_path, key_exists)
+                    already_configured_paths.add(config_path)
+                    logger.info(f"Set {config_path} = {key_exists} based on parent job specs key '{key_path}'")
+            continue
+
+        source_datasets = get_source_datasets_from_config(source_config["source"], handler_metadata)
+        if not source_datasets:
+            continue
         (source_ds_metadata,
          workspace_identifier,
          source_root) = get_dataset_metadata_and_paths(source_datasets[0], workspace_cache)
@@ -615,53 +643,31 @@ def apply_data_source_config(config, job_context, handler_metadata):
         if "value_from_metadata" in source_config:
             meta_config = source_config["value_from_metadata"]
             meta_value = source_ds_metadata.get(meta_config["key"], None)
-            if meta_value in meta_config["mapping"]:
-                value = meta_config["mapping"][meta_value]
-            else:
-                value = meta_config["mapping"].get("*", meta_config["default"])
+            value = meta_config["mapping"].get(meta_value, meta_config["mapping"].get("*", meta_config["default"]))
             set_nested_config_value(config, config_path, value)
             already_configured_paths.add(config_path)  # Mark as configured
             continue
 
         # Handle path from convert job spec
         if "path_from_convert_job_spec" in source_config:
-            convert_spec_config = source_config["path_from_convert_job_spec"]
-            spec_path = convert_spec_config.get("spec_path")
-            mapping = convert_spec_config.get("mapping", {})
-
-            # Get the dataset convert job for this dataset
-            dataset_convert_job_id = get_job_id_of_action(
-                source_datasets[0], kind="datasets", action=dataset_convert_action
+            path, dataset_convert_job_id = process_convert_job_spec_path(
+                source_config["path_from_convert_job_spec"], source_datasets[0], dataset_convert_action
             )
 
-            if dataset_convert_job_id:
-                # Get the job metadata to access specs
-                convert_job_metadata = get_handler_job_metadata(dataset_convert_job_id)
-                if convert_job_metadata:
-                    # Get the spec value from the convert job
-                    job_specs = convert_job_metadata.get("specs", {})
-                    spec_value = get_nested_config_value(job_specs, spec_path)
-
-                    # Use the mapping to determine the path
-                    if spec_value and spec_value in mapping:
-                        path = mapping[spec_value]
-                    else:
-                        path = mapping.get("*", "")
-
-                    if path:
-                        # Check if we're using the dataset convert job transform
-                        if "use_dataset_convert_job" in source_config.get("transform", []):
-                            # Build the results path template for the transform
-                            value = f"/results/{dataset_convert_job_id}/{path}"
-                        else:
-                            value = os.path.join(source_root, path)
-                        value = apply_transforms(
-                            value, source_config.get("transform", []),
-                            source_root, source_datasets[0], dataset_convert_action,
-                            workspace_identifier, dataset_convert_downloaded_locally)
-                        set_nested_config_value(config, config_path, value)
-                        already_configured_paths.add(config_path)  # Mark as configured
-                        continue
+            if path:
+                # Check if we're using the dataset convert job transform
+                if "use_dataset_convert_job" in source_config.get("transform", []):
+                    # Build the results path template for the transform
+                    value = f"/results/{dataset_convert_job_id}/{path}"
+                else:
+                    value = os.path.join(source_root, path)
+                value = apply_transforms(
+                    value, source_config.get("transform", []),
+                    source_root, source_datasets[0], dataset_convert_action,
+                    workspace_identifier, dataset_convert_downloaded_locally)
+                set_nested_config_value(config, config_path, value)
+                already_configured_paths.add(config_path)  # Mark as configured
+                continue
 
         # Handle path from type/intent/source/model_type cases
         for path_type in ["type", "format", "intent", "source", "model_type"]:
@@ -679,7 +685,14 @@ def apply_data_source_config(config, job_context, handler_metadata):
                     meta_value = "kinetics"
 
                 if meta_value in source_config[key]:
-                    path = source_config[key][meta_value]
+                    path_config = source_config[key][meta_value]
+                    # Handle array of paths (fallback mechanism)
+                    if isinstance(path_config, list):
+                        path = next((p for p in path_config
+                                    if check_file_exists_in_cloud(source_ds_metadata, source_root, p)),
+                                    path_config[0])
+                    else:
+                        path = path_config
                 elif path_type != "intent":  # intent doesn't use fallback
                     path = source_config[key].get("*")
                 else:
@@ -703,9 +716,8 @@ def apply_data_source_config(config, job_context, handler_metadata):
         if "conditional" in source_config:
             cond = source_config["conditional"]
             meta_value = source_ds_metadata.get(cond["metadata_key"], None)
-            if "equals" in cond and meta_value != cond["equals"]:
-                continue
-            if "not_equals" in cond and meta_value == cond["not_equals"]:
+            if (("equals" in cond and meta_value != cond["equals"]) or
+                    ("not_equals" in cond and meta_value == cond["not_equals"])):
                 continue
 
         if source_config.get("multiple_sources", False):
@@ -762,19 +774,20 @@ def apply_data_source_config(config, job_context, handler_metadata):
                     set_nested_config_value(config, config_path, result)
             else:
                 path = source_config.get("path", "")
-                value = path
-                if path == "":
-                    value = source_root
-                elif dataset_convert_downloaded_locally:
-                    value = path
-                else:
-                    value = os.path.join(source_root, path)
+                value = (source_root if path == "" else
+                         (path if dataset_convert_downloaded_locally else os.path.join(source_root, path)))
 
                 value = apply_transforms(
                     value, source_config.get("transform", []),
                     source_root, source_ds, dataset_convert_action,
                     workspace_identifier, dataset_convert_downloaded_locally)
                 set_nested_config_value(config, config_path, value)
+
+    # Add preserve_source_path_params from network config if specified
+    preserve_source_path_params = network_config.get("preserve_source_path_params")
+    if preserve_source_path_params:
+        config["preserve_source_path_params"] = preserve_source_path_params
+        logger.info("Added preserve_source_path_params to config: %s", preserve_source_path_params)
 
     # Process additional downloads
     endpoint_action = (
@@ -795,3 +808,29 @@ def check_file_exists(root_path, file_path):
     """Check if a file exists in the given root path."""
     full_path = os.path.join(root_path, file_path)
     return os.path.exists(full_path)
+
+
+def check_file_exists_in_cloud(source_ds_metadata, source_root, file_path):
+    """Check if a file exists, supporting both cloud and local storage."""
+    file_exists = False
+
+    # Try cloud storage check first
+    if source_ds_metadata.get('workspace'):
+        try:
+            from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
+            workspace_metadata = get_handler_metadata(source_ds_metadata.get('workspace'), kind="workspace")
+            if workspace_metadata:
+                cloud_instance, _ = create_cs_instance(workspace_metadata)
+                if cloud_instance:
+                    cloud_file_path = source_ds_metadata.get('cloud_file_path', '')
+                    cloud_path = f"{cloud_file_path.strip('/')}/{file_path}"
+                    file_exists = cloud_instance.is_file(cloud_path)
+                    logger.info(f"Cloud check for {cloud_path}: {file_exists}")
+                    return file_exists
+        except Exception as e:
+            logger.warning(f"Cloud storage check failed: {e}")
+
+    # Fallback to local check
+    file_exists = check_file_exists(source_root, file_path)
+    logger.info(f"Local check for {file_path}: {file_exists}")
+    return file_exists

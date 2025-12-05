@@ -25,21 +25,18 @@
 import os
 import logging
 
-from nvidia_tao_core.microservices.constants import NO_PTM_MODELS, MONAI_NETWORKS
+from nvidia_tao_core.microservices.constants import NO_PTM_MODELS
 from nvidia_tao_core.microservices.handlers.utilities import get_num_gpus_from_spec
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
-    get_handler_root,
     get_handler_log_root,
     update_job_status,
     get_handler_job_metadata,
     get_handler_metadata,
-    get_handler_id,
     get_base_experiment_metadata,
-    base_exp_uuid,
     get_job_specs,
     get_automl_controller_info
 )
-from nvidia_tao_core.microservices.job_utils import executor
+from nvidia_tao_core.microservices.job_utils.executor.utils import dependency_check
 
 # Configure logging
 logging.basicConfig(
@@ -54,10 +51,6 @@ def dependency_check_parent(job_context, dependency):
     parent_job_id = job_context.parent_id
     # If no parent job, this is always True
     if parent_job_id is None:
-        return True, ""
-    parent_handler_id = get_handler_id(parent_job_id)
-    # Monai jobs can run without parent_status.
-    if parent_handler_id is None and "monai" in job_context.network:
         return True, ""
     parent_job_metadata = get_handler_job_metadata(parent_job_id)
     parent_action = parent_job_metadata.get("action", "")
@@ -129,9 +122,6 @@ def dependency_check_dataset(job_context, dependency):
         return ''
 
     invalid_datasets = ""
-    if handler_metadata.get("type", "vision").lower() == "medical":
-        # bypass the checks as the datasets are not downloaded for monai jobs at the time of job creation.
-        valid_datset_structure = True
 
     # For dataset convert jobs, we have dataset info directly in metadata
     if not handler_metadata.get("network_arch", ""):
@@ -180,31 +170,11 @@ def dependency_check_model(job_context, dependency):
             # Search in the base_exp_uuid fails, search in the org_name
             base_experiment_metadata = get_handler_metadata(base_experiment_id, "experiments")
 
-        if network not in MONAI_NETWORKS:
-            if base_experiment_metadata.get("base_experiment_metadata", {}).get("spec_file_present"):
-                if base_experiment_metadata.get("base_experiment_metadata", {}).get("specs"):
-                    return True, ""
-                return False, "Base experiment specs Flag set to true, but specs not found"
-            # For TAO models, if the B.E doesn't have a spec file attached in NGC, then we don't need to check anything
-            return True, ""
-
-        base_experiment_root = get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, base_experiment_id)
-        if not base_experiment_root:
-            # Search in the base_exp_uuid fails, search in the org_name
-            base_experiment_root = get_handler_root(
-                org_name=job_context.org_name,
-                kind="experiments",
-                handler_id=base_experiment_id
-            )
-        if not base_experiment_root:
-            return False, f"Base experiment ID {base_experiment_id} is not found"
-
-        if base_experiment_metadata.get("base_experiment_pull_complete") != "pull_complete":
-            logger.info("base_experiment_metadata: %s", base_experiment_metadata)
-            return False, (
-                f"Base Experiment file for ID {base_experiment_id} is being downloaded "
-                "or downloaded file is corrupt"
-            )
+        if base_experiment_metadata.get("base_experiment_metadata", {}).get("spec_file_present"):
+            if base_experiment_metadata.get("base_experiment_metadata", {}).get("specs"):
+                return True, ""
+            return False, "Base experiment specs Flag set to true, but specs not found"
+        # For TAO models, if the B.E doesn't have a spec file attached in NGC, then we don't need to check anything
     return True, ""
 
 
@@ -214,8 +184,10 @@ def dependency_check_gpu(job_context, dependency):
     local_job = (job_context.specs and "cluster" in job_context.specs and job_context.specs["cluster"] == "local")
     if os.getenv("BACKEND") == "NVCF" and not local_job:
         return True, ""
-    num_gpu = get_num_gpus_from_spec(job_context.specs, job_context.action, default=dependency.num)
-    gpu_available = executor.dependency_check(num_gpu=num_gpu, accelerator=dependency.name)
+    num_gpu = get_num_gpus_from_spec(
+        job_context.specs, job_context.action, network=job_context.network, default=dependency.num
+    )
+    gpu_available = dependency_check(num_gpu=num_gpu, accelerator=dependency.name)
     message = ""
     if not gpu_available:
         message = "GPU's needed to run this job is not available yet, please wait for other jobs to complete"

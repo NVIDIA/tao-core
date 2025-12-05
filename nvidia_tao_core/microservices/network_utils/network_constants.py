@@ -74,6 +74,31 @@ image_size_mapper = {
     "segformer": "dataset.segment.img_size",
 }
 
+node_mapper = {
+    "cosmos-rl": "policy.parallelism.dp_replicate_size"
+}
+
+gpu_mapper = {
+    "cosmos-rl": "policy.parallelism.dp_shard_size",
+    "action_recognition": "",
+    "analytics": "",
+    "annotations": "",
+    "augmentation": "",
+    "auto_label": "",
+    "classification_pyt": "",
+    "deformable_detr": "",
+    "dino": "",
+    "mal": "",
+    "ml_recog": "",
+    "ocdnet": "",
+    "ocrnet": "",
+    "optical_inspection": "",
+    "pointpillars": "",
+    "pose_classification": "",
+    "re_identification": "",
+    "segformer": "",
+}
+
 # Include your network if it has spec fields to load full network as PTM and loading backbone portion alone
 ptm_mapper = {
     "backbone": {
@@ -91,5 +116,9 @@ ptm_mapper = {
         "visual_changenet_segment": "train.pretrained_model_path",
         "segformer": "train.pretrained_model_path",
         "dino": "train.pretrained_model_path",
+    },
+    "default": {
+        "mask2former": "model.backbone.pretrained_weights",
     }
+
 }

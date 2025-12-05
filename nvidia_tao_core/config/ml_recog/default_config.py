@@ -186,3 +186,8 @@ class ExperimentConfig(CommonExperimentConfig):
         description="The inference configuration for the model.",
         display_name="inference",
     )
+
+    def __post_init__(self):
+        """Set default model name for ML Recognition."""
+        if self.model_name is None:
+            self.model_name = "ml_recog"

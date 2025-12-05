@@ -16,11 +16,19 @@
 import math
 import numpy as np
 import random
+import logging
 
-from nvidia_tao_core.microservices.automl.utils import fix_input_dimension
+
+from nvidia_tao_core.microservices.automl.utils import fix_input_dimension, fix_power_of_factor, get_valid_options
+from nvidia_tao_core.microservices.automl import network_utils
 from nvidia_tao_core.microservices.network_utils import network_constants
 from nvidia_tao_core.microservices.network_utils import automl_helper
-from nvidia_tao_core.microservices.handlers.stateless_handlers import get_job_specs
+from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+    get_job_specs,
+    get_automl_custom_param_ranges
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AutoMLAlgorithmBase:
@@ -37,11 +45,67 @@ class AutoMLAlgorithmBase:
         self.default_train_spec = get_job_specs(self.job_context.id)
         self.default_train_spec_flattened = {}
 
+        # Load custom parameter ranges from experiment
+        experiment_id = self.job_context.handler_id
+        self.custom_ranges = get_automl_custom_param_ranges(experiment_id)
+        logger.info(f"Loaded {len(self.custom_ranges)} custom parameter range(s) for experiment {experiment_id}")
+
+        # Initialize random seeds to ensure different values across experiments
+        # Using job_context.id hash to get different seeds for different jobs
+        seed = hash(str(job_context.id)) % 2**31
+        np.random.seed(seed)
+        random.seed(seed)
+
+        logger.info(f"Initialized random seed: {seed} for job {job_context.id}")
+
+    def _apply_power_constraint_with_equal_priority(self, v_min, v_max, factor, fallback_value=None):
+        """Apply power constraint by sampling directly from valid powers to give equal priority.
+
+        Args:
+            v_min: Minimum valid value
+            v_max: Maximum valid value
+            factor: Power factor (e.g., 2 for powers of 2)
+            fallback_value: Value to use if no valid powers found (optional)
+
+        Returns:
+            A value that is a power of factor within the range, or fallback if none exist
+        """
+        # Generate all valid powers within the range
+        valid_powers = []
+        power = 1
+        while True:
+            power_value = factor ** power
+            if power_value > v_max:
+                break
+            if power_value >= v_min:
+                valid_powers.append(power_value)
+            power += 1
+
+        if valid_powers:
+            result = np.random.choice(valid_powers)
+            logger.info(f"Sampled from valid powers {valid_powers}: {result}")
+            return result
+        # Fallback: use provided fallback value or apply fix_power_of_factor
+        if fallback_value is not None:
+            result = fix_power_of_factor(fallback_value, factor)
+            logger.info(f"Applied power constraint fallback: {result}")
+            return result
+        logger.warning(f"No valid powers of {factor} found in range [{v_min}, {v_max}]")
+        return v_min
+
     def generate_automl_param_rec_value(self, parameter_config):
         """Generate a random value for the parameter passed"""
         parameter_name = parameter_config.get("parameter")
         data_type = parameter_config.get("value_type")
         default_value = parameter_config.get("default_value", None)
+
+        # Apply custom overrides if provided
+        if self.custom_ranges and parameter_name in self.custom_ranges:
+            for override_key, override_value in self.custom_ranges[parameter_name].items():
+                if override_value is not None:
+                    parameter_config[override_key] = override_value
+
+        # Get potentially overridden values
         math_cond = parameter_config.get("math_cond", None)
         parent_param = parameter_config.get("parent_param", None)
 
@@ -52,6 +116,26 @@ class AutoMLAlgorithmBase:
             if parameter_name == "augmentation_config.preprocessing.output_image_width":
                 if "model_config.input_image_config.size_height_width.width" in self.parent_params.keys():
                     return self.parent_params["model_config.input_image_config.size_height_width.width"]
+
+            # Check if this parameter has a dependency and math_cond for calculation
+            depends_on = parameter_config.get("depends_on", None)
+            if depends_on and math_cond and type(math_cond) is str:
+                # Calculate value based on dependency
+                if depends_on in self.parent_params:
+                    parent_value = self.parent_params[depends_on]
+                    parts = math_cond.split(" ")
+                    if len(parts) >= 2:
+                        operator = parts[0]
+                        factor = int(parts[1])
+                        if operator == "/":
+                            # Divide parent value by factor
+                            calculated_int = int(parent_value // factor)
+                            if not (type(parent_param) is float and math.isnan(parent_param)):
+                                if ((isinstance(parent_param, str) and parent_param != "nan" and
+                                     parent_param == "TRUE") or
+                                        (isinstance(parent_param, bool) and parent_param)):
+                                    self.parent_params[parameter_name] = calculated_int
+                            return calculated_int
 
             v_min = parameter_config.get("valid_min", "")
             v_max = parameter_config.get("valid_max", "")
@@ -65,11 +149,25 @@ class AutoMLAlgorithmBase:
                 v_max = int(default_value)
             else:
                 v_max = int(v_max)
-            random_int = np.random.randint(v_min, v_max + 1)
-
             if math_cond and type(math_cond) is str:
-                factor = int(math_cond.split(" ")[1])
-                random_int = fix_input_dimension(random_int, factor)
+                parts = math_cond.split(" ")
+                if len(parts) >= 2:
+                    operator = parts[0]
+                    factor = int(parts[1])
+                    if operator == "^":
+                        # Use helper function for power constraints with equal priority
+                        fallback = np.random.randint(v_min, v_max + 1)
+                        random_int = int(self._apply_power_constraint_with_equal_priority(
+                            v_min, v_max, factor, fallback))
+                    else:
+                        # Regular sampling for non-power constraints
+                        random_int = np.random.randint(v_min, v_max + 1)
+                        if operator == "/":
+                            # Multiple/factor constraint (existing behavior)
+                            random_int = fix_input_dimension(random_int, factor)
+            else:
+                # No math condition, regular sampling
+                random_int = np.random.randint(v_min, v_max + 1)
 
             if not (type(parent_param) is float and math.isnan(parent_param)):
                 if (isinstance(parent_param, str) and parent_param != "nan" and parent_param == "TRUE") or (
@@ -83,18 +181,65 @@ class AutoMLAlgorithmBase:
             return np.random.randint(0, 2) == 1
 
         if data_type == "ordered_int":
-            if parameter_config.get("valid_options", "") == "":
+            valid_values = get_valid_options(parameter_config, self.custom_ranges)
+            if not valid_values or valid_values == "":
                 return default_value
-            valid_values = parameter_config.get("valid_options")
             sample = int(np.random.choice(valid_values))
             return sample
 
         if data_type in ("categorical", "ordered"):
-            if parameter_config.get("valid_options", "") == "":
+            valid_values = get_valid_options(parameter_config, self.custom_ranges)
+            if not valid_values or valid_values == "":
                 return default_value
-            valid_values = parameter_config.get("valid_options")
             sample = np.random.choice(valid_values)
             return sample
+
+        if data_type == "subset_list":
+            # Generate a random subset from valid_options
+            valid_options = get_valid_options(parameter_config, self.custom_ranges)
+            if valid_options == "" or valid_options is None:
+                return []  # Return empty list if no valid options
+
+            if isinstance(valid_options, str):
+                valid_options = [valid_options]  # Convert single string to list
+            elif isinstance(valid_options, list):
+                pass  # Already a list
+            else:
+                return []
+
+            # Randomly decide whether to include items (30% chance for empty list)
+            selected_items = []
+            if np.random.random() < 0.3:
+                return selected_items
+            # Randomly select 1 or more items
+            num_items = np.random.randint(1, len(valid_options) + 1)
+            selected_items = np.random.choice(valid_options, size=num_items, replace=False).tolist()
+            # Handle LoRA target_modules with constraints (modules_to_save is already processed)
+            if self.network == "cosmos-rl" and "target_modules" in parameter_name:
+                # Apply LoRA-specific constraints - modules_to_save is already decided
+                return network_utils.apply_lora_constraints(
+                    self.parent_params, selected_items
+                )
+
+        if data_type == "optional_list":
+            # Generate either None or a list with items from valid_options
+            valid_options = get_valid_options(parameter_config, self.custom_ranges)
+            if valid_options == "" or valid_options is None:
+                result = None
+            else:
+                if isinstance(valid_options, str):
+                    valid_options = [valid_options]  # Convert single string to list
+                # 50% chance for None, 50% chance for list with all valid options
+                if np.random.random() < 0.5:
+                    result = None
+                else:
+                    result = valid_options.copy()  # Return all valid options
+
+            # Store in parent_params for dependency tracking
+            param_key = parameter_name.split('.')[-1]  # Get the last part (e.g., "modules_to_save")
+            self.parent_params[param_key] = result
+
+            return result
 
         if "list_1_" in data_type:
             if data_type == "list_1_backbone":
@@ -133,26 +278,63 @@ class AutoMLAlgorithmBase:
 
         if data_type in ("list_2", "list_3"):
             automl_suggested_value = []
-            bound_type, dependent_parameter = (
+            helper_result = (
                 automl_helper.automl_list_helper.get(self.network, {})
                 .get(data_type, {})
                 .get(parameter_name, {})
             )
-            bound_value = self.parent_params.get(
-                dependent_parameter,
-                self.default_train_spec_flattened.get(dependent_parameter, None)
-            )
+
+            # Handle case where helper_result might be empty or not a tuple
+            if not helper_result:
+                logger.warning(f"No helper configuration found for {parameter_name} with type {data_type}")
+                return []
+
+            if isinstance(helper_result, dict) and len(helper_result) >= 2:
+                bound_type, dependent_parameter = list(helper_result.items())[0]
+            elif isinstance(helper_result, (list, tuple)) and len(helper_result) >= 2:
+                bound_type, dependent_parameter = helper_result[0], helper_result[1]
+            else:
+                logger.warning(f"Invalid helper configuration for {parameter_name}: {helper_result}")
+                return []
+
+            if dependent_parameter is not None:
+                bound_value = self.parent_params.get(
+                    dependent_parameter,
+                    self.default_train_spec_flattened.get(dependent_parameter, None)
+                )
+            else:
+                bound_value = None
+
             if not bound_value:
                 if bound_type == "img_size":
                     bound_value = 1080  # Default value considering a HD image
                 elif bound_type == "lr_steps":
                     bound_value = 50  # Default value of 50 epochs
+                elif bound_type == "optimizer_betas":
+                    bound_value = None  # No bound needed for optimizer betas
                 else:
                     return []
 
             # List needed in the form of multiple numbers operated with bounds
             if data_type == "list_2":
-                # Generate a random number between 3 and 6 (inclusive)
+                if bound_type == "optimizer_betas":
+                    # Generate two beta values: beta1 (momentum) and beta2 (RMSprop)
+                    # Get ranges from schema (custom overrides already applied at function start)
+                    schema_min = parameter_config.get("valid_min", [0.8, 0.9])
+                    schema_max = parameter_config.get("valid_max", [0.95, 0.999])
+
+                    # Ensure we have valid lists
+                    if not isinstance(schema_min, list) or len(schema_min) < 2:
+                        schema_min = [0.8, 0.9]
+                    if not isinstance(schema_max, list) or len(schema_max) < 2:
+                        schema_max = [0.95, 0.999]
+
+                    beta1 = np.random.uniform(schema_min[0], schema_max[0])
+                    beta2 = np.random.uniform(schema_min[1], schema_max[1])
+                    automl_suggested_value = [beta1, beta2]
+                    return automl_suggested_value
+
+                # Generate a random number between 3 and 6 (inclusive) for other list_2 types
                 num_random_numbers = random.randint(3, 6)
                 # Generate a list of random numbers
                 if bound_type == "lr_steps":
@@ -187,4 +369,5 @@ class AutoMLAlgorithmBase:
                     automl_suggested_value = [random_integer, random_integer]
                     return automl_suggested_value
                 return []
+
         return default_value

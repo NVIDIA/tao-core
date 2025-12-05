@@ -22,6 +22,9 @@
         "dataset_convert": {
             "network": "annotations",
             "action": "convert"
+        },
+        "*": {
+            "network": "sparse4d"
         }
     },
 
@@ -39,9 +42,11 @@
         }
     },
 
-    "upload_strategy": {
-        "dataset_convert": "tarball_after_completion",
-        "inference": "tarball_after_completion"
+    "cloud_upload": {
+        "upload_strategy": {
+            "dataset_convert": "tarball_after_completion",
+            "inference": "tarball_after_completion"
+        }
     },
 
     "data_sources": {

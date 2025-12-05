@@ -14,6 +14,7 @@
 
 """AutoML controller modules"""
 import os
+import re
 import glob
 import time
 import uuid
@@ -31,13 +32,16 @@ from nvidia_tao_core.microservices.constants import (
 )
 if os.getenv("BACKEND") == "NVCF":
     from nvidia_tao_core.microservices.dgx_controller import overwrite_job_logs_from_bcp
-from nvidia_tao_core.microservices.handlers.cloud_storage import create_cs_instance_with_decrypted_metadata
+from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import (
+    create_cs_instance_with_decrypted_metadata
+)
 from nvidia_tao_core.microservices.handlers.utilities import (
     StatusParser,
     get_total_epochs,
     get_file_list_from_cloud_storage,
     filter_files,
-    format_epoch
+    format_epoch,
+    get_network_config
 )
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     update_job_status,
@@ -136,7 +140,7 @@ class Controller:
 
         self.brain.reverse_sort = True
         self.min_max = max
-        if self.metric == "loss" or self.metric_key in ("loss", "evaluation_cost "):
+        if self.metric == "loss" or self.metric_key in ("loss", "evaluation_cost") or "loss" in self.metric_key:
             self.brain.reverse_sort = False
             self.min_max = min
 
@@ -159,6 +163,53 @@ class Controller:
 
         self.cs_instance, _ = create_cs_instance_with_decrypted_metadata(self.decrypted_workspace_metadata)
 
+    def _get_checkpoint_config(self):
+        """Get checkpoint config from network config"""
+        network_config = get_network_config(self.network)
+        return network_config.get("checkpoint", {})
+
+    def _uses_folder_lookup(self):
+        """Check if network config specifies folder lookup method"""
+        checkpoint_config = self._get_checkpoint_config()
+        return checkpoint_config.get("folder", "false") == "true"
+
+    def _get_checkpoint_format(self):
+        """Get checkpoint format from network config"""
+        checkpoint_config = self._get_checkpoint_config()
+        return checkpoint_config.get("format", "")
+
+    def _select_best_epoch_folder(self, epoch_folder_files, all_files):
+        """Select the best epoch folder that contains the required checkpoint format"""
+        checkpoint_format = self._get_checkpoint_format()
+
+        # Extract unique folder paths
+        folder_paths = list(set(
+            "/".join(f.split("/")[:-1]) for f in epoch_folder_files
+        ))
+        logger.info("Found potential epoch folders: %s", folder_paths)
+
+        # Find the folder that contains files with the correct format
+        for folder_path in folder_paths:
+            folder_files = [f for f in all_files if f.startswith(folder_path + "/")]
+
+            if checkpoint_format:
+                # Check for specific format files
+                format_files = [f for f in folder_files if f.endswith(f".{checkpoint_format}")]
+                if format_files:
+                    logger.info("Selected folder with %s files: %s", checkpoint_format, folder_path)
+                    return folder_path
+            else:
+                # Check for any checkpoint files if no specific format
+                checkpoint_files_in_folder = filter_files(
+                    folder_files, network_name=self.network
+                )
+                if checkpoint_files_in_folder:
+                    logger.info("Selected folder with checkpoint files: %s", folder_path)
+                    return folder_path
+
+        logger.info("No folder found containing required format files")
+        return None
+
     def cancel_recommendation_jobs(self):
         """Cleanup recommendation jobs"""
         for rec in self.recommendations:
@@ -167,6 +218,7 @@ class Controller:
             if not job_name:
                 continue
             if not os.getenv("CI_PROJECT_DIR", None):
+                logger.info("Cancelling automl job at end of controller %s", job_name)
                 on_cancel_automl_job(rec.job_id)
         on_delete_automl_job(self.automl_context.id)
 
@@ -446,7 +498,7 @@ class Controller:
                 job_id=self.automl_context.id,
                 rec_job_id=rec.job_id
             )
-            self.calculate_eta(new_results, rec.job_id)
+            self.calculate_eta(new_results, rec.job_id, rec.id)
             metadata = get_handler_job_metadata(self.automl_context.id)
             results = metadata.get("job_details", {})
             new_results = status_parser.update_results(
@@ -523,15 +575,42 @@ class Controller:
                                                 self.decrypted_workspace_metadata,
                                                 cloud_expt_root
                                             )
-                                            regex_pattern = (
-                                                fr'^(?!.*lightning_logs).*{self.checkpoint_delimiter}'
-                                                fr'{format_epoch_number}\.(pth|tlt|hdf5)$'
-                                            )
-                                            trained_files = filter_files(trained_files, regex_pattern)
+
+                                            if self._uses_folder_lookup():
+                                                # Look for epoch-numbered folders
+                                                if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
+                                                    folder_pattern = (
+                                                        fr".*{self.checkpoint_delimiter}{format_epoch_number}/"
+                                                    )
+                                                else:
+                                                    folder_pattern = (
+                                                        fr".*epoch_{format_epoch_number}(?:_step_\d+)?/"
+                                                    )
+
+                                                # Find files inside the epoch folder to identify the folder exists
+                                                epoch_folder_files = [
+                                                    f for f in trained_files if re.match(folder_pattern, f)
+                                                ]
+                                                if epoch_folder_files:
+                                                    selected_folder = self._select_best_epoch_folder(
+                                                        epoch_folder_files, trained_files
+                                                    )
+                                                    trained_files = [selected_folder] if selected_folder else []
+                                                else:
+                                                    trained_files = []
+                                                logger.info("Trained files in read_results function: %s", trained_files)
+                                            else:
+                                                # Traditional epoch-based filtering
+                                                regex_pattern = (
+                                                    fr'^(?!.*lightning_logs).*{self.checkpoint_delimiter}'
+                                                    fr'{format_epoch_number}\.(pth|tlt|hdf5)$'
+                                                )
+                                                trained_files = filter_files(trained_files, regex_pattern)
                                             if trained_files:
                                                 rec.update_status(JobStates.success)
                                                 validation_map_processed = True
                                                 self.hyperband_cancel_condition_seen = False
+                                                logger.info("Cancelling hyperband automl job %s", rec.job_id)
                                                 on_cancel_automl_job(rec.job_id)
                                                 self.delete_checkpoint_files(cloud_expt_root, rec)
                                                 break
@@ -545,6 +624,7 @@ class Controller:
             if not status:
                 status = JobStates.pending
             if status in [JobStates.success, JobStates.failure]:
+                logger.info("Post processing of job %s under automl algorithm %s", rec.job_id, self.automl_algorithm)
                 if not validation_map_processed:
                     brain_epoch_number = self.brain_epoch_number
                     if self.automl_algorithm in ("bayesian", "b"):
@@ -570,6 +650,7 @@ class Controller:
                 if validation_map != 0.0:
                     rec.update_result(validation_map)
                 self.save_state()
+                logger.info("Cancelling automl job with status %s and job id %s", status, rec.job_id)
                 on_cancel_automl_job(rec.job_id)
             if old_status != status:
                 rec.update_status(status)
@@ -590,7 +671,7 @@ class Controller:
             if brain_dict:
                 self.old_bracket = brain_dict.get("bracket", "0")
 
-    def calculate_eta(self, new_results, rec_job_id):
+    def calculate_eta(self, new_results, rec_job_id, rec_id):
         """Calculate estimated time remaining for automl job"""
         global time_per_epoch  # pylint: disable=global-statement
         global time_per_epoch_counter  # pylint: disable=global-statement
@@ -629,7 +710,13 @@ class Controller:
                 self.average_time_per_epoch = time_per_epoch / time_per_epoch_counter
 
                 if self.automl_algorithm in ("bayesian", "b"):
-                    remaining_epochs = self.brain.num_epochs_per_experiment - current_epoch
+                    current_experiment_epoch = get_total_epochs(
+                        rec_job_id,
+                        os.path.dirname(self.root),
+                        automl=True,
+                        automl_experiment_id=str(rec_id)
+                    )
+                    remaining_epochs = current_experiment_epoch - current_epoch
                     self.remaining_epochs_in_experiment = (
                         remaining_epochs +
                         (self.max_recommendations - self.completed_recommendations) *
@@ -726,8 +813,18 @@ class Controller:
                 continue
             expt_folder = os.path.join("/results", rec.job_id)
             checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, expt_folder)
-            regex_pattern = r'^(?!.*lightning_logs).*\.(pth|tlt|hdf5)$'
-            checkpoint_files = filter_files(checkpoint_files, regex_pattern)
+
+            # Use network config for filtering if available
+            if self._uses_folder_lookup():
+                checkpoint_files = filter_files(checkpoint_files, network_name=self.network)
+                # For folder lookup, we want to find the folder containing checkpoints
+                if checkpoint_files:
+                    # Get unique folder paths
+                    checkpoint_folders = list(set(os.path.dirname(f) for f in checkpoint_files))
+                    checkpoint_files = checkpoint_folders
+            else:
+                regex_pattern = r'^(?!.*lightning_logs).*\.(pth|tlt|hdf5)$'
+                checkpoint_files = filter_files(checkpoint_files, regex_pattern)
             logger.info("Experiment folder %s", expt_folder)
             logger.info("Checkpoints in find best_model %s", checkpoint_files)
 
@@ -741,11 +838,13 @@ class Controller:
                 save_job_specs(self.automl_context.id, specs=best_specs, automl=True, automl_experiment_id="-1")
                 (find_trained_tlt,
                  find_trained_hdf5,
-                 find_trained_pth, _) = self.get_checkpoint_paths_matching_epoch_number(
+                 find_trained_pth,
+                 _,
+                 find_trained_safetensors) = self.get_checkpoint_paths_matching_epoch_number(
                     cloud_best_model_folder,
                     rec.id
                 )
-                if find_trained_tlt or find_trained_hdf5 or find_trained_pth:
+                if find_trained_tlt or find_trained_hdf5 or find_trained_pth or find_trained_safetensors:
                     self.best_model_copied = True
                     return rec.id
                 logger.info("Best model checkpoints couldn't be moved")
@@ -756,6 +855,26 @@ class Controller:
         """Get checkpoints from cloud_path and filter based on epoch number"""
         checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
         format_epoch_number = format_epoch(self.network, self.best_epoch_number[rec_id])
+        if self._uses_folder_lookup():
+            # For folder lookup, look for epoch-numbered folders (e.g., epoch_1/, epoch_2/)
+            if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
+                folder_pattern = fr".*{self.checkpoint_delimiter}{format_epoch_number}/"
+            else:
+                folder_pattern = fr".*epoch_{format_epoch_number}(?:_step_\d+)?/"
+
+            # Find files inside the epoch folder to identify the folder exists
+            epoch_folder_files = [f for f in checkpoint_files if re.match(folder_pattern, f)]
+
+            if epoch_folder_files:
+                selected_folder = self._select_best_epoch_folder(
+                    epoch_folder_files, checkpoint_files
+                )
+                if selected_folder:
+                    return [selected_folder], [selected_folder], [selected_folder], [selected_folder], [selected_folder]
+                return [], [], [], [], []
+            logger.info("No epoch folder found for pattern: %s", folder_pattern)
+            return [], [], [], [], []
+        # Traditional epoch-based filtering for files
         if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
             regex_pattern = fr".*{self.checkpoint_delimiter}{format_epoch_number}"
         else:
@@ -764,7 +883,8 @@ class Controller:
         find_trained_hdf5 = filter_files(checkpoint_files, regex_pattern=fr'.*{regex_pattern}\.hdf5$')
         find_trained_pth = filter_files(checkpoint_files, regex_pattern=fr'.*{regex_pattern}\.pth$')
         find_trained_ckzip = filter_files(checkpoint_files, regex_pattern=fr'.*{regex_pattern}\.ckzip$')
-        return find_trained_tlt, find_trained_hdf5, find_trained_pth, find_trained_ckzip
+        find_trained_safetensors = filter_files(checkpoint_files, regex_pattern=fr'.*{regex_pattern}\.safetensors$')
+        return find_trained_tlt, find_trained_hdf5, find_trained_pth, find_trained_ckzip, find_trained_safetensors
 
     def get_best_checkpoint_path(self, path, recommendation):
         """Get the path to the best checkpoint.
@@ -780,11 +900,19 @@ class Controller:
         format_epoch_number = format_epoch(self.network, self.best_epoch_number[recommendation.id])
         recommendation.best_epoch_number = format_epoch_number
         self.save_state()
-        logger.info("Best epoch number %s %s", recommendation.best_epoch_number, path)
+
+        if self._uses_folder_lookup():
+            logger.info(
+                "Using folder-based checkpoint lookup for epoch %s at %s",
+                recommendation.best_epoch_number, path
+            )
+        else:
+            logger.info("Best epoch number %s %s", recommendation.best_epoch_number, path)
         (find_trained_tlt,
          find_trained_hdf5,
          find_trained_pth,
-         find_trained_ckzip) = self.get_checkpoint_paths_matching_epoch_number(
+         find_trained_ckzip,
+         find_trained_safetensors) = self.get_checkpoint_paths_matching_epoch_number(
             path, recommendation.id
         )
         if find_trained_tlt:
@@ -795,23 +923,41 @@ class Controller:
             self.ckpt_path[path]["pth"] = find_trained_pth[0]
         if find_trained_ckzip:
             self.ckpt_path[path]["ckzip"] = find_trained_ckzip[0]
+        if find_trained_safetensors:
+            self.ckpt_path[path]["safetensors"] = find_trained_safetensors[0]
 
     def delete_checkpoint_files(self, path, rec):
         """Remove the extra checkpoints generated after the on_cancel_automl_job"""
         if not os.getenv("CI_PROJECT_DIR", None):
             time.sleep(30)  # Mounted paths can take time to reflect files generated on remote locally
         trained_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
-        regex_pattern = r'.*\.(tlt|hdf5|pth|ckzip|resume|lightning_logs)$'
+
+        regex_pattern = r'.*\.(tlt|hdf5|pth|ckzip|safetensors|resume|lightning_logs)$'
+
         trained_files = filter_files(trained_files, regex_pattern)
         logger.info("Available checkpoints in delete_checkpoint_files function %s", trained_files)
         self.get_best_checkpoint_path(path, rec)
         logger.info("self.ckpt_path in delete_checkpoint_files function %s", self.ckpt_path)
         for files in trained_files:
-            if files not in self.ckpt_path[path].values():
+            should_delete = True
+
+            if self._uses_folder_lookup():
+                # For folder-based checkpointing, check if file has prefix of any checkpoint folder
+                for checkpoint_folder in self.ckpt_path[path].values():
+                    if files.startswith(checkpoint_folder + "/"):
+                        should_delete = False
+                        break
+            else:
+                # For file-based checkpointing, use exact match
+                if files in self.ckpt_path[path].values():
+                    should_delete = False
+
+            if should_delete:
+                logger.info("Removing item in delete_checkpoint_files function %s", files)
                 if self.cs_instance.is_file(files):
-                    logger.info("Removing files in delete_checkpoint_files function %s", files)
+                    logger.info("Removing file in delete_checkpoint_files function %s", files)
                     self.cs_instance.delete_file(files)
-                elif ".tlt" in files and self.network == "unet":
+                elif self._uses_folder_lookup():
                     logger.info("Removing folder in delete_checkpoint_files function %s", files)
                     self.cs_instance.delete_folder(files[1:])
 
@@ -829,16 +975,13 @@ class Controller:
         logger.info("delete_not_best_model_checkpoints function arguments %s %s %s", path, rec, flag)
         if rec.result != best_mAP or bool(flag):
             trained_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
-            regex_pattern = r'.*(?:lightning_logs|events).*$|.*\.(tlt|hdf5|pth|ckzip|resume)$'
+            regex_pattern = r'.*(?:lightning_logs|events).*$|.*\.(tlt|hdf5|pth|ckzip|safetensors|resume)$'
             trained_files = filter_files(trained_files, regex_pattern)
             logger.info("Available checkpoints in delete_not_best_model_checkpoints function %s", trained_files)
             for files in trained_files:
                 if self.cs_instance.is_file(files):
                     logger.info("Removing files in delete_not_best_model_checkpoints function %s", files)
                     self.cs_instance.delete_file(files)
-                elif ".tlt" in files and self.network == "unet":
-                    logger.info("Removing folder in delete_not_best_model_checkpoints function %s", files)
-                    self.cs_instance.delete_folder(files[1:])
         else:
             flag = True
         return flag

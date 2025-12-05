@@ -26,7 +26,7 @@ The configuration hierarchy is as follows:
 - ``ActivationQuantizationConfig``: Configuration specifically for activation quantization
 - ``BaseQuantizationConfig``: Base class providing common quantization parameters
 
-Supported backends include "torchao", "modelopt", and "modelopt_onnx", with quantization modes
+Supported backends include "torchao", "modelopt.pytorch", and "modelopt.onnx", with quantization modes
 including "static_ptq" and "weight_only_ptq". The framework supports various data types including
 "int8", "fp8_e4m3fn", "fp8_e5m2", and "native" precision.
 """
@@ -249,26 +249,24 @@ class ModelQuantizationConfig:
     Parameters
     ----------
     backend : str or None, optional
-        The quantization backend to use. Valid options are "modelopt", "torchao", and "modelopt_onnx".
+        The quantization backend to use. Valid options are "modelopt.pytorch", "torchao", and "modelopt.onnx".
         Defaults to "torchao".
     mode : str or None, optional
         The quantization mode to use. Valid options are "static_ptq" and "weight_only_ptq".
         Defaults to "weight_only_ptq".
     algorithm : str or None, optional
-        Calibration/optimisation algorithm name for the backend configuration.
-        Valid options are "minmax" and "entropy". When using the ``modelopt`` backend, this value
-        is propagated to the top-level ``"algorithm"`` field of the ModelOpt config.
+        Calibration/optimization algorithm name. Used by ModelOpt backends (both PyTorch and ONNX).
+        Valid options:
+
+        - For ``modelopt.pytorch``: "minmax", "max", "entropy"
+        - For ``modelopt.onnx``: "max", "entropy", "awq_clip", "awq_lite", "awq_full", "rtn_dq"
+        - For ``torchao``: Ignored
+
         Defaults to "minmax".
-    default_layer_dtype : str, optional
-        Default data type for layers. Valid options are "int8", "fp8_e4m3fn", "fp8_e5m2", and "native".
-        Defaults to "native".
-    default_activation_dtype : str, optional
-        Default data type for activations. Valid options are "int8", "fp8_e4m3fn", "fp8_e5m2", and "native".
-        Defaults to "native".
     layers : list of LayerQuantizationConfig, optional
         List of per-module quantization configurations. Each entry specifies how a particular module
-        or set of modules should be quantized. Defaults to an empty list. If empty, no specific layer
-        quantization is applied.
+        or set of modules should be quantized. This is the primary way to configure quantization.
+        Defaults to an empty list.
     skip_names : list of str, optional
         List of module names or patterns to exclude from quantization. Each entry can be:
 
@@ -277,69 +275,100 @@ class ModelQuantizationConfig:
         - A wildcard pattern (e.g., "conv*", "*.linear")
 
         Any module whose name matches any pattern in this list will be excluded from quantization.
-        Defaults to an empty list. If empty, no modules are excluded.
+        Defaults to an empty list.
     model_path : str, optional
-        Path to the model to be quantized. Defaults to an empty string.
+        Path to the model to be quantized. For ONNX backend, this should be the path to the ONNX file.
+        For PyTorch backends, this is typically set programmatically. Defaults to an empty string.
     results_dir : str, optional
         Path to where all the assets generated from a quantization task are stored. Defaults to an
         empty string.
+    backend_kwargs : dict, optional
+        Additional keyword arguments to pass to the backend. Backend-specific parameters can be
+        provided here. Defaults to an empty dictionary.
+    device : str, optional
+        Device to use for calibration during quantization. Valid options include:
+
+        - ``"cuda"``: Use the default GPU (automatically falls back to CPU if no GPU available)
+        - ``"cpu"``: Force CPU execution
+        - ``"cuda:0"``, ``"cuda:1"``, etc.: Use a specific GPU device
+        - ``"trt"``: Use TensorRT execution provider (ONNX backend only)
+
+        Defaults to "cuda".
+
+        .. note::
+           - For ``modelopt.pytorch`` backend: TRT falls back to CUDA for calibration
+           - For ``modelopt.onnx`` backend: TRT uses TensorRT execution provider if available
+           - For ``torchao`` backend: Device parameter is not used (weight-only quantization)
 
     Notes
     -----
-    This is the main configuration class that orchestrates the entire quantization process. It
-    combines global settings with layer-specific configurations to provide a comprehensive
-    quantization strategy.
+    This is the main configuration class that orchestrates the entire quantization process.
 
-    Pattern syntax
-    --------------
-    The ``module_name`` and ``skip_names`` fields accept wildcard patterns interpreted using
-    Python's ``fnmatch.fnmatch``. Wildcards ``*`` and ``?`` are supported and matching is
-    case-sensitive. A pattern is first applied to the module's qualified graph name (e.g.,
-    ``backbone.layer1.0.conv1``). If that does not match, the module's class name (e.g., ``Conv2d``)
-    is checked. See ``nvidia_tao_pytorch.core.quantization.utils.match_layer`` for implementation
-    details.
+    **Quantization Strategy:**
+
+    Quantization is configured primarily through the ``layers`` parameter. Each
+    ``LayerQuantizationConfig`` specifies which modules to quantize and their data types.
+    Global defaults are not supported; you must explicitly configure each layer pattern.
+
+    **Pattern Matching:**
+
+    The ``module_name`` in ``LayerQuantizationConfig`` and entries in ``skip_names`` accept
+    wildcard patterns interpreted using Python's ``fnmatch.fnmatch``. Wildcards ``*`` and ``?``
+    are supported and matching is case-sensitive. Patterns are first applied to the module's
+    qualified graph name (e.g., ``backbone.layer1.0.conv1``). If no match, the module's class
+    name (e.g., ``Conv2d``) is checked.
+
+    See ``nvidia_tao_pytorch.core.quantization.utils.match_layer`` for implementation details.
 
     Examples
     --------
-    Basic weight-only PTQ configuration::
+    Basic weight-only INT8 quantization with TorchAO::
 
         config = ModelQuantizationConfig(
             backend="torchao",
             mode="weight_only_ptq",
-            algorithm="minmax",
-            default_layer_dtype="int8",
-            default_activation_dtype="native",
             layers=[
                 LayerQuantizationConfig(
-                    module_name="conv*",
-                    weights=WeightQuantizationConfig(
-                        dtype="int8",
-                        observer_or_fake_quant="my_observer"
-                    )
+                    module_name="*",  # All layers
+                    weights=WeightQuantizationConfig(dtype="int8")
                 )
             ],
-            skip_names=["final_layer"]
+            skip_names=["head", "final_layer"]
         )
 
-    Static PTQ configuration with mixed precision::
+    FP8 quantization with ModelOpt (weights + activations)::
 
         config = ModelQuantizationConfig(
-            backend="modelopt",
+            backend="modelopt.pytorch",
             mode="static_ptq",
-            algorithm="entropy",
-            default_layer_dtype="fp8_e4m3fn",
-            default_activation_dtype="fp8_e4m3fn",
+            algorithm="max",
             layers=[
                 LayerQuantizationConfig(
-                    module_name="Linear",
-                    weights=WeightQuantizationConfig(
-                        dtype="fp8_e4m3fn",
-                        observer_or_fake_quant="my_observer"
-                    ),
-                    activations=ActivationQuantizationConfig(
-                        dtype="fp8_e4m3fn",
-                        observer_or_fake_quant="my_observer"
-                    )
+                    module_name="*",
+                    weights=WeightQuantizationConfig(dtype="fp8_e4m3fn"),
+                    activations=ActivationQuantizationConfig(dtype="fp8_e4m3fn")
+                )
+            ],
+            skip_names=["BatchNorm*", "LayerNorm", "*head*"]
+        )
+
+    Mixed precision quantization::
+
+        config = ModelQuantizationConfig(
+            backend="modelopt.pytorch",
+            mode="static_ptq",
+            algorithm="entropy",
+            layers=[
+                # FP8 for most layers
+                LayerQuantizationConfig(
+                    module_name="*",
+                    weights=WeightQuantizationConfig(dtype="fp8_e4m3fn"),
+                    activations=ActivationQuantizationConfig(dtype="fp8_e4m3fn")
+                ),
+                # Keep specific layers in native precision
+                LayerQuantizationConfig(
+                    module_name="embedding",
+                    weights=WeightQuantizationConfig(dtype="native")
                 )
             ]
         )
@@ -356,7 +385,7 @@ class ModelQuantizationConfig:
 
     backend: Optional[str] = STR_FIELD(  # type: ignore
         "torchao",
-        valid_options="modelopt,torchao,modelopt_onnx",
+        valid_options="modelopt.pytorch,torchao,modelopt.onnx",
         description="The quantization backend to use",
         display_name="Quantization backend",
     )
@@ -368,30 +397,19 @@ class ModelQuantizationConfig:
     )
     algorithm: Optional[str] = STR_FIELD(  # type: ignore
         "minmax",
-        valid_options="minmax,entropy",
+        valid_options="minmax,max,entropy,awq_clip,awq_lite,awq_full,rtn_dq",
         description=(
-            "Calibration/optimisation algorithm name to pass to the backend configuration. "
-            "For the 'modelopt' backend, this becomes the top-level 'algorithm' field."
+            "Calibration/optimization algorithm. Used by ModelOpt backends "
+            "(modelopt.pytorch and modelopt.onnx). Ignored by torchao backend."
         ),
-        display_name="Calibration/optimisation algorithm",
-    )
-    default_layer_dtype: str = STR_FIELD(
-        "native",
-        valid_options="int8,fp8_e4m3fn,fp8_e5m2,native",
-        description="Default data type for layers",
-        display_name="Default layer dtype",
-        required="yes",
-    )
-    default_activation_dtype: str = STR_FIELD(
-        "native",
-        valid_options="int8,fp8_e4m3fn,fp8_e5m2,native",
-        description="Default data type for activations",
-        display_name="Default activation dtype",
-        required="yes",
+        display_name="Calibration algorithm",
     )
     layers: Optional[List[LayerQuantizationConfig]] = LIST_FIELD(
         [],
-        description="List of per-module quantization configurations",
+        description=(
+            "List of per-module quantization configurations. Each entry specifies which modules "
+            "to quantize and their data types. This is the primary way to configure quantization."
+        ),
         display_name="Layer quantization configs",
     )
     skip_names: Optional[List[str]] = LIST_FIELD(
@@ -402,7 +420,7 @@ class ModelQuantizationConfig:
     model_path: Optional[str] = STR_FIELD(
         "",
         display_name="Model path",
-        description="Path to the model to be quantized.",
+        description="Path to the model to be quantized. For ONNX backend, path to ONNX file.",
         required="yes",
     )
     results_dir: Optional[str] = STR_FIELD(
@@ -410,4 +428,21 @@ class ModelQuantizationConfig:
         display_name="Results directory",
         description="Path to where all the assets generated from a task are stored.",
         required="yes",
+    )
+    backend_kwargs: Optional[Dict[str, Any]] = DICT_FIELD(
+        {},
+        description="Additional keyword arguments to pass to the backend",
+        display_name="Backend kwargs",
+    )
+    device: str = STR_FIELD(
+        "cuda",
+        regex=r"^(cuda|cpu|trt|cuda:[0-9]+)$",
+        description=(
+            "Device to use for calibration. Accepts 'cuda' (uses default GPU), 'cpu', "
+            "'trt' (TensorRT for ONNX backend), or specific GPU device like 'cuda:0', 'cuda:1', etc. "
+            "If 'cuda' is specified but no GPU is available, the framework will automatically fall back to 'cpu'. "
+            "Note: 'trt' is only supported by the modelopt.onnx backend for ONNX Runtime with TensorRT "
+            "execution provider."
+        ),
+        display_name="Calibration device",
     )

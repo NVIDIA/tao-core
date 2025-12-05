@@ -22,20 +22,17 @@ Each function takes as input:
 import os
 import logging
 
-from nvidia_tao_core.microservices.constants import MONAI_NETWORKS
-
 from nvidia_tao_core.microservices.handlers.utilities import (
-    search_for_base_experiment, get_model_results_path,
+    get_model_results_path,
     get_file_list_from_cloud_storage, search_for_checkpoint, filter_files
 )
-from nvidia_tao_core.cloud_handlers.utils import search_for_ptm
-from nvidia_tao_core.microservices.handlers.cloud_storage import create_cs_instance
+from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import search_for_ptm
+from nvidia_tao_core.microservices.handlers.cloud_handlers.cloud_storage import create_cs_instance
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
     get_handler_root, get_jobs_root, get_handler_job_metadata,
     get_handler_metadata, get_handler_kind, get_base_experiment_metadata,
-    get_automl_brain_info, get_workspace_string_identifier, base_exp_uuid
+    get_automl_brain_info, get_workspace_string_identifier
 )
-from nvidia_tao_core.microservices.handlers.monai.helpers import find_matching_bundle_dir
 
 # Configure logging
 logging.basicConfig(
@@ -121,44 +118,40 @@ def infer_ptm(job_context, handler_metadata):
     ptm_file = []
     for handler_ptm in handler_ptms:
         if handler_ptm:
-            ptm_root = get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, handler_ptm)
-            if network in MONAI_NETWORKS:
-                ptm_file.append(search_for_base_experiment(ptm_root, network=network))
-            else:
-                base_experiment_metadata = get_base_experiment_metadata(handler_ptm)
-                ngc_path = base_experiment_metadata.get("ngc_path") if base_experiment_metadata else None
-                workspace_metadata = get_handler_metadata(handler_metadata.get("workspace"), kind="workspaces")
-                cloud_type = workspace_metadata.get("cloud_type", "aws")
+            base_experiment_metadata = get_base_experiment_metadata(handler_ptm)
+            ngc_path = base_experiment_metadata.get("ngc_path") if base_experiment_metadata else None
+            workspace_metadata = get_handler_metadata(handler_metadata.get("workspace"), kind="workspaces")
+            cloud_type = workspace_metadata.get("cloud_type", "aws")
 
-                # Check if running in air-gapped mode
-                if os.getenv("AIRGAPPED_MODE", "false").lower() == "true" and cloud_type == "seaweedfs":
-                    # In air-gapped mode, check if local model exists, otherwise use the PTM root
-                    cs_instance, _ = create_cs_instance(workspace_metadata)
-                    model_registry = os.getenv('LOCAL_MODEL_REGISTRY')
+            # Check if running in air-gapped mode
+            if os.getenv("AIRGAPPED_MODE", "false").lower() == "true" and cloud_type == "seaweedfs":
+                # In air-gapped mode, check if local model exists, otherwise use the PTM root
+                cs_instance, _ = create_cs_instance(workspace_metadata)
+                model_registry = os.getenv('LOCAL_MODEL_REGISTRY')
 
-                    # Check if this is a Hugging Face model or NGC model
-                    source_type = base_experiment_metadata.get("source_type", "ngc")
-                    if source_type == "huggingface" or (":" not in ngc_path and "/" in ngc_path):
-                        # Handle Hugging Face models
-                        model_name = ngc_path.replace("/", "_")
-                        root_path = f"{model_registry}/huggingface/{model_name}"
-                    else:
-                        # Handle NGC models (original logic)
-                        path_part, version = ngc_path.split(":", 1)
-                        model_name = path_part.split("/")[-1]
-                        root_path = f"{model_registry}/{path_part}/{version}/{model_name}_v{version}"
-
-                    cloud_path = cs_instance.search_for_ptm(root=root_path, network=network)
-                    if cloud_path:
-                        bucket_name = workspace_metadata.get('cloud_specific_details').get('cloud_bucket_name')
-                        ptm_file.append(f"seaweedfs://{bucket_name}/{cloud_path}")
+                # Check if this is a Hugging Face model or NGC model
+                source_type = base_experiment_metadata.get("source_type", "ngc")
+                if source_type == "huggingface" or (":" not in ngc_path and "/" in ngc_path):
+                    # Handle Hugging Face models
+                    model_name = ngc_path.replace("/", "_")
+                    root_path = f"{model_registry}/huggingface/{model_name}"
                 else:
-                    # Original cloud mode behavior
-                    source_type = base_experiment_metadata.get("source_type", "ngc")
-                    if source_type == "huggingface":
-                        ptm_file.append(f"hf_model://{ngc_path}")
-                    else:
-                        ptm_file.append(f"ngc://{ngc_path}")
+                    # Handle NGC models (original logic)
+                    path_part, version = ngc_path.split(":", 1)
+                    model_name = path_part.split("/")[-1]
+                    root_path = f"{model_registry}/{path_part}/{version}/{model_name}_v{version}"
+
+                cloud_path = cs_instance.search_for_ptm(root=root_path, network=network)
+                if cloud_path:
+                    bucket_name = workspace_metadata.get('cloud_specific_details').get('cloud_bucket_name')
+                    ptm_file.append(f"seaweedfs://{bucket_name}/{cloud_path}")
+            else:
+                # Original cloud mode behavior
+                source_type = base_experiment_metadata.get("source_type", "ngc")
+                if source_type == "huggingface":
+                    ptm_file.append(f"hf_model://{ngc_path}")
+                else:
+                    ptm_file.append(f"ngc://{ngc_path}")
     return ",".join(ptm_file)
 
 
@@ -458,26 +451,6 @@ def infer_label_output(job_context, handler_metadata):
     return label_output
 
 
-# MONAI helper functions
-
-def infer_monai_output_dir(job_context, handler_metadata):
-    """Returns path of monai output dir by appending bundle name to results dir"""
-    results_dir = infer_output_dir(job_context, handler_metadata)
-    ptm_model_list = get_handler_metadata(job_context.handler_id, "experiments")["base_experiment"]
-    ptm_model = ptm_model_list[0] if ptm_model_list else ""
-    ptm_model_path = get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, ptm_model) if ptm_model else ""
-    if ptm_model and not ptm_model_path:
-        # If ptm_model is not found in the admin's experiments, then search in the user's experiments
-        ptm_model_path = get_handler_root(org_name=job_context.org_name, kind="experiments", handler_id=ptm_model)
-    if not os.path.isdir(ptm_model_path):
-        # the ptm_model_path is not a directory.
-        return None, None, results_dir + "/"
-    bundle_name = find_matching_bundle_dir(ptm_model_path, [r'(.+?)_v\d+\.\d+\.\d+'])
-    if not os.path.exists(results_dir):
-        os.makedirs(results_dir)
-    return ptm_model_path, bundle_name, results_dir + "/"
-
-
 CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
                            "automl_output_dir": infer_automl_output_dir,
                            "key": infer_key,
@@ -518,5 +491,4 @@ CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
                            "output_dir_inference_json": lambda a, b: infer_output_dir(a, b) + "/annotations_mal.json",
                            "from_csv": lambda a, b: None,  # Used to infer the param from spec sheet
                            "auto_label_output": infer_label_output,
-                           "stylegan_dsconvert_output": infer_stylegan_dsconvert_output,
-                           "monai_output_dir": infer_monai_output_dir}
+                           "stylegan_dsconvert_output": infer_stylegan_dsconvert_output}

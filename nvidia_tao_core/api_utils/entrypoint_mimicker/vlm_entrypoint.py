@@ -87,7 +87,7 @@ def dual_output(log_file=None):
         yield sys.stdout, None
 
 
-def vlm_launch(neural_network_name, action, specs):
+def vlm_launch(neural_network_name, action, specs, job_id=""):
     """Launch a VLM model.
 
     Args:
@@ -95,8 +95,27 @@ def vlm_launch(neural_network_name, action, specs):
     - action (str): The action to perform.
     - specs (dict): The specifications for the action.
     """
-    cli_args = convert_dict_to_cli_args(specs)
-    cli_args = " ".join(cli_args)
+    command = []
+    if 'lepton_specs' in specs:
+        lepton_specs = specs.pop('lepton_specs')
+        lepton_args = ['--lepton-mode']
+        lepton_args += convert_dict_to_cli_args(lepton_specs)
+        lepton_args = " ".join(lepton_args)
+    else:
+        lepton_args = ""
+    if neural_network_name == "cosmos-rl" and action in ["train", "evaluate"]:
+        train_args = ""
+        if action == "train":
+            train_args = f"{lepton_args} --port 8080 --rdzv-port 29345 scripts/custom_sft.py"
+        launch_cmd = (
+            f"{neural_network_name}-{action} --config /results/{job_id}/spec.toml {train_args}"
+        )
+        command = ["/bin/bash", "-c", launch_cmd]
+    else:
+        cli_args = convert_dict_to_cli_args(specs)
+        cli_args = " ".join(cli_args)
+        call = f"{neural_network_name}-{action} {cli_args}"
+        command = shlex.split(call)
     process_passed = False
     try:
         # Run the script.
@@ -106,12 +125,11 @@ def vlm_launch(neural_network_name, action, specs):
             log_file = f"{logs_dir}/{os.getenv('JOB_ID')}/microservices_log.txt"
 
         progress_bar_pattern = re.compile(r"Epoch \d+: \s*\d+%|\[.*\]")
-        call = f"{neural_network_name}-{action} {cli_args}"
         start = time()
-        logger.info("call: %s", call)
+        logger.info(f"command: {command}")
         with dual_output(log_file) as (stdout_target, log_target):
             proc = subprocess.Popen(  # pylint: disable=R1732
-                shlex.split(call),
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,  # Line-buffered

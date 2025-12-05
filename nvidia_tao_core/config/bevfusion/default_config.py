@@ -185,3 +185,8 @@ class ExperimentConfig(CommonExperimentConfig):
         BEVFusionInferenceExpConfig(),
         description="Configurable parameters to construct the inferencer for a BEVFusion experiment."
     )
+
+    def __post_init__(self):
+        """Set default model name for BEVFusion."""
+        if self.model_name is None:
+            self.model_name = "bevfusion"

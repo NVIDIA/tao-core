@@ -1,24 +1,32 @@
 {
     "api_params": {
-        "dataset_type":"object_detection",
-        "actions": ["train","evaluate","export","inference","gen_trt_engine"],
-        "formats":["coco", "coco_raw"],
-        "accepted_ds_intents": ["training", "evaluation", "testing"],
-        "image":"TAO_PYTORCH",
-        "spec_backend":"yaml",
-        "actions_pipe":{
-            "train":"train",
-            "evaluate":"evaluate",
-            "export":"export_with_spec",
-            "inference":"inference",
-            "gen_trt_engine":"gen_trt_engine"
+        "dataset_type": "object_detection",
+        "actions": [
+            "train",
+            "evaluate",
+            "export",
+            "inference",
+            "gen_trt_engine"
+        ],
+        "formats": [
+            "coco",
+            "coco_raw"
+        ],
+        "accepted_ds_intents": [
+            "training",
+            "evaluation",
+            "testing"
+        ],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference",
+            "gen_trt_engine": "gen_trt_engine"
         }
     },
-
-    "upload_strategy": {
-        "inference": "tarball_after_completion"
-    },
-
     "data_sources": {
         "train": {
             "dataset.train_data_sources": {
@@ -55,7 +63,7 @@
                 "transform": "data_services_as_parent_possible"
             },
             "dataset.test_data_sources.json_file": {
-                "source": "eval_dataset", 
+                "source": "eval_dataset",
                 "path": "annotations.json"
             }
         },
@@ -63,22 +71,55 @@
             "dataset.infer_data_sources.image_dir": {
                 "source": "inference_dataset",
                 "path": "images.tar.gz",
-                "transform": ["data_services_as_parent_possible", "wrap_in_list"]
+                "transform": [
+                    "data_services_as_parent_possible",
+                    "wrap_in_list"
+                ]
             },
             "dataset.infer_data_sources.classmap": {
                 "source": "inference_dataset",
                 "path": "label_map.txt"
             }
         },
+        "export": {
+            "dataset.train_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "data_services_as_parent_possible"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            },
+            "dataset.val_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "data_services_as_parent_possible"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            }
+        },
         "gen_trt_engine": {
             "gen_trt_engine.tensorrt.calibration.cal_image_dir": {
                 "source": "calibration_dataset",
                 "path": "images.tar.gz",
-                "transform": ["data_services_as_parent_possible", "wrap_in_list"]
+                "transform": [
+                    "data_services_as_parent_possible",
+                    "wrap_in_list"
+                ]
             }
         }
     },
-
     "dynamic_config": {
         "action_rules": {
             "evaluate": {
@@ -107,52 +148,56 @@
             }
         }
     },
-
-    "spec_params":{
+    "spec_params": {
         "train": {
-            "results_dir":"output_dir",
-            "model.pretrained_backbone_path":"ptm_if_no_resume_model",
-            "train.resume_training_checkpoint_path":"resume_model",
-            "encryption_key":"key"
+            "results_dir": "output_dir",
+            "model.pretrained_backbone_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
         },
-        "evaluate":{
-            "results_dir":"output_dir",
-            "evaluate.checkpoint":"parent_model",
-            "evaluate.trt_engine":"parent_model",
-            "encryption_key":"key"
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "evaluate.trt_engine": "parent_model",
+            "encryption_key": "key"
         },
-        "inference":{
-            "results_dir":"output_dir",
-            "inference.checkpoint":"parent_model",
-            "inference.trt_engine":"parent_model",
-            "encryption_key":"key"
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "inference.trt_engine": "parent_model",
+            "encryption_key": "key"
         },
-        "export":{
-            "results_dir":"output_dir",
-            "export.checkpoint":"parent_model",
-            "export.onnx_file":"create_onnx_file",
-            "encryption_key":"key"
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
         },
-        "gen_trt_engine":{
-            "results_dir":"output_dir",
-            "encryption_key":"key",
-            "gen_trt_engine.onnx_file":"parent_model",
-            "gen_trt_engine.trt_engine":"create_engine_file",
-            "gen_trt_engine.tensorrt.calibration.cal_cache_file":"create_cal_cache"
+        "gen_trt_engine": {
+            "results_dir": "output_dir",
+            "encryption_key": "key",
+            "gen_trt_engine.onnx_file": "parent_model",
+            "gen_trt_engine.trt_engine": "create_engine_file",
+            "gen_trt_engine.tensorrt.calibration.cal_cache_file": "create_cal_cache"
         }
     },
-
-    "automl_spec_params":{
-        "results_dir":"automl_output_dir",
-        "model.pretrained_backbone_path":"automl_assign_ptm",
-        "train.resume_training_checkpoint_path":"automl_resume_model",
-        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
-        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
-        "encryption_key":"key"
+    "automl_spec_params": {
+        "results_dir": "automl_output_dir",
+        "model.pretrained_backbone_path": "automl_assign_ptm",
+        "train.resume_training_checkpoint_path": "automl_resume_model",
+        "train.checkpoint_interval": "assign_const_value,train.num_epochs",
+        "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key": "key"
     },
-
     "metrics": {
-        "available_metrics": ["val_mAP50"],
+        "available_metrics": [
+            "val_mAP50"
+        ],
         "monitoring_metric": "val_mAP50"
+    },
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        }
     }
 }

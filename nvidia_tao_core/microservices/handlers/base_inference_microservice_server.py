@@ -28,7 +28,9 @@ from typing import Dict, List, Any, Tuple
 from flask import Flask, request, jsonify
 
 from nvidia_tao_core.microservices.handlers.container_handler import prepare_data_before_job_run
-from nvidia_tao_core.cloud_handlers.utils import download_from_user_storage, get_file_path_from_cloud_string
+from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import (
+    download_from_user_storage, get_file_path_from_cloud_string
+)
 from nvidia_tao_core.microservices.utils import safe_load_file
 
 logging.basicConfig(
@@ -78,8 +80,12 @@ class BaseInferenceMicroserviceServer(ABC):
         """Get the current idle time in minutes
 
         Returns:
-            Float representing minutes since last request
+            Float representing minutes since last request, or 0 if model is not ready yet.
         """
+        # Return 0 idle time if model is not loaded yet (still initializing/loading)
+        if not self.model_loaded:
+            return 0.0
+
         idle_time = datetime.now() - self.last_request_time
         return idle_time.total_seconds() / 60.0
 
@@ -102,38 +108,32 @@ class BaseInferenceMicroserviceServer(ABC):
             logger.info(f"Started health monitor with {self.idle_timeout_minutes} minute timeout")
 
     def _health_monitor_loop(self):
-        """Background thread that monitors server health and triggers auto-deletion"""
+        """Background thread that monitors server health and triggers auto-deletion request"""
         while not self._shutdown_flag.is_set():
             try:
                 if self.is_idle_timeout_exceeded():
                     idle_minutes = self.get_idle_time_minutes()
                     logger.warning(
                         f"Server has been idle for {idle_minutes:.1f} minutes "
-                        f"(timeout: {self.idle_timeout_minutes}). Triggering auto-deletion."
+                        f"(timeout: {self.idle_timeout_minutes}). Requesting auto-deletion."
                     )
 
-                    # Call auto-deletion directly
+                    # Request auto-deletion by updating status of job.
+                    # The workflow service will monitor and handle actual deletion
                     try:
-                        from nvidia_tao_core.microservices.handlers.inference_microservice_handler import (
-                            InferenceMicroserviceHandler
+                        logger.info("Requesting auto-deletion via status callback")
+                        self.request_auto_deletion()
+                        logger.info(
+                            "Auto-deletion request sent. Workflow service will handle deletion."
                         )
-                        result = InferenceMicroserviceHandler.stop_inference_microservice(
-                            self.job_id, auto_deletion=True
-                        )
-                        if result.status_code == 200:
-                            logger.info("Auto-deletion executed successfully")
-                        else:
-                            logger.error(f"Auto-deletion failed: {result.message}")
-                    except ImportError as e:
-                        logger.error(f"Failed to import inference handler for auto-deletion: {e}")
                     except Exception as e:
-                        logger.error(f"Failed to execute auto-deletion: {e}")
+                        logger.error(f"Failed to save auto-deletion request: {e}")
 
-                    # Stop monitoring after triggering deletion
+                    # Stop monitoring after requesting deletion
                     break
 
                 # Check every 5 minutes
-                self._shutdown_flag.wait(300)
+                self._shutdown_flag.wait(3)
 
             except Exception as e:
                 logger.error(f"Error in health monitor loop: {e}")
@@ -175,6 +175,8 @@ class BaseInferenceMicroserviceServer(ABC):
         except Exception as e:
             error_msg = f"Failed to initialize server: {e}"
             logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
             self.server_initializing = False
             self.initialization_error = str(e)
             self.save_model_state(loaded=False, loading=False, error=str(e))
@@ -222,6 +224,43 @@ class BaseInferenceMicroserviceServer(ABC):
         if os.path.exists(state_file):
             return safe_load_file(state_file)
         return {}
+
+    def request_auto_deletion(self):
+        """Request auto-deletion by sending status callback to TAO API
+
+        This method is called when idle timeout is exceeded. It uses the existing
+        status_callback mechanism from cloud_handlers/utils.py to send the status
+        update to the API (which has DB access via save_dnn_status).
+        """
+        try:
+            logger.info("Requesting auto-deletion via status callback")
+
+            # Import here to avoid circular dependencies
+            from nvidia_tao_core.cloud_handlers.utils import status_callback
+
+            # Create status data in the format expected by status_callback
+            status_data = {
+                "message": "AUTO_DELETION_REQUESTED",
+                "status": "AUTO_DELETION_REQUESTED",
+                "idle_time_minutes": self.get_idle_time_minutes(),
+                "idle_timeout_minutes": self.idle_timeout_minutes,
+                "reason": "idle_timeout_exceeded",
+                "last_request_time": self.last_request_time.isoformat(),
+                "timestamp": datetime.now().isoformat()
+            }
+
+            # Convert to JSON string as expected by status_callback
+            data_string = json.dumps(status_data)
+
+            # Send status callback (will use TAO_LOGGING_SERVER_URL env var)
+            status_callback(data_string)
+
+            logger.info(f"Auto-deletion status callback sent for job {self.job_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to send auto-deletion status callback: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     @abstractmethod
     def load_model_into_memory(self, **kwargs) -> bool:
@@ -280,6 +319,10 @@ class BaseInferenceMicroserviceServer(ABC):
                 print(f"{self.__class__.__name__} model loaded successfully in {load_time:.2f} seconds")
                 self.save_model_state(loaded=True, loading=False, load_time=load_time)
                 logger.info(f"Model loaded successfully in {load_time:.2f}s - ready for inference")
+
+                # Start health monitoring for idle timeout now that server is ready for inference
+                self.update_last_request_time()  # Reset timer to start from when model is ready
+                self._start_health_monitor()
             else:
                 self.model_loading = False
                 self.model_load_error = "Model loading failed"
@@ -588,14 +631,14 @@ class BaseInferenceMicroserviceServer(ABC):
                 init_thread.daemon = True
                 init_thread.start()
 
-            # Start health monitoring for auto-deletion
-            self._start_health_monitor()
-
             # Start server immediately (don't wait for initialization or model loading)
             app = self.create_flask_app()
             logger.info(f"Starting {self.__class__.__name__} Server on port {self.port}")
             logger.info("Server starting immediately - initialization and model loading in background")
-            logger.info(f"Health monitor enabled with {self.idle_timeout_minutes} minute idle timeout")
+            logger.info(
+                f"Health monitor will start after model loads (idle timeout: "
+                f"{self.idle_timeout_minutes} minutes)"
+            )
             app.run(host='0.0.0.0', port=self.port, debug=False, threaded=True)
             return True
 
@@ -613,9 +656,6 @@ class BaseInferenceMicroserviceServer(ABC):
             load_model_params: Parameters for model loading
         """
         try:
-            # Start health monitoring for auto-deletion
-            self._start_health_monitor()
-
             # Start model loading in background
             if load_model_params is None:
                 load_model_params = {}
@@ -625,7 +665,10 @@ class BaseInferenceMicroserviceServer(ABC):
             app = self.create_flask_app()
             logger.info(f"Starting {self.__class__.__name__} Server on port {self.port}")
             logger.info("Server starting immediately - model will load in background")
-            logger.info(f"Health monitor enabled with {self.idle_timeout_minutes} minute idle timeout")
+            logger.info(
+                f"Health monitor will start after model loads (idle timeout: "
+                f"{self.idle_timeout_minutes} minutes)"
+            )
             app.run(host='0.0.0.0', port=self.port, debug=False, threaded=True)
             return True
 

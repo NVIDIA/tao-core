@@ -34,7 +34,9 @@ if os.getenv("AIRGAPPED_MODE", "False").lower() == "false":
     from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
 from nvidia_tao_core.microservices.handlers.ngc_handler import get_ngc_token_from_api_key
 from nvidia_tao_core.microservices.utils import read_network_config, get_admin_key, safe_load_file
-from nvidia_tao_core.cloud_handlers.utils import download_huggingface_model as download_hf_model
+from nvidia_tao_core.microservices.handlers.cloud_handlers.huggingface import (
+    download_huggingface_model as download_hf_model
+)
 from nvidia_tao_core.microservices.constants import TAO_NETWORKS
 from nvidia_tao_core.microservices.enum_constants import (
     BaseExperimentTask,
@@ -700,9 +702,7 @@ class BaseExperimentMetadata:
             base_experiment_pull_complete = "pull_complete"
 
         # Determine model type based on network architecture
-        if network_arch.startswith("monai_"):
-            model_type = "medical"
-        elif network_arch.startswith("maxine_"):
+        if network_arch.startswith("maxine_"):
             model_type = "maxine"
         else:
             model_type = "vision"
@@ -732,7 +732,6 @@ class BaseExperimentMetadata:
             "created_on": datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
             "last_modified": datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
             "ngc_path": experiment_info["ngc_path"],
-            "realtime_infer_support": api_params.get("realtime_infer_support", False),
             "sha256_digest": {},
             "base_experiment_metadata": {
                 "task": None,
@@ -782,7 +781,6 @@ class BaseExperimentMetadata:
                 "dataset_type": "object_detection",
                 "actions": ["train", "evaluate", "inference"],
                 "accepted_ds_intents": ["training", "evaluation"],
-                "realtime_infer_support": False,
                 "formats": ["coco"]
             }
             logger.info(f"Using default config for {network_arch}")
@@ -806,7 +804,7 @@ class BaseExperimentMetadata:
 
         return self.extract_common_metadata(experiment_info, api_params, hf_overrides)
 
-    def extract_metadata(self, model_info, experiment_info, additional_metadata, model_name):
+    def extract_metadata(self, model_info, experiment_info, model_name):
         """Create metadata for NGC models"""
         if model_info is None:
             raise ValueError(f"Failed to get model info for {experiment_info['ngc_path']}")
@@ -895,17 +893,6 @@ class BaseExperimentMetadata:
         # Get common metadata with NGC-specific overrides
         metadata = self.extract_common_metadata(experiment_info, api_params, ngc_overrides)
 
-        # Add additional specific metadata
-        if additional_metadata:
-            channel_def = (
-                additional_metadata.get("network_data_format", {})
-                .get("outputs", {})
-                .get("pred", {})
-                .get("channel_def", {})
-            ).items()
-            metadata["model_params"] = {"labels": {k: v.lower() for k, v in channel_def if v.lower() != "background"}}
-            metadata["description"] = additional_metadata.get("description", metadata["description"])
-
         return metadata
 
     def get_ngc_hosted_base_experiments(self):
@@ -946,19 +933,14 @@ class BaseExperimentMetadata:
                     # In CSV or both mode, process all experiments; in auto-discovery mode, check org/team membership
                     if self.use_csv or self.use_both or (org, team) in self.org_team_list:
                         # Get ngc model metadata and cache it
-                        monai_metadata = {}
                         if ngc_path not in model_info:
                             model_info[ngc_path] = self.get_model_info_from_ngc(
                                 ngc_token, org, team, model_name, model_version
                             )
-                            if base_experiment["network_arch"].startswith("monai_"):
-                                monai_metadata = self.get_model_info_from_ngc(
-                                    ngc_token, org, team, model_name, model_version, "configs/metadata.json"
-                                )
 
                         # Update metadata for each experiment
                         valid_base_experiments[exp_id] = self.extract_metadata(
-                            model_info[ngc_path], base_experiment, monai_metadata, model_name
+                            model_info[ngc_path], base_experiment, model_name
                         )
                         logger.info(
                             f"Successfully created a base experiment for {ngc_path},"

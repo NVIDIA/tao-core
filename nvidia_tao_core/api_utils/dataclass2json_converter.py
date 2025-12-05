@@ -35,6 +35,8 @@ __type_mapping = {
     "list_1_normal": "array",
     "list_2": "array",
     "list_3": "array",
+    "subset_list": "array",
+    "optional_list": "array",
     "float": "number",
     "bool": "boolean",
     "integer": "integer",
@@ -47,19 +49,86 @@ __type_mapping = {
     "categorical": "categorical",
     "ordered_int": "ordered_int",
     "enum": "string",
+    "union": "union",
 }
 
 
-def __basic_type_fix(value_type, value):
+def __union_type_fix(union_types, value, literal_values=None):
+    """Converts specification values for Union types by trying each type in order.
+
+    Args:
+        union_types (list): List of type names that this Union field can accept.
+        value (any): The value to be converted.
+        literal_values (list, optional): List of specific literal string values allowed.
+
+    Returns:
+        Converted value (various types): The value converted to the appropriate datatype, or the original value.
+    """
+    if value in (None, ""):
+        return None
+
+    # If literal_values are specified and value is a string, check if it's in the allowed literals
+    if literal_values and isinstance(value, str) and value in literal_values:
+        return value
+
+    # Try each type in the union until one works
+    for type_name in union_types:
+        try:
+            if type_name in ("bool", "boolean"):
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    if value.lower() in ("true", "false"):
+                        return str(value).lower() == "true"
+            elif type_name in ("int", "integer"):
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+            elif type_name in ("float", "number"):
+                if isinstance(value, (int, float)):
+                    return float(value)
+                if isinstance(value, str):
+                    return float(value)
+            elif type_name in ("list", "array"):
+                if isinstance(value, list):
+                    return value
+                # Try to parse string representation of list
+                if isinstance(value, str):
+                    try:
+                        import ast
+                        parsed = ast.literal_eval(value)
+                        if isinstance(parsed, list):
+                            return parsed
+                    except (ValueError, SyntaxError):
+                        pass
+            elif type_name in ("str", "string"):
+                if isinstance(value, str):
+                    # If literal_values are specified, only allow those specific values
+                    if literal_values is None or value in literal_values:
+                        return value
+                return str(value)
+        except (ValueError, TypeError):
+            continue
+
+    # If no type conversion worked, return the original value
+    return value
+
+
+def __basic_type_fix(value_type, value, union_types=None, literal_values=None):
     """Converts specification values to appropriate types based on their datatype.
 
     Args:
         value_type (str): The expected type of the value (e.g., 'integer', 'number').
         value (str or int or float or bool): The value to be converted.
+        union_types (list, optional): List of union types if value_type is 'union'.
+        literal_values (list, optional): List of specific literal string values allowed.
 
     Returns:
         Converted value (various types): The value converted to the appropriate datatype, or None for invalid inputs.
     """
+    if value_type == "union" and union_types:
+        return __union_type_fix(union_types, value, literal_values)
     if value_type == "string" and not value:
         return "" if value == "" else None
     if value in (None, ""):
@@ -91,7 +160,12 @@ def __array_type_fix(value_type, value):
     """
     if value in (None, ""):
         return None
-    values = value.replace(" ", "").split(",")
+
+    # Handle case where value is already a list (for new field types)
+    if isinstance(value, list):
+        values = value
+    else:
+        values = value.replace(" ", "").split(",")
     if value_type in ("integer", "ordered_int"):
         return [int(i) for i in values]
     if value_type == "number":
@@ -340,6 +414,8 @@ def create_json_schema(json_data):
         # get metadata
         display_name = param_meta.get("display_name")
         value_type = param_meta.get("value_type")
+        union_types = param_meta.get("union_types")
+        literal_values = param_meta.get("literal_values")
         description = param_meta.get("description")
         default_value = param_meta.get("default_value")
         examples = param_meta.get("examples")
@@ -356,27 +432,49 @@ def create_json_schema(json_data):
         link = param_meta.get("link")
 
         # convert value type
-        value_type = __type_mapping.get(value_type)
-        if value_type is None:
+        mapped_value_type = __type_mapping.get(value_type)
+        if mapped_value_type is None:
             hierarchy.pop()
             return
 
         # fix data types
-        value = __basic_type_fix(value_type, param_value)
-        default_value = __basic_type_fix(value_type, default_value)
-        valid_min = __basic_type_fix(value_type, valid_min)
-        valid_max = __basic_type_fix(value_type, valid_max)
+        value = __basic_type_fix(mapped_value_type, param_value, union_types, literal_values)
+        default_value = __basic_type_fix(mapped_value_type, default_value, union_types, literal_values)
+        valid_min = __basic_type_fix(mapped_value_type, valid_min, union_types, literal_values)
+        valid_max = __basic_type_fix(mapped_value_type, valid_max, union_types, literal_values)
         valid_options = __array_type_fix(value_type, valid_options)
         examples = __array_type_fix(value_type, examples)
 
         # create new schema
         props = parent_prop
-        if value_type == "const":
+        if mapped_value_type == "const":
             props[param_name] = {"const": value}
             parent_default[param_name] = default_value
             hierarchy.pop()
             return
-        props[param_name] = {"type": param_meta.get("value_type"), "properties": {}, "default": {}}
+
+        # Handle Union types
+        if mapped_value_type == "union" and union_types:
+            # Create a schema that accepts multiple types
+            union_schema = []
+            for union_type in union_types:
+                mapped_union_type = __type_mapping.get(union_type, union_type)
+                if mapped_union_type in ("string", "boolean", "integer", "number", "array"):
+                    type_schema = {"type": mapped_union_type}
+                    # If this is a string type and we have literal values, add enum constraint
+                    if mapped_union_type == "string" and literal_values:
+                        type_schema["enum"] = literal_values
+                    # If this is an array type and we have literal values, add items constraint
+                    elif mapped_union_type == "array" and literal_values:
+                        type_schema["items"] = {"type": "string", "enum": literal_values}
+                    union_schema.append(type_schema)
+
+            if union_schema:
+                props[param_name] = {"anyOf": union_schema, "properties": {}, "default": {}}
+            else:
+                props[param_name] = {"type": param_meta.get("value_type"), "properties": {}, "default": {}}
+        else:
+            props[param_name] = {"type": param_meta.get("value_type"), "properties": {}, "default": {}}
 
         # props[param_name]["default"] = default_value
         # if parent_default:
@@ -389,14 +487,16 @@ def create_json_schema(json_data):
         if examples:
             props[param_name]["examples"] = examples
         if default_value == "" or default_value is not None:
-            props[param_name]["default"] = default_value
-            parent_default[param_name] = default_value
+            # Apply type conversion to default_value for union types
+            processed_default = __basic_type_fix(value_type, default_value, union_types, literal_values)
+            props[param_name]["default"] = processed_default
+            parent_default[param_name] = processed_default
         # if default_value not in (None, ""):
         #     props[param_name]["default"] = default_value
         #     parent_default[param_name] = default_value
-        if valid_min:
+        if valid_min is not None and valid_min != "":
             props[param_name]["minimum"] = valid_min
-        if valid_max:
+        if valid_max is not None and valid_max != "":
             props[param_name]["maximum"] = valid_max
         if math_cond:
             props[param_name]["math_cond"] = math_cond
@@ -406,7 +506,7 @@ def create_json_schema(json_data):
             props[param_name]["depends_on"] = depends_on
         if valid_options:
             props[param_name]["enum"] = valid_options
-        if regex and value_type == "string":
+        if regex and mapped_value_type == "string":
             props[param_name]["pattern"] = regex
         if link and link.startswith("http"):
             props[param_name]["link"] = link
@@ -429,7 +529,7 @@ def create_json_schema(json_data):
             auto_ml_disabled_parameters.append(".".join(hierarchy))
 
         # add object hierarchy
-        if value_type == "object":
+        if mapped_value_type == "object":
             props[param_name]["properties"] = {}
             if param_value:
                 for p, pObj in param_value.items():

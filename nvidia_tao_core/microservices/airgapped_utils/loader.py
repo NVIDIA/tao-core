@@ -24,7 +24,7 @@ import shutil
 
 from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
 from nvidia_tao_core.microservices.utils import safe_load_file
-from nvidia_tao_core.cloud_handlers.utils import initialize_cloud_storage
+from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import initialize_cloud_storage
 
 logger = logging.getLogger(__name__)
 

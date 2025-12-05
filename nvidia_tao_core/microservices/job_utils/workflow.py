@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Job Workflow modules"""
+import os
 import threading
 import functools
 import time
@@ -24,20 +25,27 @@ from queue import PriorityQueue
 from dataclasses import dataclass, field, asdict, fields
 from datetime import datetime, timezone
 
-from nvidia_tao_core.microservices.constants import MEDICAL_AUTOML_ARCHITECT, MEDICAL_NETWORK_ARCHITECT
 from nvidia_tao_core.microservices.handlers.utilities import JobContext
 from nvidia_tao_core.microservices.handlers.actions import ACTIONS_TO_FUNCTIONS, AutoMLPipeline
 from nvidia_tao_core.microservices.handlers.stateless_handlers import (
+    get_dnn_status,
+    get_handler_job_metadata,
+    update_job_status,
+    save_automl_controller_info,
     get_all_pending_jobs,
+    get_all_running_jobs,
+    get_all_running_automl_experiments,
     update_job_message,
     get_handler_type,
     get_handler_metadata,
-    get_automl_controller_info
+    get_automl_controller_info,
+    delete_dnn_status
 )
 from nvidia_tao_core.microservices.handlers.automl_handler import AutoMLHandler
 from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
 from nvidia_tao_core.microservices.utils import read_network_config
 from nvidia_tao_core.microservices.job_utils.dependencies import dependency_type_map, dependency_check_default
+from nvidia_tao_core.microservices.constants import JOB_STATUS_TIMEOUT_MINUTES
 
 # Configure logging
 logging.basicConfig(
@@ -131,10 +139,6 @@ def execute_job(job_context):
         action_pipeline_name = network_config["api_params"]["actions_pipe"].get(action, "")
         if action == "validate_images":
             action_pipeline_name = "data_services"
-        if network in MEDICAL_NETWORK_ARCHITECT:
-            action_pipeline_name = "monai_" + action_pipeline_name
-        elif network in MEDICAL_AUTOML_ARCHITECT:
-            action_pipeline_name = "medical_automl_" + action_pipeline_name
         if action_pipeline_name:
             action_pipeline = ACTIONS_TO_FUNCTIONS[action_pipeline_name]
             _Actionpipeline = action_pipeline(job_context)
@@ -145,6 +149,9 @@ def execute_job(job_context):
                 name=f'tao-job-thread-{job_context.id}'
             )
             job_run_thread.start()
+        else:
+            logger.error("Action pipeline couldn't be found: %s %s %s", network_config, network, job_context)
+            return False
     else:
         # AUTOML Job
         # TODO: At test time, sequentially run it and not as a thread to catch errors
@@ -185,6 +192,301 @@ def write_job(job):
     mongo_jobs.upsert({'id': job.id}, asdict(job))
 
 
+def get_last_status_timestamp(job_id, automl=False, experiment_number="0"):
+    """Get the timestamp of the last status update for a job"""
+    try:
+        status_data = get_dnn_status(job_id, automl=automl, experiment_number=experiment_number)
+        if not status_data:
+            logger.debug(f"No status data found for job {job_id}")
+            return None
+
+        # Find the most recent timestamp in the status data
+        latest_timestamp = None
+        for status_entry in status_data:
+            if isinstance(status_entry, dict) and 'timestamp' in status_entry:
+                try:
+                    timestamp_str = status_entry['timestamp']
+                    if isinstance(timestamp_str, str):
+                        # Try different timestamp formats
+                        for fmt in ['%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S.%f']:
+                            try:
+                                timestamp = datetime.strptime(timestamp_str, fmt).replace(tzinfo=timezone.utc)
+                                break
+                            except ValueError:
+                                continue
+                        else:
+                            # If no format matches, try parsing as ISO format
+                            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    else:
+                        continue
+
+                    if latest_timestamp is None or timestamp > latest_timestamp:
+                        latest_timestamp = timestamp
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Failed to parse timestamp {status_entry.get('timestamp')} for job {job_id}: {e}")
+                    continue
+
+        return latest_timestamp
+
+    except Exception as e:
+        logger.error(f"Error getting last status timestamp for job {job_id}: {e}")
+        return None
+
+
+def check_job_timeout(job_info):
+    """Check if a job has timed out based on last status update"""
+    job_id = job_info.get('job_id')
+    is_automl = job_info.get('is_automl', False)
+    experiment_number = job_info.get('experiment_number', '0')
+
+    if not job_id:
+        return False
+
+    try:
+        # For AutoML experiments, we check the experiment status differently
+        if is_automl:
+            # For AutoML experiments, check if the specific experiment is still running
+            # by looking at the controller info
+            controller_info = get_automl_controller_info(job_id)
+            experiment_found = False
+            experiment_status = ""
+
+            if isinstance(controller_info, list):
+                for recommendation in controller_info:
+                    if isinstance(recommendation, dict) and str(recommendation.get("id", "")) == experiment_number:
+                        experiment_status = recommendation.get("status", "")
+                        experiment_found = True
+                        break
+
+            if not experiment_found:
+                logger.debug(f"AutoML experiment {experiment_number} for job {job_id} not found")
+                return False
+
+            # Only check timeout for running AutoML experiments
+            if experiment_status not in ("pending", "running", "started"):
+                logger.debug(
+                    f"AutoML experiment {experiment_number} for job {job_id} status is {experiment_status}, "
+                    "skipping timeout check"
+                )
+                return False
+        else:
+            # Regular job - get job metadata to check current status
+            job_metadata = get_handler_job_metadata(job_id)
+            if not job_metadata:
+                logger.debug(f"No metadata found for job {job_id}")
+                return False
+
+            current_status = job_metadata.get("status", "")
+
+            # Only check timeout for running jobs
+            if current_status not in ["Running", "Pending"]:
+                logger.debug(f"Job {job_id} status is {current_status}, skipping timeout check")
+                return False
+
+        timeout_seconds = JOB_STATUS_TIMEOUT_MINUTES * 60
+        last_timestamp = get_last_status_timestamp(job_id, automl=is_automl, experiment_number=experiment_number)
+
+        if last_timestamp is None:
+            # If no status updates found, check job creation time
+            logger.debug(
+                f"No status timestamp found for job {job_id} (AutoML: {is_automl}, exp: {experiment_number}), "
+                "using job metadata last_modified"
+            )
+
+            if not is_automl:
+                job_metadata = get_handler_job_metadata(job_id)
+                last_modified = job_metadata.get("last_modified") if job_metadata else None
+            else:
+                # For AutoML experiments, use the main job's last_modified
+                last_modified = job_info.get('last_modified')
+
+            if last_modified:
+                if isinstance(last_modified, str):
+                    try:
+                        last_timestamp = datetime.fromisoformat(last_modified.replace('Z', '+00:00'))
+                    except ValueError:
+                        last_timestamp = datetime.now(tz=timezone.utc)
+                elif isinstance(last_modified, datetime):
+                    last_timestamp = last_modified
+                else:
+                    last_timestamp = datetime.now(tz=timezone.utc)
+            else:
+                # No timestamp available, assume job just started
+                logger.debug(
+                    f"No timestamp available for job {job_id} (AutoML: {is_automl}), assuming recently started"
+                )
+                return False
+
+        # Check if the time since last update exceeds timeout
+        current_time = datetime.now(tz=timezone.utc)
+        time_since_update = current_time - last_timestamp
+
+        is_timed_out = time_since_update.total_seconds() > timeout_seconds
+
+        job_description = f"AutoML experiment {experiment_number} for job {job_id}" if is_automl else f"Job {job_id}"
+
+        if is_timed_out:
+            logger.warning(
+                f"{job_description} timed out: last update {time_since_update.total_seconds():.0f}s ago "
+                f"(timeout: {timeout_seconds}s)"
+            )
+        else:
+            logger.debug(
+                f"{job_description} last update: {time_since_update.total_seconds():.0f}s ago "
+                f"(timeout: {timeout_seconds}s)"
+            )
+
+        return is_timed_out
+
+    except Exception as e:
+        logger.error(f"Error checking timeout for job {job_id} (AutoML: {is_automl}): {e}")
+        return False
+
+
+def terminate_timed_out_job(job_info):
+    """Terminate a timed out job"""
+    from nvidia_tao_core.microservices.job_utils.executor.statefulset_executor import StatefulSetExecutor
+
+    job_id = job_info.get('job_id')
+    handler_id = job_info.get('handler_id')
+    kind = job_info.get('kind', '')
+    is_automl = job_info.get('is_automl', False)
+    experiment_number = job_info.get('experiment_number', '0')
+
+    if not job_id or not handler_id:
+        logger.error(f"Cannot terminate job: missing job_id or handler_id in {job_info}")
+        return False
+
+    try:
+        if is_automl:
+            logger.info(f"Terminating timed out AutoML experiment {experiment_number} for job {job_id}")
+
+            # For AutoML experiments, we need to update the specific experiment status
+            # and potentially terminate the StatefulSet for that experiment
+            controller_info = get_automl_controller_info(job_id)
+
+            if isinstance(controller_info, list):
+                updated_controller = []
+                experiment_found = False
+
+                for recommendation in controller_info:
+                    if isinstance(recommendation, dict):
+                        if str(recommendation.get("id", "")) == experiment_number:
+                            # Mark this experiment as failed due to timeout
+                            recommendation["status"] = "error"
+                            recommendation["message"] = "Terminated due to timeout - no status updates received"
+                            experiment_found = True
+                            logger.info(f"Marked AutoML experiment {experiment_number} as error due to timeout")
+                        updated_controller.append(recommendation)
+
+                if experiment_found:
+                    # Save the updated controller info
+                    save_automl_controller_info(job_id, updated_controller)
+
+                    # Try to terminate the StatefulSet for this specific experiment
+                    # The StatefulSet name for AutoML experiments typically includes the experiment number
+                    experiment_job_id = f"{job_id}-{experiment_number}"
+                    statefulset_executor = StatefulSetExecutor()
+                    success = statefulset_executor.delete_statefulset(experiment_job_id, use_ngc=True)
+
+                    if not success:
+                        # If the specific experiment StatefulSet doesn't exist, try the main job ID
+                        success = statefulset_executor.delete_statefulset(job_id, use_ngc=True)
+
+                    if success:
+                        logger.info(
+                            f"Successfully terminated timed out AutoML experiment {experiment_number} for job {job_id}"
+                        )
+                    else:
+                        logger.error(
+                            f"Failed to terminate StatefulSet for AutoML experiment {experiment_number} "
+                            f"for job {job_id}"
+                        )
+
+                    return success
+                logger.warning(f"AutoML experiment {experiment_number} not found in controller info for job {job_id}")
+                return False
+            logger.error(f"Invalid controller info format for AutoML job {job_id}")
+            return False
+        logger.info(f"Terminating timed out job {job_id}")
+
+        # Update job status to indicate timeout
+        update_job_status(handler_id, job_id, status="Error", kind=kind)
+
+        # Delete the StatefulSet
+        statefulset_executor = StatefulSetExecutor()
+        success = statefulset_executor.delete_statefulset(job_id, use_ngc=True)
+
+        if success:
+            logger.info(f"Successfully terminated timed out job {job_id}")
+        else:
+            logger.error(f"Failed to terminate timed out job {job_id}")
+
+        return success
+
+    except Exception as e:
+        logger.error(f"Error terminating timed out job {job_id} (AutoML: {is_automl}): {e}")
+        return False
+
+
+def check_for_timed_out_jobs():
+    """Check all running jobs and AutoML experiments for timeouts and terminate timed out ones"""
+    # Check if timeout monitoring is enabled
+    timeout_monitoring_enabled = os.getenv("JOB_TIMEOUT_MONITORING_ENABLED", "true").lower() in ("true", "1")
+    if not timeout_monitoring_enabled:
+        return []
+
+    terminated_jobs = []
+
+    try:
+        # Get all running jobs (regular jobs)
+        running_jobs = get_all_running_jobs()
+
+        # Get all running AutoML experiments
+        running_automl_experiments = get_all_running_automl_experiments()
+
+        # Combine both lists
+        all_jobs_to_check = running_jobs + running_automl_experiments
+
+        logger.debug(
+            f"Checking {len(running_jobs)} regular jobs and {len(running_automl_experiments)} AutoML experiments "
+            "for timeouts"
+        )
+
+        for job_info in all_jobs_to_check:
+            try:
+                job_id = job_info.get("job_id")
+                is_automl = job_info.get("is_automl", False)
+                experiment_number = job_info.get("experiment_number", "0")
+
+                if not job_id:
+                    logger.warning(f"Skipping job with missing ID: {job_info}")
+                    continue
+
+                # Check if job is timed out
+                if check_job_timeout(job_info):
+                    # Terminate the job
+                    if terminate_timed_out_job(job_info):
+                        job_description = (
+                            f"AutoML experiment {experiment_number} for job {job_id}" if is_automl else job_id
+                        )
+                        terminated_jobs.append(job_description)
+
+            except Exception as e:
+                logger.error(f"Error processing job {job_info}: {e}")
+                continue
+
+    except Exception as e:
+        logger.error(f"Error checking running jobs for timeouts: {e}")
+
+    if terminated_jobs:
+        logger.info(f"Terminated {len(terminated_jobs)} timed out jobs/experiments: {terminated_jobs}")
+    else:
+        logger.debug("No jobs or AutoML experiments terminated due to timeout")
+
+    return terminated_jobs
+
+
 def get_all_queued_jobs():
     """Gets all jobs with workflow_status of enqueued"""
     mongo_jobs = MongoHandler("tao", "jobs")
@@ -210,6 +512,10 @@ def scan_for_jobs():
     """Scans for new jobs and queues them if dependencies are met"""
     while True:
         report_healthy("Workflow has waken up", clear=True)
+
+        # Check for inference microservice auto-deletion requests
+        process_inference_microservice_auto_deletions()
+
         # Create global queue
         queue = PriorityQueue()
         for j in get_all_queued_jobs():
@@ -248,10 +554,121 @@ def scan_for_jobs():
                 if execute_job(job):
                     # dequeue job
                     jobs_to_dequeue.append(job)
+                else:
+                    report_healthy(f"{job.id} with action {job.action}: Job execution failed")
         for job in jobs_to_dequeue:
             Workflow.dequeue(job)
+
+        # Check for timed out jobs and terminate them
+        try:
+            terminated_jobs = check_for_timed_out_jobs()
+            if terminated_jobs:
+                report_healthy(f"Terminated {len(terminated_jobs)} timed out jobs")
+        except Exception as e:
+            logger.error(f"Error checking for timed out jobs: {e}")
+
         report_healthy("Workflow going to sleep")
         time.sleep(15)
+
+
+def process_inference_microservice_auto_deletions():
+    """Process pending inference microservice auto-deletion requests
+
+    This function monitors job_statuses for AUTO_DELETION_REQUESTED status from
+    inference microservice pods and handles the actual deletion (requires DB access).
+    """
+    try:
+        # Check job_statuses collection for AUTO_DELETION_REQUESTED status
+        mongo_status_table = MongoHandler("tao", "job_statuses")
+
+        # Find all jobs with AUTO_DELETION_REQUESTED in their status array
+        all_status_records = mongo_status_table.find({})
+
+        # Import here to avoid circular dependency
+        from nvidia_tao_core.microservices.handlers.inference_microservice_handler import (
+            InferenceMicroserviceHandler
+        )
+
+        jobs_to_delete = []
+
+        for status_record in all_status_records:
+            job_id = status_record.get("id", "")
+            status_list = status_record.get("status", [])
+
+            # Check if any status entry has AUTO_DELETION_REQUESTED
+            for status_entry in status_list:
+                if isinstance(status_entry, dict) and status_entry.get("status") == "AUTO_DELETION_REQUESTED":
+                    # Check if we haven't processed this yet
+                    if not status_entry.get("auto_deletion_processed", False):
+                        jobs_to_delete.append({
+                            "job_id": job_id,
+                            "idle_time_minutes": status_entry.get("idle_time_minutes", 0),
+                            "reason": status_entry.get("reason", "unknown")
+                        })
+                        break
+
+        if not jobs_to_delete:
+            return
+
+        logger.info(f"Found {len(jobs_to_delete)} inference microservices requesting auto-deletion")
+
+        for job_info in jobs_to_delete:
+            job_id = job_info["job_id"]
+            try:
+                logger.info(
+                    f"Processing auto-deletion for inference microservice job {job_id}. "
+                    f"Reason: {job_info.get('reason', 'unknown')}, "
+                    f"Idle time: {job_info.get('idle_time_minutes', 0):.2f} minutes"
+                )
+
+                # Call the actual deletion (has DB access here in workflow)
+                result = InferenceMicroserviceHandler.stop_inference_microservice(
+                    job_id, auto_deletion=True
+                )
+
+                if result.code == 200:
+                    logger.info(f"Auto-deletion successful for job {job_id}")
+                    # Note: Job status is already updated to Done in stop_inference_microservice
+
+                    # Mark status as processed to avoid re-processing
+                    status_record = mongo_status_table.find_one({"id": job_id})
+                    if status_record:
+                        status_list = status_record.get("status", [])
+                        for status_entry in status_list:
+                            if (isinstance(status_entry, dict) and
+                                    status_entry.get("status") == "AUTO_DELETION_REQUESTED"):
+                                status_entry["auto_deletion_processed"] = True
+                                status_entry["processed_at"] = datetime.now(tz=timezone.utc).isoformat()
+                        mongo_status_table.upsert({"id": job_id}, {"id": job_id, "status": status_list})
+                else:
+                    logger.error(f"Auto-deletion failed for job {job_id}: {result.data}")
+                    # Mark as processed even on failure to avoid retry loops
+                    status_record = mongo_status_table.find_one({"id": job_id})
+                    if status_record:
+                        status_list = status_record.get("status", [])
+                        for status_entry in status_list:
+                            if (isinstance(status_entry, dict) and
+                                    status_entry.get("status") == "AUTO_DELETION_REQUESTED"):
+                                status_entry["auto_deletion_processed"] = True
+                                status_entry["failed"] = True
+                                status_entry["error"] = str(result.data)
+                        mongo_status_table.upsert({"id": job_id}, {"id": job_id, "status": status_list})
+
+            except Exception as e:
+                logger.error(f"Error processing auto-deletion for job {job_id}: {e}")
+                # Mark as processed with error to avoid retry loops
+                status_record = mongo_status_table.find_one({"id": job_id})
+                if status_record:
+                    status_list = status_record.get("status", [])
+                    for status_entry in status_list:
+                        if isinstance(status_entry, dict) and status_entry.get("status") == "AUTO_DELETION_REQUESTED":
+                            status_entry["auto_deletion_processed"] = True
+                            status_entry["failed"] = True
+                            status_entry["error"] = str(e)
+                    mongo_status_table.upsert({"id": job_id}, {"id": job_id, "status": status_list})
+
+    except Exception as e:
+        logger.error(f"Error in process_inference_microservice_auto_deletions: {e}")
 
 
 class Workflow:
@@ -340,13 +757,12 @@ class Workflow:
             )
 
             if not isautoml:
+                # Reset timeout timer by clearing old status history for restarted jobs
+                delete_dnn_status(job_id, automl=False)
+                logger.info(f"Cleared status history for restarted job {job_id} to reset timeout timer")
                 # Get the correct ActionPipeline and monitor status
                 network_config = read_network_config(network)
                 action_pipeline_name = network_config["api_params"]["actions_pipe"].get(action, "")
-                if network in MEDICAL_NETWORK_ARCHITECT:
-                    action_pipeline_name = "monai_" + action_pipeline_name
-                elif network in MEDICAL_AUTOML_ARCHITECT:
-                    action_pipeline_name = "medical_automl_" + action_pipeline_name
                 if action_pipeline_name:
                     action_pipeline = ACTIONS_TO_FUNCTIONS[action_pipeline_name]
 
