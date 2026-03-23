@@ -50,6 +50,8 @@ class OptimConfig:
     )
     lr: float = FLOAT_FIELD(
         value=2e-4,
+        valid_min=0.0,
+        valid_max=0.01,
         math_cond="> 0.0",
         display_name="learning rate",
         description="The initial learning rate for training the model, excluding the backbone.",
@@ -57,6 +59,8 @@ class OptimConfig:
     )
     lr_backbone: float = FLOAT_FIELD(
         value=2e-5,
+        valid_min=0.0,
+        valid_max=0.001,
         math_cond="> 0.0",
         display_name="learning rate - backbone",
         description="The initial learning rate for training the backbone.",
@@ -64,6 +68,8 @@ class OptimConfig:
     )
     lr_linear_proj_mult: float = FLOAT_FIELD(
         value=0.1,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="learning rate - linear projection",
         description="The initial learning rate for training the linear projection layer.",
@@ -71,6 +77,8 @@ class OptimConfig:
     )
     momentum: float = FLOAT_FIELD(
         value=0.9,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="momentum - AdamW",
         description="The momentum for the AdamW optimizer.",
@@ -78,6 +86,8 @@ class OptimConfig:
     )
     weight_decay: float = FLOAT_FIELD(
         value=1e-4,
+        valid_min=0.0,
+        valid_max=0.1,
         math_cond="> 0.0",
         display_name="weight decay",
         description="The weight decay coefficient.",
@@ -106,6 +116,8 @@ class OptimConfig:
     )
     lr_step_size: int = INT_FIELD(
         value=40,
+        valid_min=1,
+        valid_max=10000,
         math_cond="> 0",
         display_name="learning rate step size",
         description="The number of steps to decrease the learning rate in the StepLR.",
@@ -113,6 +125,8 @@ class OptimConfig:
     )
     lr_decay: float = FLOAT_FIELD(
         value=0.1,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="learning rate decay",
         description="The decreasing factor for the learning rate scheduler.",
@@ -187,4 +201,23 @@ class DDTrainExpConfig(TrainConfig):
             "A True value instructs train to recompute in backward pass to save GPU memory, "
             "rather than storing activations."
         ),
+    )
+    verbose: bool = BOOL_FIELD(
+        value=False,
+        display_name="enable verbose logs",
+        description=(
+            "Flag to enable printing of detailed learning rate scaling from the optimizer."
+        )
+    )
+    input_width: Optional[int] = INT_FIELD(
+        value=None,
+        description="Width of the input image tensor.",
+        display_name="input width",
+        valid_min=1,
+    )
+    input_height: Optional[int] = INT_FIELD(
+        value=None,
+        description="Height of the input image tensor.",
+        display_name="input height",
+        valid_min=1,
     )

@@ -36,6 +36,19 @@ from nvidia_tao_core.config.common.common_config import (
     CalibrationConfig
 )
 from nvidia_tao_core.config.common.prune_config import PruneConfig
+from nvidia_tao_core.config.common.quantization import ModelQuantizationConfig
+
+
+@dataclass
+class QuantCalibrationDataset:
+    """Quantization calibration dataset config."""
+
+    images_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to the directory containing calibration images.",
+        display_name="calibration images directory"
+    )
 
 
 @dataclass
@@ -290,6 +303,10 @@ class OCRNetAugmentationConfig:
 class OCRNetDatasetConfig:
     """Dataset config."""
 
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for quantization calibration dataset.",
+    )
     train_dataset_dir: Optional[List[str]] = LIST_FIELD(
         arrList=None,
         default_value=[],
@@ -394,6 +411,12 @@ class OCRNetTrainExpConfig(TrainConfig):
         default_value="ddp",
         description="The distributed strategy for multi-gpu training.",
         display="distributed_strategy"
+    )
+    use_distributed_sampler: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Use distributed sampler for multi-GPU training",
+        display="use_distributed_sampler"
     )
     model_ema: bool = BOOL_FIELD(
         value=False,
@@ -596,6 +619,10 @@ class ExperimentConfig(CommonExperimentConfig):
     gen_trt_engine: OCRNetGenTrtEngineExpConfig = DATACLASS_FIELD(
         OCRNetGenTrtEngineExpConfig(),
         description="Configurable parameters for the TensorRT engine generation.",
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters for model quantization.",
     )
 
     def __post_init__(self):

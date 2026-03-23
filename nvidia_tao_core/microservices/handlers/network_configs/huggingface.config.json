@@ -1,0 +1,37 @@
+{
+    "api_params": {
+        "dataset_type": "vlm",
+        "recursive_dataset_file_download": true,
+        "actions": ["inference"],
+        "formats": ["default", "raw"],
+        "accepted_ds_intents": ["inference"],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "inference": "inference"
+        }
+    },
+
+    "data_sources": {
+        "inference": {
+            "inference.media": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": ""
+            }
+        }
+    },
+
+    "spec_params": {
+        "inference": {
+            "results_dir": "output_dir",
+            "model_path": "parent_model"
+        }
+    },
+
+    "metrics": {
+        "available_metrics": [],
+        "monitoring_metric": null
+    }
+}
+

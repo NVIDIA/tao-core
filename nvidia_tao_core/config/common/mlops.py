@@ -31,6 +31,7 @@ class WandBConfig:
     enable: bool = BOOL_FIELD(value=True)
     project: str = STR_FIELD(value="TAO Toolkit")
     entity: Optional[str] = STR_FIELD(value="")
+    group: Optional[str] = STR_FIELD(value="")
     tags: List[str] = LIST_FIELD(arrList=["tao-toolkit"])
     reinit: bool = BOOL_FIELD(value=False)
     sync_tensorboard: bool = BOOL_FIELD(value=False)

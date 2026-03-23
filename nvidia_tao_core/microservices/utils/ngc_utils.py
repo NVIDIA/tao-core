@@ -50,6 +50,31 @@ class ErrorResponse:
         self.ok = False
 
 
+def send_ngc_api_request_without_retry(
+        endpoint,
+        requests_method,
+        request_body,
+        json=False,
+        ngc_key="",
+        accept_encoding="identity"):
+    """Send NGC API requests without retries"""
+    headers = {"Authorization": f"Bearer {ngc_key}"}
+    if accept_encoding:
+        headers['Accept-Encoding'] = accept_encoding
+    if requests_method == "POST":
+        if json:
+            headers['accept'] = 'application/json'
+            headers['Content-Type'] = 'application/json'
+        response = requests.post(url=endpoint, data=request_body, headers=headers, timeout=TIMEOUT)
+    elif requests_method == "GET":
+        response = requests.get(url=endpoint, headers=headers, timeout=TIMEOUT)
+    elif requests_method == "DELETE":
+        response = requests.delete(url=endpoint, headers=headers, timeout=TIMEOUT)
+    else:
+        raise ValueError(f"Unsupported request method: {requests_method}")
+    return response
+
+
 @retry_method(response=True)
 def send_ngc_api_request(endpoint, requests_method, request_body, json=False, ngc_key="", accept_encoding="identity"):
     """Send NGC API requests with token refresh, retries, and timeout handling"""
@@ -119,7 +144,7 @@ def get_user_info(ngc_key: str, accept_encoding: str = "identity") -> requests.R
     endpoint = "https://api.ngc.nvidia.com/v2/users/me"
 
     try:
-        response = send_ngc_api_request(
+        response = send_ngc_api_request_without_retry(
             endpoint=endpoint,
             requests_method="GET",
             request_body={},
@@ -253,13 +278,13 @@ def upload_model(org_name, team_name, handler_metadata, source_files, ngc_key, j
     workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
     cs_instance, _ = create_cs_instance(workspace_metadata)
     jobs_root = get_jobs_root(handler_metadata.get("user_id"), org_name=org_name)
-    local_dir = os.path.join(jobs_root, "publish_model_artifacts")
+    local_dir = os.path.join(jobs_root, f"publish_model_artifacts_{job_id}")
     if not os.path.exists(local_dir):
         os.makedirs(local_dir, exist_ok=True)
     for source_file in source_files:
         cloud_path = source_file[len(workspace_identifier):]
         artifact_name = os.path.basename(cloud_path[:-1] if cloud_path[-1] == '/' else cloud_path)
-        local_path = os.path.join(jobs_root, "publish_model_artifacts", artifact_name)
+        local_path = os.path.join(local_dir, artifact_name)
         cs_instance.download_file(cloud_path, local_path)
 
     target_version = f"{org_name}/{team_name}/{network}:{job_action}_{job_id}_{epoch_number}"
@@ -441,7 +466,7 @@ def get_org_products(user_id, org_name):
         org_metadata = response.json().get("organizations", {})
         product_enablements = org_metadata.get("productEnablements", [])
         for product_enablement in product_enablements:
-            if product_enablement.get("productName", "") in ("TAO", "MAXINE"):
+            if product_enablement.get("productName", "") == "TAO":
                 products.append(product_enablement.get("productName"))
     return products
 

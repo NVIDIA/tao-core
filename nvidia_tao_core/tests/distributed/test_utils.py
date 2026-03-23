@@ -44,19 +44,21 @@ def test_is_master_node_node_rank_env(node_rank):
         assert is_master_node() is True
 
 
-@patch("torch.distributed")
-def test_is_master_node_pytorch(mock_dist):
+def test_is_master_node_pytorch():
     """Test is_master_node with PyTorch distributed setup."""
-    mock_dist.is_available.return_value = True
-    mock_dist.is_initialized.return_value = True
+    pytest.importorskip("torch", reason="PyTorch not installed")
 
-    # Test non-master node
-    mock_dist.get_rank.return_value = 1
-    assert is_master_node() is False
+    with patch("torch.distributed") as mock_dist:
+        mock_dist.is_available.return_value = True
+        mock_dist.is_initialized.return_value = True
 
-    # Test master node
-    mock_dist.get_rank.return_value = 0
-    assert is_master_node() is True
+        # Test non-master node
+        mock_dist.get_rank.return_value = 1
+        assert is_master_node() is False
+
+        # Test master node
+        mock_dist.get_rank.return_value = 0
+        assert is_master_node() is True
 
 
 def test_is_master_node_mpi():

@@ -24,6 +24,7 @@ import logging
 
 from nvidia_tao_core.microservices.utils.automl_utils import update_automl_details_metadata
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
+    BACKEND,
     get_handler_metadata,
     get_handler_type,
     get_jobs_root,
@@ -34,18 +35,39 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     update_handler_with_jobs_info,
     get_automl_controller_info
 )
+from nvidia_tao_core.microservices.enum_constants import Backend
 from nvidia_tao_core.microservices.utils.handler_utils import Code, decrypt_handler_metadata
 from .docker_images import DOCKER_IMAGE_MAPPER
-from nvidia_tao_core.microservices.utils.job_utils.executor import (
-    JobExecutor,
-    StatefulSetExecutor
-)
+from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
 from nvidia_tao_core.microservices.utils.log_monitor_service import start_monitoring_job, stop_monitoring_job
 
 # TODO Make sure the image name is current docker tag of the API
 image = DOCKER_IMAGE_MAPPER["API"]
 
 logger = logging.getLogger(__name__)
+
+
+def get_automl_param(automl_settings, param_name, default_value=None):
+    """Get AutoML parameter with backward compatibility for nested structure.
+
+    Args:
+        automl_settings (dict): AutoML settings dictionary
+        param_name (str): Parameter name to retrieve
+        default_value: Default value if parameter not found
+
+    Returns:
+        Parameter value from either flat structure or nested algorithm_specific_params
+    """
+    # First check flat structure (backward compatibility)
+    if param_name in automl_settings:
+        return automl_settings.get(param_name, default_value)
+
+    # Then check nested structure
+    algo_params = automl_settings.get('algorithm_specific_params', {})
+    if isinstance(algo_params, dict) and param_name in algo_params:
+        return algo_params.get(param_name, default_value)
+
+    return default_value
 
 
 def _normalize_automl_hyperparameters(automl_hyperparameters):
@@ -83,7 +105,7 @@ class AutoMLHandler:
 
     @staticmethod
     def start(user_id, org_name, experiment_id, job_id, handler_metadata, name="",
-              platform_id="", retain_checkpoints_for_resume=False, timeout_minutes=60):
+              backend_details=None, retain_checkpoints_for_resume=False, timeout_minutes=60):
         """Starts an AutoML job by executing `automl_start.py` with the provided parameters.
 
         Args:
@@ -93,30 +115,36 @@ class AutoMLHandler:
             job_id (str): Unique identifier for the AutoML job.
             handler_metadata (dict): Metadata containing AutoML configuration settings.
             name (str, optional): Name of the job. Defaults to "automl train job".
-            platform_id (str, optional): Platform identifier for execution. Defaults to "".
+            backend_details (dict, optional): Backend-specific execution details. Defaults to None.
             retain_checkpoints_for_resume (bool, optional): Whether to retain .pth
                 checkpoints for training resume. Defaults to False.
             timeout_minutes (int, optional): The job-specific timeout in minutes. If not specified, uses global timeout.
+            backend_type (str, optional): The backend type to use for the job. Defaults to None.
         """
         network = get_handler_type(handler_metadata)
         metric = handler_metadata.get("metric", "map")
         automl_settings = handler_metadata.get("automl_settings", {})
+        automl_metric = automl_settings.get("metric")
+        if automl_metric:
+            metric = automl_metric
         automl_algorithm = automl_settings.get("automl_algorithm", "Bayesian")
-        if automl_algorithm.lower() == "hyperband":
+        # Hyperband-like algorithms need checkpoint retention for resume
+        if automl_algorithm.lower() in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes"):
             retain_checkpoints_for_resume = True
+
         job_metadata = {
             "name": name,
             "id": job_id,
             "org_name": org_name,
             "parent_id": None,
-            "platform_id": platform_id,
+            "backend_details": backend_details,
             "action": "train",
             "created_on": datetime.now(tz=timezone.utc),
             "experiment_id": experiment_id,
             "status": "Pending",
             "job_details": {},
             "retain_checkpoints_for_resume": retain_checkpoints_for_resume,
-            "timeout_minutes": timeout_minutes
+            "timeout_minutes": timeout_minutes,
         }
         root = os.path.join(get_jobs_root(user_id, org_name), job_id)
         if not os.path.exists(root):
@@ -124,13 +152,12 @@ class AutoMLHandler:
 
         if not name:
             name = "automl train job"
-        automl_max_recommendations = automl_settings.get("automl_max_recommendations", 20)
         automl_delete_intermediate_ckpt = automl_settings.get("automl_delete_intermediate_ckpt", True)
-        automl_R = automl_settings.get("automl_R", 27)
-        automl_nu = automl_settings.get("automl_nu", 3)
-        epoch_multiplier = automl_settings.get("epoch_multiplier", 1)
         automl_hyperparameters = automl_settings.get("automl_hyperparameters", "[]")
         override_automl_disabled_params = automl_settings.get("override_automl_disabled_params", False)
+
+        # Get algorithm-specific parameters as JSON
+        algorithm_specific_params = json.dumps(automl_settings.get("algorithm_specific_params", {}))
 
         write_job_metadata(job_id, job_metadata)
         update_handler_with_jobs_info(job_metadata, experiment_id, job_id, "experiments")
@@ -157,41 +184,61 @@ class AutoMLHandler:
             f'--experiment_id={experiment_id} '
             f'--resume=False '
             f'--automl_algorithm={automl_algorithm} '
-            f'--automl_max_recommendations={automl_max_recommendations} '
             f'--automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} '
-            f'--automl_R={automl_R} '
-            f'--automl_nu={automl_nu} '
             f'--metric={metric} '
-            f'--epoch_multiplier={epoch_multiplier} '
+            f"--algorithm_specific_params='{algorithm_specific_params}' "
             f"--automl_hyperparameters='{_normalize_automl_hyperparameters(automl_hyperparameters)}' "
             f'--override_automl_disabled_params={override_automl_disabled_params} '
             f'--retain_checkpoints_for_resume={retain_checkpoints_for_resume} '
             f'--timeout_minutes={timeout_minutes} '
             f"--decrypted_workspace_metadata='{json.dumps(decrypted_workspace_metadata, default=str)}'"
         )
-        if platform_id:
-            run_command = f"{run_command} --platform_id={platform_id}"
+        if backend_details:
+            run_command = f"{run_command} --backend_details='{json.dumps(backend_details)}'"
 
         cluster_num_gpus = int(os.getenv('NUM_GPU_PER_NODE', default='0'))
         docker_env_vars = {
             "NUM_GPU_PER_NODE": str(cluster_num_gpus),
             "TAO_LOG_LEVEL": os.getenv('TAO_LOG_LEVEL', default='DEBUG')
         }
+
+        # Pass SSH configuration to brain job for SLURM access
+        # SSH keys are mounted at /root/.ssh in the brain container
+        docker_env_vars["SSH_KEY_PATH"] = "/root/.ssh/id_ed25519"
+
+        docker_env_vars.update(handler_metadata.get("docker_env_vars", {}))
         logger.debug(
             f"[AUTOML-START] Creating brain job {job_id}: "
             f"Setting NUM_GPU_PER_NODE={cluster_num_gpus} in brain container env (no actual GPUs assigned)"
         )
 
-        JobExecutor().create_job(
-            org_name,
-            job_id,
-            image,
-            run_command,
-            num_gpu=0,  # Brain job gets NO actual GPUs (runs in app pod)
-            docker_env_vars=docker_env_vars,  # But knows cluster GPU count via env var
-            automl_brain=True,
-            automl_exp_job=False
-        )
+        try:
+            ExecutionHandler.create_job_with_handler(
+                org_name=org_name,
+                job_name=job_id,
+                image=image,
+                command=run_command,
+                workspace_metadata=decrypted_workspace_metadata,
+                num_gpu=0,
+                docker_env_vars=docker_env_vars,
+                automl_brain=True,
+                automl_exp_job=False,
+                backend_details=backend_details
+            )
+        except Exception as e:
+            logger.error(f"[AUTOML-START] Failed to create brain job {job_id}: {e}")
+            from nvidia_tao_core.microservices.utils.stateless_handler_utils import update_job_status
+            update_job_status(experiment_id, job_id, status="Error", kind="experiments")
+            job_metadata["status"] = "Error"
+            job_metadata["job_details"] = {
+                job_id: {
+                    "detailed_status": {
+                        "message": f"AutoML brain job creation failed: {e}"
+                    }
+                }
+            }
+            write_job_metadata(job_id, job_metadata)
+            raise
 
         # Start log monitoring for AutoML brain job (server-side)
         backend = os.getenv("BACKEND", "local-k8s")
@@ -261,9 +308,8 @@ class AutoMLHandler:
             logger.debug(f"[AUTOML-STOP] Deleting AutoML brain K8s job: job_id={job_id}")
 
             # Stop log monitoring for brain job
-            backend = os.getenv("BACKEND", "local-k8s")
             logger.debug(f"[AUTOML] Stopping brain job {job_id}, checking if should stop log monitoring")
-            if backend in ("local-k8s", "local-docker"):
+            if BACKEND in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER):
                 try:
                     logger.info(f"[AUTOML] Stopping log monitoring for AutoML brain job {job_id}")
                     stop_monitoring_job(job_id)
@@ -274,11 +320,12 @@ class AutoMLHandler:
                         f"{type(e).__name__}: {e}"
                     )
 
-            JobExecutor().delete_job(job_id, use_ngc=False)
+            ExecutionHandler.delete_job_with_handler(job_id)
             logger.debug(f"[AUTOML-STOP] Brain K8s job deleted, waiting for pod termination: job_id={job_id}")
 
             # Wait for actual K8s Job/Pod to terminate (synchronous)
-            job_terminated = JobExecutor().wait_for_job_termination(job_id, timeout_seconds=120)
+            handler = ExecutionHandler.create_handler(backend=BACKEND, job_id=job_id)
+            job_terminated = handler.wait_for_job_termination(job_id, timeout_seconds=120) if handler else False
             if not job_terminated:
                 logger.warning(f"[AUTOML-STOP] Timeout waiting for brain termination: job_id={job_id}")
             else:
@@ -323,17 +370,20 @@ class AutoMLHandler:
                         f"[AUTOML-STOP] Deleting recommendation statefulset: "
                         f"rec_job_id={recommendation_job_id}"
                     )
-                    StatefulSetExecutor().delete_statefulset(recommendation_job_id)
+                    ExecutionHandler.delete_with_handler(recommendation_job_id)
                     logger.debug(
                         f"[AUTOML-STOP] Waiting for recommendation pod termination: "
                         f"rec_job_id={recommendation_job_id}"
                     )
 
-                    # Wait for actual K8s StatefulSet/Pod to terminate (synchronous)
-                    sts_terminated = StatefulSetExecutor().wait_for_statefulset_termination(
-                        recommendation_job_id, timeout_seconds=120
+                    rec_handler = ExecutionHandler.create_handler(
+                        backend=BACKEND, job_id=recommendation_job_id
                     )
-                    if not sts_terminated:
+                    job_terminated = (
+                        rec_handler.wait_for_termination(recommendation_job_id, timeout_seconds=120)
+                        if rec_handler else False
+                    )
+                    if not job_terminated:
                         logger.warning(
                             f"[AUTOML-STOP] Timeout waiting for recommendation termination: "
                             f"rec_job_id={recommendation_job_id}"
@@ -381,7 +431,8 @@ class AutoMLHandler:
         return Code(200, {"message": f"job {job_id} cancelled"})
 
     @staticmethod
-    def resume(user_id, org_name, experiment_id, job_id, handler_metadata, name="", platform_id="", timeout_minutes=60):
+    def resume(user_id, org_name, experiment_id, job_id, handler_metadata, name="",
+               backend_details=None, timeout_minutes=60):
         """Resumes a previously stopped AutoML job by re-running `automl_start.py` with the resume flag.
 
         Args:
@@ -391,7 +442,7 @@ class AutoMLHandler:
             job_id (str): Unique identifier for the AutoML job.
             handler_metadata (dict): Metadata containing AutoML configuration settings.
             name (str, optional): Name of the job. Defaults to "automl train job".
-            platform_id (str, optional): Platform identifier for execution. Defaults to "".
+            backend_details (dict, optional): Backend-specific execution details. Defaults to None.
         """
         logger.debug(
             f"[AUTOML-RESUME] Starting AutoML resume operation: job_id={job_id}, "
@@ -410,21 +461,21 @@ class AutoMLHandler:
         network = get_handler_type(handler_metadata)
         metric = handler_metadata.get("metric", "map")
         automl_settings = handler_metadata.get("automl_settings", {})
+        automl_metric = automl_settings.get("metric")
+        if automl_metric:
+            metric = automl_metric
         automl_algorithm = automl_settings.get("automl_algorithm", "Bayesian")
-        automl_max_recommendations = automl_settings.get("automl_max_recommendations", 20)
         automl_delete_intermediate_ckpt = automl_settings.get("automl_delete_intermediate_ckpt", True)
-        automl_R = automl_settings.get("automl_R", 27)
-        automl_nu = automl_settings.get("automl_nu", 3)
-        epoch_multiplier = automl_settings.get("epoch_multiplier", 1)
         automl_hyperparameters = automl_settings.get("automl_hyperparameters", "[]")
         override_automl_disabled_params = automl_settings.get("override_automl_disabled_params", False)
 
         logger.debug(
             f"[AUTOML-RESUME] AutoML settings: job_id={job_id}, network={network}, "
             f"algorithm={automl_algorithm}, metric={metric}, "
-            f"max_recommendations={automl_max_recommendations}, R={automl_R}, nu={automl_nu}, "
-            f"epoch_multiplier={epoch_multiplier}, timeout_minutes={timeout_minutes}"
+            f"automl_settings={automl_settings}, timeout_minutes={timeout_minutes}"
         )
+        # Get algorithm-specific parameters as JSON
+        algorithm_specific_params = json.dumps(automl_settings.get("algorithm_specific_params", {}))
 
         workspace_id = handler_metadata.get("workspace")
         logger.debug(f"[AUTOML-RESUME] Loading workspace metadata: job_id={job_id}, workspace_id={workspace_id}")
@@ -437,7 +488,8 @@ class AutoMLHandler:
         retain_checkpoints_for_resume = (
             job_metadata.get("retain_checkpoints_for_resume", False) if job_metadata else False
         )
-        if automl_algorithm.lower() == "hyperband":
+        # Hyperband-like algorithms need checkpoint retention for resume
+        if automl_algorithm.lower() in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes"):
             retain_checkpoints_for_resume = True
             logger.debug(
                 f"[AUTOML-RESUME] Hyperband algorithm detected, "
@@ -464,35 +516,59 @@ class AutoMLHandler:
             f'--experiment_id={experiment_id} '
             f'--resume=True '
             f'--automl_algorithm={automl_algorithm} '
-            f'--automl_max_recommendations={automl_max_recommendations} '
             f'--automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} '
-            f'--automl_R={automl_R} '
-            f'--automl_nu={automl_nu} '
             f'--metric={metric} '
-            f'--epoch_multiplier={epoch_multiplier} '
+            f"--algorithm_specific_params='{algorithm_specific_params}' "
             f"--automl_hyperparameters='{_normalize_automl_hyperparameters(automl_hyperparameters)}' "
             f'--override_automl_disabled_params={override_automl_disabled_params} '
             f'--retain_checkpoints_for_resume={retain_checkpoints_for_resume} '
             f'--timeout_minutes={timeout_minutes} '
             f"--decrypted_workspace_metadata='{json.dumps(decrypted_workspace_metadata, default=serialize_object)}'"
         )
-        if platform_id:
-            run_command = f"{run_command} --platform_id={platform_id}"
-            logger.debug(f"[AUTOML-RESUME] Platform ID specified: job_id={job_id}, platform_id={platform_id}")
-
+        if backend_details:
+            run_command = f"{run_command} --backend_details='{json.dumps(backend_details)}'"
         # CRITICAL: Pass NUM_GPU_PER_NODE to resumed brain job for GPU validation
         cluster_num_gpus = int(os.getenv('NUM_GPU_PER_NODE', default='0'))
         docker_env_vars = {
             "NUM_GPU_PER_NODE": str(cluster_num_gpus),
             "TAO_LOG_LEVEL": os.getenv('TAO_LOG_LEVEL', default='INFO')
         }
+
+        # Pass SSH configuration to brain job for SLURM access
+        # SSH keys are mounted at /root/.ssh in the brain container
+        docker_env_vars["SSH_KEY_PATH"] = "/root/.ssh/id_ed25519"
+
+        docker_env_vars.update(handler_metadata.get("docker_env_vars", {}))
         logger.debug(
             f"[AUTOML-RESUME] Creating K8s job for AutoML brain: job_id={job_id}, num_gpu=0, "
             f"NUM_GPU_PER_NODE={cluster_num_gpus} in env"
         )
-        JobExecutor().create_job(
-            org_name, job_id, image, run_command, num_gpu=0,
-            docker_env_vars=docker_env_vars,
-            automl_brain=True, automl_exp_job=False
-        )
+        try:
+            ExecutionHandler.create_job_with_handler(
+                org_name=org_name,
+                job_name=job_id,
+                image=image,
+                command=run_command,
+                workspace_metadata=decrypted_workspace_metadata,
+                num_gpu=0,
+                docker_env_vars=docker_env_vars,
+                automl_brain=True,
+                automl_exp_job=False,
+                backend_details=backend_details
+            )
+        except Exception as e:
+            logger.error(f"[AUTOML-RESUME] Failed to create brain job {job_id}: {e}")
+            from nvidia_tao_core.microservices.utils.stateless_handler_utils import update_job_status
+            update_job_status(experiment_id, job_id, status="Error", kind="experiments")
+            resumed_metadata = get_handler_job_metadata(job_id) or {}
+            resumed_metadata["status"] = "Error"
+            resumed_metadata["job_details"] = {
+                job_id: {
+                    "detailed_status": {
+                        "message": f"AutoML brain job creation failed on resume: {e}"
+                    }
+                }
+            }
+            write_job_metadata(job_id, resumed_metadata)
+            raise
         logger.debug(f"[AUTOML-RESUME] AutoML resume operation completed: job_id={job_id}")

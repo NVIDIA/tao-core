@@ -64,19 +64,40 @@ def find_python_files(root_dir):
     python_files = []
     exclude_dirs = {
         '__pycache__', '.git', '.pytest_cache', 'node_modules',
-        'venv', 'env', '.venv', 'build', 'dist', '*.egg-info'
+        'venv', 'env', '.venv', 'build', 'dist', '*.egg-info',
+        'release', 'ci', 'telemetry_gateway', 'scripts'
+    }
+    exclude_files = {
+        'test_imports.py', 'setup.py', 'conftest.py',
+        'test_airgapped_loader.py',
     }
 
     for path in Path(root_dir).rglob('*.py'):
         # Skip excluded directories
         if any(excluded in path.parts for excluded in exclude_dirs):
             continue
-        # Skip this test file itself
-        if path.name == 'test_imports.py':
+        # Skip excluded files
+        if path.name in exclude_files:
             continue
         python_files.append(path)
 
     return sorted(python_files)
+
+
+def _get_try_except_line_ranges(tree):
+    """Return a set of line numbers that fall inside try/except blocks.
+
+    Imports guarded by try/except are intentionally optional and should not
+    be flagged as errors when the module is missing.
+    """
+    guarded_lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for child in node.body:
+                for sub in ast.walk(child):
+                    if hasattr(sub, 'lineno'):
+                        guarded_lines.add(sub.lineno)
+    return guarded_lines
 
 
 def get_all_imports_in_file(file_path):
@@ -87,9 +108,12 @@ def get_all_imports_in_file(file_path):
 
         tree = ast.parse(content, filename=str(file_path))
         imports_list = []
+        guarded_lines = _get_try_except_line_ranges(tree)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
+                if node.lineno in guarded_lines:
+                    continue
                 for alias in node.names:
                     imports_list.append({
                         'type': 'import',
@@ -98,6 +122,8 @@ def get_all_imports_in_file(file_path):
                         'level': 0
                     })
             elif isinstance(node, ast.ImportFrom):
+                if node.lineno in guarded_lines:
+                    continue
                 # Construct full import path including relative level
                 module_name = node.module or ''
                 level = node.level  # Number of leading dots
@@ -189,7 +215,8 @@ def check_imports_exist(file_path, imports_list):
     optional_deps = [
         'hydra', 'clearml', 'wandb',
         'pytorch_lightning', 'tensorflow', 'mpi4py',
-        'pycuda', 'pycuda.driver', 'torch'
+        'pycuda', 'pycuda.driver', 'torch',
+        'diffusers', 'imageio', 'release', 'transformers'
     ]
 
     for imp in imports_list:

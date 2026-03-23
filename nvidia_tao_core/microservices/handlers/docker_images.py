@@ -16,18 +16,17 @@
 import os
 
 DOCKER_IMAGE_MAPPER = {
-    "MAXINE_DLDK": os.getenv('IMAGE_MAXINE_DLDK', default='nvcr.io/0544357712065245/maxine-dldk-trainer_ram:latest'),
-    "MAXINE_DEPLOY": os.getenv(
-        'IMAGE_MAXINE_DEPLOY',
-        default='nvcr.io/0544357712065245/maxine-dldk-trainer_ram:latest'
-    ),
     "TAO_PYTORCH": os.getenv('IMAGE_TAO_PYTORCH', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt'),
     "TAO_DEPLOY": os.getenv('IMAGE_TAO_DEPLOY', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-deploy'),
     "": os.getenv('IMAGE_DEFAULT', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt'),  # Default
     "API": os.getenv('IMAGE_API', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-api'),
     "TAO_DS": os.getenv('IMAGE_TAO_DS', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-data-services'),
-    "COSMOS_RL": os.getenv('IMAGE_COSMOS_RL', default='nvcr.io/nvstaging/tao/cosmos_rl_ram_dev:latest'),
     "VILA": os.getenv('IMAGE_VILA', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-vila'),
+    "COSMOS_RL": os.getenv('IMAGE_COSMOS_RL', default='nvcr.io/ea-tlt/tao_ea/cosmos_rl:latest'),
+    "HUGGINGFACE": os.getenv(
+        'IMAGE_HUGGINGFACE',
+        os.getenv('IMAGE_TAO_PYTORCH', 'nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt')
+    ),
     "tensorboard": os.getenv('IMAGE_TAO_PYTORCH', default='nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt')
 }
 

@@ -311,6 +311,14 @@ class BaseInferenceMicroserviceServer(ABC):
             )
             self.save_model_state(loaded=False, loading=False, error=str(e))
 
+            # Fatal error during data preparation — request auto-deletion so
+            # the container doesn't stay running forever in an error state.
+            logger.info("Requesting auto-deletion due to initialization failure")
+            self.request_auto_deletion(
+                reason="initialization_failed",
+                error=str(e)
+            )
+
     def save_model_state(self, loaded: bool = False, loading: bool = False, load_time: float = None, error: str = None):
         """Save model loading state to file
 
@@ -356,15 +364,20 @@ class BaseInferenceMicroserviceServer(ABC):
             return safe_load_file(state_file)
         return {}
 
-    def request_auto_deletion(self):
+    def request_auto_deletion(self, reason: str = "idle_timeout_exceeded", error: str = None):
         """Request auto-deletion by sending status callback to TAO API
 
-        This method is called when idle timeout is exceeded. It uses the existing
+        This method is called when idle timeout is exceeded or when a fatal error
+        occurs during initialization/model loading. It uses the existing
         status_callback mechanism from cloud_handlers/utils.py to send the status
         update to the API (which has DB access via save_dnn_status).
+
+        Args:
+            reason: Reason for requesting deletion (idle_timeout_exceeded, initialization_failed, model_loading_failed)
+            error: Optional error message for failure-triggered deletions
         """
         try:
-            logger.info("Requesting auto-deletion via status callback")
+            logger.info("Requesting auto-deletion via status callback (reason: %s)", reason)
 
             # Import here to avoid circular dependencies
             from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
@@ -375,10 +388,12 @@ class BaseInferenceMicroserviceServer(ABC):
                 "status": "AUTO_DELETION_REQUESTED",
                 "idle_time_minutes": self.get_idle_time_minutes(),
                 "idle_timeout_minutes": self.idle_timeout_minutes,
-                "reason": "idle_timeout_exceeded",
+                "reason": reason,
                 "last_request_time": self.last_request_time.isoformat(),
                 "timestamp": datetime.now().isoformat()
             }
+            if error:
+                status_data["error"] = error
 
             # Convert to JSON string as expected by status_callback
             data_string = json.dumps(status_data)
@@ -480,6 +495,11 @@ class BaseInferenceMicroserviceServer(ABC):
                     details={"error": "Model loading returned False", "phase": "model_loading"}
                 )
                 self.save_model_state(loaded=False, loading=False, error="Model loading failed")
+                logger.info("Requesting auto-deletion due to model loading failure")
+                self.request_auto_deletion(
+                    reason="model_loading_failed",
+                    error="Model loading returned False"
+                )
 
         except Exception as e:
             error_msg = f"Failed to load model: {e}"
@@ -497,6 +517,11 @@ class BaseInferenceMicroserviceServer(ABC):
                 details={"error": str(e), "phase": "model_loading"}
             )
             self.save_model_state(loaded=False, loading=False, error=str(e))
+            logger.info("Requesting auto-deletion due to model loading exception")
+            self.request_auto_deletion(
+                reason="model_loading_failed",
+                error=str(e)
+            )
 
     def load_model(self, **kwargs) -> bool:
         """Start model loading in background thread

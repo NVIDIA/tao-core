@@ -17,18 +17,20 @@ import os
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from .base_executor import BaseExecutor
+from nvidia_tao_core.microservices.handlers.execution_handlers.kubernetes_handler import KubernetesHandler
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import BACKEND
 
 if os.getenv("BACKEND"):  # To see if the container is going to be used for Service pods or network jobs
-    from nvidia_tao_core.microservices.utils.mongo_utils import (
-        mongo_secret,
-        mongo_operator_enabled,
-        mongo_namespace
-    )
+    from nvidia_tao_core.microservices.utils import mongo_utils
 
 
-class DeploymentExecutor(BaseExecutor):
+class DeploymentExecutor(KubernetesHandler):
     """Handles Kubernetes Deployment operations for Tensorboard"""
+
+    def __init__(self):
+        """Initialize the deployment executor"""
+        super().__init__()
+        self.backend = BACKEND
 
     def create_tensorboard_deployment(self, deployment_name, image, command, logs_image, logs_command, replicas):
         """Creates Tensorboard Deployment"""
@@ -62,19 +64,19 @@ class DeploymentExecutor(BaseExecutor):
             value="none")
         mongo_secret_env = client.V1EnvVar(
             name="MONGOSECRET",
-            value=mongo_secret  # pylint: disable=E0606
+            value=mongo_utils.mongo_secret  # pylint: disable=E0606
         )
         mongo_operator_enabled_env = client.V1EnvVar(
             name="MONGO_OPERATOR_ENABLED",
-            value=str(mongo_operator_enabled).lower()
+            value=str(mongo_utils.mongo_operator_enabled).lower()
         )
         mongo_namespace_env = client.V1EnvVar(
             name="NAMESPACE",
-            value=mongo_namespace
+            value=mongo_utils.mongo_namespace
         )
         backend_env = client.V1EnvVar(
             name="BACKEND",
-            value=self.backend,
+            value=self.backend.value,
         )
         image_pull_secret = os.getenv('IMAGEPULLSECRET', default='imagepullsecret')
         tb_container = client.V1Container(

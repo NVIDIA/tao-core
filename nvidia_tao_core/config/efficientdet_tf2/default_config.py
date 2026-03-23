@@ -294,7 +294,7 @@ class ExperimentConfig:
     model_name: Optional[str] = STR_FIELD(value=None)
     num_gpus: int = INT_FIELD(value=1)
     gpu_ids: List[int] = LIST_FIELD(arrList=[0])
-    results_dir: str = STR_FIELD(value="/results")
+    results_dir: str = STR_FIELD(value="")
     encryption_key: Optional[str] = STR_FIELD(value=None)
     train: TrainConfig = DATACLASS_FIELD(TrainConfig())
     model: ModelConfig = DATACLASS_FIELD(ModelConfig())

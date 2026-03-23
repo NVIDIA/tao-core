@@ -3,6 +3,7 @@
         "dataset_type": "segmentation",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -21,6 +22,7 @@
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -131,6 +133,120 @@
             },
             "dataset.test.img_dir": {
                 "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            }
+        },
+        "quantize": {
+            "dataset.train.img_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.train.type": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "type",
+                    "default": "coco",
+                    "mapping": {
+                        "coco_panoptic": "coco_panoptic",
+                        "*": "coco"
+                    }
+                }
+            },
+            "dataset.label_map": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_format": {
+                    "coco_panoptic": "label_map_panoptic.json",
+                    "*": "label_map.json"
+                }
+            },
+            "dataset.train.instance_json": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations.json",
+                "conditional": {
+                    "metadata_key": "type",
+                    "not_equals": "coco_panoptic"
+                }
+            },
+            "dataset.train.panoptic_json": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations_panoptic.json",
+                "conditional": {
+                    "metadata_key": "type",
+                    "equals": "coco_panoptic"
+                }
+            },
+            "dataset.train.panoptic_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path",
+                "conditional": {
+                    "metadata_key": "type",
+                    "equals": "coco_panoptic"
+                }
+            },
+            "dataset.val.img_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.type": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "type",
+                    "default": "coco",
+                    "mapping": {
+                        "coco_panoptic": "coco_panoptic",
+                        "*": "coco"
+                    }
+                }
+            },
+            "dataset.val.instance_json": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json",
+                "conditional": {
+                    "metadata_key": "type",
+                    "not_equals": "coco_panoptic"
+                }
+            },
+            "dataset.val.panoptic_json": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations_panoptic.json",
+                "conditional": {
+                    "metadata_key": "type",
+                    "equals": "coco_panoptic"
+                }
+            },
+            "dataset.val.panoptic_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path",
+                "conditional": {
+                    "metadata_key": "type",
+                    "equals": "coco_panoptic"
+                }
+            },
+            "dataset.test.img_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
                 "multiple_sources": false,
                 "path": "images.tar.gz",
                 "transform": "handle_tar_path"
@@ -360,6 +476,11 @@
             "model.backbone.pretrained_weights": "{'link': 'https://github.com/SwinTransformer/storage/releases/download/v1.0.8/swin_tiny_patch4_window7_224_22k.pth', 'destination_path': '/ptm/mask2former/swin_tiny_patch4_window7_224_22k/swin_tiny_patch4_window7_224_22k.pth'}",
             "train.resume_training_checkpoint_path": "resume_model"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "evaluate.checkpoint": "parent_model",
@@ -402,6 +523,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

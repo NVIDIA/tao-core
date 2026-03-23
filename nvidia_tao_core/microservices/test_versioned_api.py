@@ -146,13 +146,16 @@ class TestVersionedAPI(unittest.TestCase):
 
     def test_v1_workspace_endpoints(self):
         """Test that v1 workspace endpoints are accessible."""
-        # Test workspace list endpoint (placeholder)
+        # Test workspace list endpoint
         response = self.make_request_with_timeout('get', '/api/v1/orgs/test-org/workspaces', timeout=5)
         self.assertNotEqual(response.status_code, 404)
-        # Should be placeholder response
+        # Should be valid response (either placeholder with 'message' or actual data with 'workspaces')
         if response.status_code == 200:
             data = json.loads(response.data)
-            self.assertIn('message', data)
+            self.assertTrue(
+                'message' in data or 'workspaces' in data,
+                f"Expected 'message' or 'workspaces' in response, got: {data}"
+            )
 
     def test_v1_dataset_endpoints(self):
         """Test that v1 dataset endpoints are accessible."""

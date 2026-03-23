@@ -20,7 +20,7 @@ import logging
 from flask import Blueprint, request, jsonify, make_response
 
 from nvidia_tao_core.microservices.decorators import disk_space_check
-from .schemas import LoginReq, LoginRsp, ErrorRsp, NVCFReq
+from .schemas import LoginReq, LoginRsp, ErrorRsp
 from nvidia_tao_core.microservices.utils.auth_utils import credentials, authentication, access_control, metrics
 from nvidia_tao_core.microservices.utils.mongo_utils import MongoHandler
 from nvidia_tao_core.microservices.constants import AIRGAP_DEFAULT_USER
@@ -160,17 +160,6 @@ def auth():
     authorization_parts = authorization.split()
     if len(authorization_parts) == 2 and authorization_parts[0].lower() == 'bearer':
         token = authorization_parts[1]
-    if os.getenv("HOST_PLATFORM", "") == "NVCF":
-        schema = NVCFReq()
-        try:
-            request_metadata = schema.dump(schema.load(request.get_json(force=True)))
-        except Exception:
-            logger.error("Validation of schema failed")
-            metadata = {"error_desc": "Validation of schema failed", "error_code": 2}
-            schema = ErrorRsp()
-            response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-            return response
-        token = request_metadata.get("ngc_key", "")
 
     # if token is not found, try to get it from basic auth for special endpoints
     if not token:

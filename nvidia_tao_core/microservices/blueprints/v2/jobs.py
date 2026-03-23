@@ -50,13 +50,111 @@ from .schemas import (
     LoadAirgappedExperimentsReq,
     LoadAirgappedExperimentsRsp,
     MessageOnly,
-    PublishModel
+    PublishModel,
+    JobEventsRsp
 )
 
 logger = logging.getLogger(__name__)
 
 # v2 Jobs Blueprint - URL prefix will be set during registration
 jobs_bp_v2 = Blueprint('jobs_v2', __name__, template_folder='templates')
+
+
+def _create_virtual_dataset_for_direct_paths(user_id, org_name, request_dict):
+    """Create a minimal virtual dataset record in MongoDB for direct path-based dataset jobs.
+
+    When users provide dataset paths instead of a dataset_id, we create a lightweight
+    dataset shell that allows all downstream job machinery to work unchanged.
+
+    Args:
+        user_id (str): The authenticated user's ID.
+        org_name (str): The organization name.
+        request_dict (dict): The deserialized request containing path fields.
+
+    Returns:
+        str: The newly created virtual dataset_id (UUID).
+    """
+    import uuid as uuid_module
+    from datetime import datetime, timezone
+    from nvidia_tao_core.microservices.utils.stateless_handler_utils import write_handler_metadata
+    from nvidia_tao_core.microservices.handlers.mongo_handler import MongoHandler
+    from nvidia_tao_core.microservices.utils.basic_utils import get_user_datasets, get_dataset_actions
+
+    dataset_id = str(uuid_module.uuid4())
+    dataset_type = request_dict.get("dataset_type", "object_detection")
+    dataset_format = request_dict.get("dataset_format")
+    if not dataset_format:
+        from nvidia_tao_core.microservices.utils.core_utils import read_network_config
+        nc = read_network_config(dataset_type)
+        formats = nc.get("api_params", {}).get("formats", [])
+        dataset_format = formats[0] if formats else "custom"
+
+    # Try to resolve valid actions for this type+format combination
+    default_actions = [
+        "auto_label", "augment", "analyze", "validate_annotations",
+        "validate_images", "dataset_convert", "generate"
+    ]
+    try:
+        actions = get_dataset_actions(dataset_type, dataset_format)
+    except Exception:
+        actions = default_actions
+
+    # Infer use_for (intent) from which URI fields are populated
+    use_for = []
+    if request_dict.get("train_dataset_uris"):
+        use_for.append("training")
+    if request_dict.get("eval_dataset_uri"):
+        use_for.append("evaluation")
+    if request_dict.get("inference_dataset_uri"):
+        use_for.append("testing")
+
+    # Extract cloud_file_path from the primary URI so get_source_root() resolves correctly.
+    # For aws://bucket/path/to/data, cloud_file_path = "path/to/data" (everything after bucket/).
+    cloud_file_path = ""
+    train_uris = request_dict.get("train_dataset_uris") or []
+    primary_uri = (train_uris[0] if train_uris else
+                   request_dict.get("eval_dataset_uri") or
+                   request_dict.get("inference_dataset_uri") or
+                   request_dict.get("calibration_dataset_uri"))
+    if primary_uri and "://" in primary_uri:
+        _, path_after_protocol = primary_uri.split("://", 1)
+        parts = path_after_protocol.split("/", 1)
+        if len(parts) > 1:
+            cloud_file_path = parts[1]
+
+    now = datetime.now(tz=timezone.utc).isoformat()
+    metadata = {
+        "id": dataset_id,
+        "user_id": user_id,
+        "org_name": org_name,
+        "type": dataset_type,
+        "format": dataset_format,
+        "status": "pull_complete",
+        "created_on": now,
+        "last_modified": now,
+        "name": "Direct-path dataset",
+        "shared": False,
+        "actions": actions,
+        "use_for": use_for,
+        "train_dataset_uris": request_dict.get("train_dataset_uris"),
+        "eval_dataset_uri": request_dict.get("eval_dataset_uri"),
+        "inference_dataset_uri": request_dict.get("inference_dataset_uri"),
+        "calibration_dataset_uri": request_dict.get("calibration_dataset_uri"),
+        "workspace": request_dict.get("workspace"),
+        "cloud_file_path": cloud_file_path,
+        "base_experiment_ids": request_dict.get("base_experiment_ids", []),
+    }
+
+    write_handler_metadata(dataset_id, metadata, "dataset")
+
+    # Register the dataset with the user
+    mongo_users = MongoHandler("tao", "users")
+    datasets = get_user_datasets(user_id, mongo_users)
+    datasets.append(dataset_id)
+    mongo_users.upsert({'id': user_id}, {'id': user_id, 'datasets': datasets})
+
+    logger.info("Created virtual dataset %s for direct-path job (user=%s, org=%s)", dataset_id, user_id, org_name)
+    return dataset_id
 
 
 @jobs_bp_v2.route('/orgs/<org_name>/jobs', methods=['POST'])
@@ -138,6 +236,29 @@ def job_create(org_name):
             schema = ErrorRsp()
             schema_dict = schema.dump(schema.load(metadata))
             return make_response(jsonify(schema_dict), 400)
+
+        # Handle direct dataset paths (no dataset_id provided)
+        if not dataset_id:
+            has_paths = any([
+                request_dict.get("train_dataset_uris"),
+                request_dict.get("eval_dataset_uri"),
+                request_dict.get("inference_dataset_uri"),
+                request_dict.get("calibration_dataset_uri"),
+            ])
+            if has_paths:
+                dataset_id = _create_virtual_dataset_for_direct_paths(user_id, org_name, request_dict)
+            else:
+                metadata = {
+                    "error_desc": (
+                        "Either 'dataset_id' or at least one dataset path field "
+                        "('train_dataset_uris', 'eval_dataset_uri', 'inference_dataset_uri', "
+                        "'calibration_dataset_uri') is required for dataset jobs."
+                    ),
+                    "error_code": 6
+                }
+                schema = ErrorRsp()
+                schema_dict = schema.dump(schema.load(metadata))
+                return make_response(jsonify(schema_dict), 400)
     parent_job_id = request_dict.get('parent_job_id', None)
     if parent_job_id:
         parent_job_id = str(parent_job_id)
@@ -155,7 +276,7 @@ def job_create(org_name):
     name = request_dict.get('name', '')
     description = request_dict.get('description', '')
     num_gpu = request_dict.get('num_gpu', -1)
-    platform_id = request_dict.get('platform_id', None)
+    backend_details = request_dict.get('backend_details', None)
     retain_checkpoints_for_resume = request_dict.get('retain_checkpoints_for_resume', None)
     early_stop_epoch = request_dict.get('early_stop_epoch', None)
     timeout_minutes = request_dict.get('timeout_minutes', 60)
@@ -185,6 +306,100 @@ def job_create(org_name):
             schema_dict = schema.dump(schema.load(metadata))
             return make_response(jsonify(schema_dict), 400)
 
+        # Validate dataset paths if using direct paths (new approach)
+        train_dataset_uris = request_dict.get("train_dataset_uris")
+        eval_dataset_uri = request_dict.get("eval_dataset_uri")
+        inference_dataset_uri = request_dict.get("inference_dataset_uri")
+        calibration_dataset_uri = request_dict.get("calibration_dataset_uri")
+
+        if any([train_dataset_uris, eval_dataset_uri, inference_dataset_uri, calibration_dataset_uri]):
+            # Get backend type for validation
+            backend_type = backend_details.get("backend_type") if backend_details else None
+
+            # Validate all dataset paths against backend restrictions
+            from nvidia_tao_core.microservices.utils.dataset_uri_validator import validate_all_dataset_uris
+            validation_metadata = {
+                "train_dataset_uris": train_dataset_uris,
+                "eval_dataset_uri": eval_dataset_uri,
+                "inference_dataset_uri": inference_dataset_uri,
+                "calibration_dataset_uri": calibration_dataset_uri
+            }
+            is_valid, error_msg = validate_all_dataset_uris(validation_metadata, backend_type)
+            if not is_valid:
+                metadata = {"error_desc": error_msg, "error_code": 100}
+                schema = ErrorRsp()
+                schema_dict = schema.dump(schema.load(metadata))
+                return make_response(jsonify(schema_dict), 400)
+
+            # Verify workspace access if specified (required for cloud paths)
+            workspace_id = request_dict.get("workspace")
+            if workspace_id:
+                from nvidia_tao_core.microservices.utils.stateless_handler_utils import check_read_access
+                if not check_read_access(user_id, org_name, workspace_id, kind="workspaces"):
+                    metadata = {
+                        "error_desc": f"Workspace {workspace_id} not found or access denied",
+                        "error_code": 101
+                    }
+                    schema = ErrorRsp()
+                    schema_dict = schema.dump(schema.load(metadata))
+                    return make_response(jsonify(schema_dict), 404)
+
+            # Dataset structure validation (checks for required files like annotations.json)
+            skip_validation = request_dict.get("skip_dataset_validation", False)
+            logger.info(
+                f"Dataset structure validation: skip={skip_validation}, "
+                f"has_train={bool(train_dataset_uris)}, has_eval={bool(eval_dataset_uri)}"
+            )
+
+            if not skip_validation:
+                from nvidia_tao_core.microservices.utils.runtime_dataset_validator import (
+                    validate_all_dataset_uris_structure
+                )
+
+                network_arch = request_dict.get("network_arch")
+                logger.info(f"Running dataset structure validation with network_arch={network_arch}")
+                if not network_arch:
+                    metadata = {
+                        "error_desc": "network_arch is required for dataset validation",
+                        "error_code": 102
+                    }
+                    schema = ErrorRsp()
+                    schema_dict = schema.dump(schema.load(metadata))
+                    return make_response(jsonify(schema_dict), 400)
+
+                # Prepare metadata for validation
+                validation_metadata = {
+                    "train_dataset_uris": train_dataset_uris,
+                    "eval_dataset_uri": eval_dataset_uri,
+                    "inference_dataset_uri": inference_dataset_uri,
+                    "calibration_dataset_uri": calibration_dataset_uri,
+                    "dataset_format": request_dict.get("dataset_format"),
+                    "dataset_type": request_dict.get("dataset_type"),
+                    "workspace": request_dict.get("workspace")
+                }
+
+                is_valid, error_msg, validation_details = validate_all_dataset_uris_structure(
+                    validation_metadata,
+                    network_arch,
+                    skip_validation=False
+                )
+
+                if not is_valid:
+                    # Return detailed validation error
+                    metadata = {
+                        "error_desc": error_msg,
+                        "error_code": 103,
+                        "validation_details": validation_details
+                    }
+                    schema = ErrorRsp()
+                    schema_dict = schema.dump(schema.load(metadata))
+                    return make_response(jsonify(schema_dict), 400)
+
+                logger.info(
+                    f"Dataset validation passed for experiment: "
+                    f"{validation_details.get('message')}"
+                )
+
         experiment_response = ExperimentHandler.create_experiment(user_id, org_name, request_dict)
         if experiment_response.code != 200:
             schema = ErrorRsp()
@@ -192,8 +407,13 @@ def job_create(org_name):
             log_api_error(user_id, org_name, schema_dict, DataMonitorLogTypeEnum.tao_experiment, action="creation")
             return make_response(jsonify(schema_dict), experiment_response.code)
         experiment_id = experiment_response.data.get("id")
+
+        # Note: Job deduplication happens later in job_run() based on the experiment's existing jobs
     # Get automl_settings if present (only for experiment jobs)
     automl_settings = request_dict.get('automl_settings') if kind == 'experiment' else None
+
+    # Get force_create parameter
+    force_create = request_dict.get('force_create', False)
 
     # Get job response
     job_response = JobHandler.job_run(
@@ -203,12 +423,13 @@ def job_create(org_name):
         action,
         kind,
         specs=specs, name=name, description=description, num_gpu=num_gpu,
-        platform_id=platform_id,
+        backend_details=backend_details,
         job_id=experiment_id if kind == 'experiment' else None,
         retain_checkpoints_for_resume=retain_checkpoints_for_resume,
         early_stop_epoch=early_stop_epoch,
         timeout_minutes=timeout_minutes,
-        automl_settings=automl_settings
+        automl_settings=automl_settings,
+        force_create=force_create
     )
     if job_response.code != 200:
         schema = ErrorRsp()
@@ -257,7 +478,23 @@ def job_create(org_name):
         tags = dataset.get('tags', [])
         combined_data = {"tags": tags} | job
     schema_dict = schema.dump(schema.load(combined_data))
-    return make_response(jsonify(schema_dict), 201)
+
+    # Determine appropriate status code:
+    # - 201 for newly created job
+    # - 200 for existing job returned due to deduplication
+    if "already exists" in job_response.message:
+        status_code = 200
+        # Add informational message to response
+        schema_dict['_message'] = (
+            "A job with the same parameters already exists. "
+            "Returning existing job. "
+            "To create a new job anyway, set 'force_create': true in the request body."
+        )
+        schema_dict['_duplicate'] = True
+    else:
+        status_code = 201
+
+    return make_response(jsonify(schema_dict), status_code)
 
 
 @jobs_bp_v2.route('/orgs/<org_name>/jobs/<job_id>', methods=['GET'])
@@ -1208,7 +1445,7 @@ def specs_schema(org_name):
     datasets = request.args.getlist('datasets')
     job_id = request.args.get('job_id')
     base_experiment_id = request.args.get('base_experiment_id')
-    response = make_response("missing network, base_experiment_id or job_id", 400)  # default response
+    response = None
     if base_experiment_id:
         message = validate_uuid(experiment_id=base_experiment_id)
         if message:
@@ -1251,6 +1488,11 @@ def specs_schema(org_name):
     elif network:
         response = SpecHandler.get_spec_schema_without_handler_id(
             org_name, network, dataset_format, action, datasets)
+    else:
+        metadata = {"error_desc": "missing network, base_experiment_id or job_id", "error_code": 1}
+        schema = ErrorRsp()
+        schema_dict = schema.dump(schema.load(metadata))
+        return make_response(jsonify(schema_dict), 400)
     if response.code != 200:
         schema = ErrorRsp()
         schema_dict = schema.dump(schema.load(response.data))
@@ -1861,7 +2103,7 @@ def job_resume(org_name, job_id):
     name = request_schema_data.get('name', '')
     description = request_schema_data.get('description', '')
     num_gpu = request_schema_data.get('num_gpu', -1)
-    platform_id = request_schema_data.get('platform_id', None)
+    backend_details = request_schema_data.get('backend_details', None)
     timeout_minutes = request_schema_data.get('timeout_minutes', 60)
     if parent_job_id:
         parent_job_id = str(parent_job_id)
@@ -1876,8 +2118,8 @@ def job_resume(org_name, job_id):
         name=name,
         description=description,
         num_gpu=num_gpu,
-        platform_id=platform_id,
-        timeout_minutes=timeout_minutes
+        timeout_minutes=timeout_minutes,
+        backend_details=backend_details
     )
     schema = MessageOnly() if response.code == 200 else ErrorRsp()
     schema_dict = schema.dump(schema.load(response.data))
@@ -2307,6 +2549,112 @@ def job_logs(org_name, job_id):
     schema = ErrorRsp()
     schema_dict = schema.dump(schema.load(response.data))
     return make_response(jsonify(schema_dict), 400)
+
+
+@jobs_bp_v2.route('/orgs/<org_name>/jobs/<job_id>:events', methods=['GET'])
+def job_events(org_name, job_id):
+    """Get all job status events.
+
+    ---
+    get:
+      tags:
+      - JOB
+      summary: Get all job status events
+      description: Returns all status event lines for a given job
+      parameters:
+      - name: org_name
+        in: path
+        description: Org Name
+        required: true
+        schema:
+          type: string
+          maxLength: 255
+          pattern: '^[a-zA-Z0-9_-]+$'
+      - name: job_id
+        in: path
+        description: Job ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+          maxLength: 36
+      - name: automl_experiment_number
+        in: query
+        description: Optional filter to retrieve events from specific autoML experiment
+        required: false
+        schema:
+          type: string
+      responses:
+        200:
+          description: Returned Job Events
+          content:
+            application/json:
+              schema: JobEventsRsp
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/Access-Control-Allow-Origin'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+        400:
+          description: Invalid request (e.g. invalid job ID)
+          content:
+            application/json:
+              schema: ErrorRsp
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/Access-Control-Allow-Origin'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+        404:
+          description: Job not exist or events not found.
+          content:
+            application/json:
+              schema: ErrorRsp
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/Access-Control-Allow-Origin'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+    """
+    message = validate_uuid(job_id=job_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRsp()
+        schema_dict = schema.dump(schema.load(metadata))
+        return make_response(jsonify(schema_dict), 400)
+    handler_id, kind = get_handler_id_and_kind(job_id)
+    if kind not in ['experiment', 'dataset']:
+        metadata = {
+            "error_desc": (f"Invalid job type for job_id {job_id}. "
+                           "Job must be associated with an experiment or dataset."),
+            "error_code": 1
+        }
+        schema = ErrorRsp()
+        schema_dict = schema.dump(schema.load(metadata))
+        return make_response(jsonify(schema_dict), 400)
+    experiment_id = None
+    dataset_id = None
+    if kind == 'experiment':
+        experiment_id = handler_id
+    else:
+        dataset_id = handler_id
+    response = JobHandler.get_job_events(
+        org_name,
+        experiment_id if kind == 'experiment' else dataset_id,
+        job_id,
+        kind,
+        request.args.get('automl_experiment_number', "0")
+    )
+    if response.code == 200:
+        schema = JobEventsRsp()
+        response_data = {
+            "job_id": job_id,
+            "events": response.data
+        }
+        return make_response(jsonify(schema.dump(schema.load(response_data))), 200)
+    schema = ErrorRsp()
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)
 
 
 @jobs_bp_v2.route('/orgs/<org_name>/jobs/<job_id>:log_update', methods=['POST'])

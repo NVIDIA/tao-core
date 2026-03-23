@@ -29,6 +29,18 @@ from nvidia_tao_core.config.utils.types import (
 
 
 @dataclass
+class QuantCalibrationDataset:
+    """Quantization calibration dataset config."""
+
+    images_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to the directory containing calibration images.",
+        display_name="calibration images directory"
+    )
+
+
+@dataclass
 class DNDatasetConvertConfig:
     """Dataset Convert config."""
 
@@ -379,4 +391,8 @@ class DepthNetDatasetConfig:
     infer_dataset: BaseDepthNetDatasetConfig = DATACLASS_FIELD(
         BaseDepthNetDatasetConfig(),
         description="Configurable parameters to construct the infer dataset for a DepthNet experiment.",
+    )
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for quantization calibration dataset.",
     )

@@ -63,5 +63,5 @@ class ExperimentConfig:
     dataset: DataConfig = DATACLASS_FIELD(DataConfig())
     color_aug: ColorAugmentationConfig = DATACLASS_FIELD(ColorAugmentationConfig())
     results_dir: Optional[str] = STR_FIELD(
-        "/results", default_value="/results"
+        "", default_value=""
     )

@@ -465,7 +465,7 @@ class CommonExperimentConfig:
         description="Key for encrypting model checkpoints"
     )
     results_dir: Optional[str] = STR_FIELD(
-        value="/results",
+        value="",
         display_name="Results directory",
         description="""
         Path to where all the assets generated from a task are stored.

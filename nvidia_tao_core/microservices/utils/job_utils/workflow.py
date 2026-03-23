@@ -112,11 +112,12 @@ class Job(PrioritizedItem, IdedItem):
     kind: str = field(compare=False, default=None)
     specs: dict = field(compare=False, default=None)
     num_gpu: int = field(compare=False, default=0)
-    platform_id: uuid.UUID = field(compare=False, default=uuid.uuid4())
+    backend_details: dict = field(compare=False, default=None)
     workflow_status: str = field(compare=False, default=None)
     retain_checkpoints_for_resume: bool = field(compare=False, default=False)
     early_stop_epoch: int = field(compare=False, default=None)
     timeout_minutes: int = field(compare=False, default=None)
+    backend_type: str = field(compare=False, default=None)
 
 
 def dependency_check(job_context, dependency):
@@ -135,8 +136,49 @@ def execute_job(job_context):
     """
     # CRITICAL FIX: Pre-assign GPUs BEFORE starting async thread
     # This prevents race condition where job is dequeued before we discover GPUs aren't available
+    # NOTE: Skip GPU pre-assignment for SLURM jobs as SLURM manages its own GPU scheduling
     from nvidia_tao_core.microservices.utils.stateless_handler_utils import BACKEND
-    if BACKEND == "local-docker":
+    from nvidia_tao_core.microservices.enum_constants import Backend
+
+    # Check if this job is using a SLURM workspace
+    is_slurm_job = False
+    try:
+        from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
+            get_handler_job_metadata
+        )
+        job_metadata = get_handler_job_metadata(str(job_context.id))
+        if job_metadata:
+            # Try to get workspace_id - could be in either field
+            workspace_id = job_metadata.get("workspace_id") or job_metadata.get("platform_id")
+
+            # If not in job metadata, check handler/experiment metadata
+            if not workspace_id:
+                handler_id = job_metadata.get("experiment_id") or job_metadata.get("handler_id")
+                kind = job_metadata.get("kind", "experiment")
+                if handler_id:
+                    handler_metadata = get_handler_metadata(handler_id, kind + "s")
+                    if handler_metadata:
+                        workspace_id = handler_metadata.get("workspace") or handler_metadata.get("platform_id")
+
+            if workspace_id:
+                workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+                if workspace_metadata:
+                    # Check both top-level and nested cloud_type (for robustness)
+                    cloud_type = workspace_metadata.get("cloud_type")
+                    if not cloud_type:
+                        # Fallback: check inside cloud_specific_details
+                        cloud_type = workspace_metadata.get("cloud_specific_details", {}).get("cloud_type")
+
+                    if cloud_type == "slurm":
+                        is_slurm_job = True
+                        logger.debug(
+                            f"[WORKFLOW] Job {job_context.id} is using SLURM workspace, "
+                            f"skipping GPU pre-assignment (SLURM manages its own scheduling)"
+                        )
+    except Exception as e:
+        logger.debug(f"[WORKFLOW] Could not check workspace cloud_type for job {job_context.id}: {e}")
+
+    if BACKEND == Backend.LOCAL_DOCKER and not is_slurm_job:
         # Check if this job needs GPUs
         gpu_dependency = None
         for dep in job_context.dependencies:
@@ -248,7 +290,11 @@ def write_job(job):
 
 
 def check_for_timed_out_jobs():
-    """Check all running jobs and AutoML experiments for timeouts and terminate timed out ones"""
+    """Check all running jobs and AutoML experiments for timeouts and terminate timed out ones
+
+    Note: SLURM status syncing happens automatically in get_job_status() for each job,
+    so no separate sync loop is needed here.
+    """
     # Check if timeout monitoring is enabled
     timeout_monitoring_enabled = os.getenv("JOB_TIMEOUT_MONITORING_ENABLED", "true").lower() in ("true", "1")
     if not timeout_monitoring_enabled:
@@ -366,8 +412,9 @@ def scan_for_jobs():
             for dep in job.dependencies:
                 if dep.type == "automl":
                     recommendation_id = dep.name
-                    # Map recommendation_id to actual job_id
-                    automl_experiment_job_id = get_automl_experiment_job_id(job.id, recommendation_id)
+                    # Map recommendation_id to actual job_id using parent_id (brain job ID)
+                    brain_job_id = job.parent_id if job.parent_id else job.id
+                    automl_experiment_job_id = get_automl_experiment_job_id(brain_job_id, recommendation_id)
                     break
 
             for dep in job.dependencies:
@@ -389,15 +436,14 @@ def scan_for_jobs():
                 # Handle GPU validation failures (e.g., requested GPUs > available GPUs)
                 if "GPUs requested count" in message and "is greater than" in message:
                     update_job_status(job.handler_id, job.id, status="Error", kind=job.kind + "s")
-                    # Update detailed status with both status and message
                     detailed_status_message = {
                         "status": "FAILURE",
                         "message": message
                     }
                     if automl_experiment_job_id:
-                        # For AutoML experiments, update both the specific experiment and the brain job
+                        brain_job_id = job.parent_id if job.parent_id else job.id
                         update_job_message(
-                            job.handler_id, job.id, kind=job.kind + "s", message=detailed_status_message,
+                            job.handler_id, brain_job_id, kind=job.kind + "s", message=detailed_status_message,
                             automl_expt_job_id=automl_experiment_job_id, update_automl_expt=True
                         )
                     update_job_message(job.handler_id, job.id, kind=job.kind + "s", message=detailed_status_message)
@@ -407,9 +453,13 @@ def scan_for_jobs():
             # Update detailed status message in response when appropriate message is available
             pending_reason_message = ''.join(pending_reason_message.rsplit(" and, ", 1))
             if automl_experiment_job_id:
-                # For AutoML experiments, update the specific experiment
+                brain_job_id = job.parent_id if job.parent_id else job.id
+                if pending_reason_message:
+                    pending_status = {"status": "PENDING", "message": pending_reason_message}
+                else:
+                    pending_status = pending_reason_message
                 update_job_message(
-                    job.handler_id, job.id, kind=job.kind + "s", message=pending_reason_message,
+                    job.handler_id, brain_job_id, kind=job.kind + "s", message=pending_status,
                     automl_expt_job_id=automl_experiment_job_id, update_automl_expt=True
                 )
             else:
@@ -497,9 +547,10 @@ def process_inference_microservice_auto_deletions():
                     f"Idle time: {job_info.get('idle_time_minutes', 0):.2f} minutes"
                 )
 
-                # Call the actual deletion (has DB access here in workflow)
                 result = InferenceMicroserviceHandler.stop_inference_microservice(
-                    job_id, auto_deletion=True
+                    job_id,
+                    auto_deletion=True,
+                    reason=job_info.get("reason", "unknown"),
                 )
 
                 if result.code == 200:
@@ -568,7 +619,7 @@ class Workflow:
             name = job_dict.get("name")
             org_name = job_dict.get("org_name")
             specs = job_dict.get("specs")
-            platform_id = job_dict.get("platform_id")
+            backend_details = job_dict.get("backend_details")
             retain_checkpoints_for_resume = job_dict.get("retain_checkpoints_for_resume", False)
             early_stop_epoch = job_dict.get("early_stop_epoch", None)
             timeout_minutes = job_dict.get("timeout_minutes", None)
@@ -625,10 +676,10 @@ class Workflow:
                 name=name,
                 num_gpu=num_gpu,
                 specs=specs,
-                platform_id=platform_id,
                 retain_checkpoints_for_resume=retain_checkpoints_for_resume,
                 early_stop_epoch=early_stop_epoch,
-                timeout_minutes=timeout_minutes
+                timeout_minutes=timeout_minutes,
+                backend_details=backend_details
             )
             # If job has yet to be executed, skip monitoring
             if still_exists(job_context):
@@ -686,10 +737,10 @@ class Workflow:
                                 kind,
                                 name=name,
                                 num_gpu=num_gpu,
-                                platform_id=platform_id,
                                 retain_checkpoints_for_resume=retain_checkpoints_for_resume,
                                 early_stop_epoch=early_stop_epoch,
-                                timeout_minutes=timeout_minutes
+                                timeout_minutes=timeout_minutes,
+                                backend_details=backend_details
                             )
                             automl_context.dependencies = deps
                             from nvidia_tao_core.microservices.handlers.actions import AutoMLPipeline

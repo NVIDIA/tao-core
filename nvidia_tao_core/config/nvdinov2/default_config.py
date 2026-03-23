@@ -81,7 +81,7 @@ class DataPathFormat:
     """Dataset Path experiment config."""
 
     images_dir: str = STR_FIELD(
-        value="/data",
+        value="",
         default_value="",
         description="Path to images directory for dataset",
         display_name="image directory"

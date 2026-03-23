@@ -803,8 +803,8 @@ class ExperimentConfig:
         display_name="Encryption key"
     )
     results_dir: str = STR_FIELD(
-        value="/results",
-        default_value="/results",
+        value="",
+        default_value="",
         description="Results directory",
         display_name="Results directory"
     )

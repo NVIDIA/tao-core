@@ -3,6 +3,7 @@
         "dataset_type": "visual_changenet_segment",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -12,12 +13,14 @@
             "default"
         ],
         "accepted_ds_intents": [
-            "training"
+            "training",
+            "calibration"
         ],
         "image": "TAO_PYTORCH",
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -63,6 +66,18 @@
                 "path": ""
             }
         },
+        "quantize": {
+            "dataset.segment.root_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
+            },
+            "dataset.segment.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
+            }
+        },
         "evaluate": {
             "dataset.segment.root_dir": {
                 "source": "train_datasets",
@@ -99,6 +114,12 @@
             "train.pretrained_model_path": "ptm_if_no_resume_model",
             "model.backbone.pretrained_backbone_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model"
+        },
+        "quantize": {
+            "results_dir": "output_dir",
+            "task": "segment",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
         },
         "evaluate": {
             "results_dir": "output_dir",
@@ -149,6 +170,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

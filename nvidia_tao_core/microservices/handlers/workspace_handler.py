@@ -33,9 +33,12 @@ from nvidia_tao_core.microservices.utils.cloud_utils import create_cs_instance
 from nvidia_tao_core.microservices.utils.dataset_utils import validate_dataset
 from nvidia_tao_core.microservices.utils.encrypt_utils import NVVaultEncryption
 from nvidia_tao_core.microservices.utils.handler_utils import Code
+from nvidia_tao_core.microservices.utils.deduplication_utils import find_duplicate_workspace
 
 if os.getenv("BACKEND"):
     from .mongo_handler import MongoHandler
+else:
+    MongoHandler = None  # type: ignore
 
 from ..utils.basic_utils import (
     get_org_workspaces,
@@ -164,12 +167,30 @@ class WorkspaceHandler:
             request_dict (dict): Workspace request following WorkspaceRspSchema.
                 - "type" (required)
                 - "format" (required)
+                - "force_create" (optional): If False, return existing workspace with same params
 
         Returns:
             Code:
-                - 209 with metadata if creation is successful.
+                - 200 with metadata if creation is successful or duplicate found.
                 - 400 if there are errors in the request.
         """
+        # Check for duplicate workspace unless force_create is True
+        force_create = request_dict.get("force_create", False)
+        cloud_type = request_dict.get("cloud_type", "")
+        cloud_specific_details = request_dict.get("cloud_specific_details", {})
+
+        if not force_create and cloud_type and cloud_specific_details:
+            duplicate_id = find_duplicate_workspace(user_id, org_name, cloud_type, cloud_specific_details)
+            if duplicate_id:
+                # Return existing workspace
+                handler_metadata = resolve_metadata("workspace", duplicate_id)
+                if handler_metadata:
+                    logger.info(
+                        "Returning existing workspace %s for user %s with matching cloud config",
+                        duplicate_id, user_id
+                    )
+                    return Code(200, handler_metadata, "Workspace with same parameters already exists")
+
         workspace_id = str(uuid.uuid4())
         # Create metadata dict and create some initial folders
         metadata = {"id": workspace_id,
@@ -185,7 +206,17 @@ class WorkspaceHandler:
                     }
 
         encrypted_metadata = copy.deepcopy(metadata)
-
+        cloud_specific_details = encrypted_metadata.get("cloud_specific_details", {})
+        lepton_workspace_id = cloud_specific_details.get('lepton_workspace_id')
+        lepton_auth_token = cloud_specific_details.get('lepton_auth_token')
+        if lepton_workspace_id and lepton_auth_token:
+            try:
+                from nvidia_tao_core.microservices.handlers.execution_handlers.lepton_handler import LeptonHandler
+                lepton_handler = LeptonHandler(lepton_workspace_id, lepton_auth_token)
+                lepton_handler.api_client.info()
+            except Exception as e:
+                logger.error(f"Exception instantiating Lepton Handler: {e}")
+                return Code(400, {}, "Provided Lepton cloud credentials are invalid")
         # Encrypt Cloud details
         config_path = os.getenv("VAULT_SECRET_PATH", None)
         if encrypted_metadata["cloud_specific_details"]:
@@ -199,7 +230,7 @@ class WorkspaceHandler:
                         return Code(400, {}, "Vault service does not work, can't save cloud workspace")
 
         try:
-            if encrypted_metadata["cloud_type"] in ("aws", "azure"):
+            if encrypted_metadata["cloud_type"] in ("aws", "azure", "lepton"):
                 create_cs_instance(encrypted_metadata)
         except Exception as e:
             logger.error("Exception thrown in create workspace is %s", str(e))
@@ -267,11 +298,10 @@ class WorkspaceHandler:
                                     encryption.encrypt(cloud_value)
                                 )
 
-        if encrypted_metadata["cloud_type"] in ("aws", "azure"):
+        if encrypted_metadata["cloud_type"] in ("aws", "azure", "lepton"):
             try:
                 if "cloud_type" in request_dict.keys() or "cloud_specific_details" in request_dict.keys():
-                    if encrypted_metadata["cloud_type"] in ("aws", "azure"):
-                        create_cs_instance(encrypted_metadata)
+                    create_cs_instance(encrypted_metadata)
             except Exception as e:
                 logger.error("Exception thrown in update_workspace is %s", str(e))
                 logger.error(traceback.format_exc())

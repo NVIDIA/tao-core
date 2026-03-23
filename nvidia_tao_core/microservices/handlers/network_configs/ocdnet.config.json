@@ -3,6 +3,7 @@
         "dataset_type": "ocdnet",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "prune",
@@ -15,12 +16,14 @@
         ],
         "accepted_ds_intents": [
             "training",
-            "evaluation"
+            "evaluation",
+            "calibration"
         ],
         "image": "TAO_PYTORCH",
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "prune": "prune_with_spec",
             "retrain": "retrain",
@@ -86,6 +89,25 @@
                 "transform": "wrap_in_list"
             }
         },
+        "quantize": {
+            "dataset.train_dataset.data_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "train.tar.gz",
+                "transform": "wrap_in_list"
+            },
+            "dataset.validate_dataset.data_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "test.tar.gz",
+                "transform": "wrap_in_list"
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "train/img.tar.gz"
+            }
+        },
         "evaluate": {
             "dataset.validate_dataset.data_path": {
                 "source": "eval_dataset",
@@ -138,6 +160,10 @@
             "model.pretrained_model_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "evaluate.checkpoint": "parent_model",
@@ -186,6 +212,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

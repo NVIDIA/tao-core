@@ -44,15 +44,17 @@ from nvidia_tao_core.microservices.utils.handler_utils import (
 from nvidia_tao_core.microservices.utils.core_utils import (
     read_network_config,
 )
+from nvidia_tao_core.microservices.utils.deduplication_utils import find_duplicate_dataset
 
 if os.getenv("BACKEND"):
     from .mongo_handler import MongoHandler
+else:
+    MongoHandler = None  # type: ignore
 
 from ..utils.basic_utils import (
     get_org_datasets,
     get_user_datasets,
     get_dataset_actions,
-    handler_level_access_control
 )
 
 # Configure logging
@@ -129,12 +131,36 @@ class DatasetHandler:
             request_dict (dict): Dictionary containing dataset creation parameters.
                 - "type" (str): Required dataset type.
                 - "format" (str): Required dataset format.
+                - "force_create" (optional): If False, return existing dataset with same params
             dataset_id (str, optional): A predefined dataset ID. Defaults to None.
             from_ui (bool, optional): Flag indicating if the request is from UI. Defaults to False.
 
         Returns:
             Code: Response object containing status and metadata of the created dataset.
         """
+        # Check for duplicate dataset unless force_create is True
+        force_create = request_dict.get("force_create", False)
+        if not force_create:
+            dataset_params = {
+                "type": request_dict.get("type"),
+                "format": request_dict.get("format"),
+                "workspace": request_dict.get("workspace"),
+                "cloud_file_path": request_dict.get("cloud_file_path"),
+                "url": request_dict.get("url"),
+                "use_for": request_dict.get("use_for")
+            }
+            duplicate_id = find_duplicate_dataset(user_id, org_name, dataset_params)
+            if duplicate_id:
+                # Return existing dataset
+                handler_metadata = get_handler_metadata(duplicate_id, 'datasets')
+                if handler_metadata:
+                    handler_metadata = sanitize_handler_metadata(handler_metadata)
+                    logger.info(
+                        "Returning existing dataset %s for user %s with matching params",
+                        duplicate_id, user_id
+                    )
+                    return Code(200, handler_metadata, "Dataset with same parameters already exists")
+
         workspace_id = request_dict.get("workspace", None)
         if workspace_id and not check_read_access(user_id, org_name, workspace_id, kind="workspaces"):
             return Code(404, None, f"Workspace {workspace_id} not found")
@@ -163,7 +189,7 @@ class DatasetHandler:
 
         intention = request_dict.get("use_for", [])
         if ds_format in ("raw", "coco_raw") and intention:
-            if intention != ["testing"] and ds_type != "maxine_dataset":
+            if intention != ["testing"]:
                 msg = "raw or coco_raw's format should be associated with ['testing'] intent"
                 return Code(400, {}, msg)
 
@@ -204,9 +230,6 @@ class DatasetHandler:
                     "use_for": intention,
                     "base_experiment_ids": request_dict.get("base_experiment_ids", []),
                     }
-
-        if not handler_level_access_control(user_id, org_name, dataset_id, "datasets", handler_metadata=metadata):
-            return Code(403, {}, "Not allowed to work with this org")
 
         # Set status based on skip_validation flag
         skip_validation = request_dict.get("skip_validation", False)
@@ -298,8 +321,6 @@ class DatasetHandler:
             return Code(404, {}, "Dataset not found")
 
         user_id = metadata.get("user_id")
-        if not handler_level_access_control(user_id, org_name, dataset_id, "datasets", handler_metadata=metadata):
-            return Code(403, {}, "Not allowed to work with this org")
         if not check_write_access(user_id, org_name, dataset_id, kind="datasets"):
             return Code(404, {}, "Dataset not available")
         if request_dict.get("public", None):

@@ -154,7 +154,7 @@ class ExperimentConfig:
     )
     blur_aug: KernelFilterConfig = DATACLASS_FIELD(KernelFilterConfig())
     results_dir: Optional[str] = STR_FIELD(
-        "/results", default_value="/results"
+        "", default_value=""
     )
     cuda_blocking: bool = BOOL_FIELD(
         value=False,

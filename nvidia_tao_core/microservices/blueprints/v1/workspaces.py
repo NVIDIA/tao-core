@@ -27,7 +27,7 @@ from .schemas import (
     WorkspaceListRsp,
     WorkspaceRsp,
     ErrorRsp,
-    DatasetPathLst,
+    DatasetUriLst,
     MessageOnly,
     BulkOpsRsp,
     WorkspaceReq,
@@ -100,7 +100,7 @@ def workspace_list(org_name):
         required: false
         schema:
           type: string
-          enum: ["monai", "unet", "custom" ]
+          enum: ["unet", "custom"]
       - name: type
         in: query
         description: Optional type filter
@@ -248,7 +248,7 @@ def workspace_retrieve_datasets(org_name, workspace_id):
           description: Returned list of dataset paths within Workspace
           content:
             application/json:
-              schema: DatasetPathLst
+              schema: DatasetUriLst
           headers:
             Access-Control-Allow-Origin:
               $ref: '#/components/headers/Access-Control-Allow-Origin'
@@ -287,7 +287,7 @@ def workspace_retrieve_datasets(org_name, workspace_id):
     # Get schema
     schema = None
     if response.code == 200:
-        schema = DatasetPathLst()
+        schema = DatasetUriLst()
     else:
         schema = ErrorRsp()
     # Load metadata in schema and return

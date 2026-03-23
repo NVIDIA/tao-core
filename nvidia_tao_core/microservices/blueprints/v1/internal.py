@@ -22,7 +22,7 @@ from flask import Blueprint, request, jsonify, make_response
 from nvidia_tao_core.microservices.decorators import disk_space_check
 from nvidia_tao_core.microservices.utils.auth_utils import authentication
 from .schemas import ContainerJob, ContainerJobStatus, ErrorRsp, GpuDetails
-from nvidia_tao_core.microservices.utils.handler_utils import send_microservice_request
+from nvidia_tao_core.microservices.utils.handler_utils import send_statefulset_request
 from nvidia_tao_core.microservices.handlers.spec_handler import SpecHandler
 
 from nvidia_tao_core.microservices.handlers.container_handler import ContainerJobHandler as container_handler
@@ -110,7 +110,7 @@ def container_job_run():
         statefulset_replicas = job_dict.get("statefulset_replicas")
         if statefulset_replicas:  # proxy requests to all replicas from master
             for replica_index in range(1, statefulset_replicas):
-                send_microservice_request(
+                send_statefulset_request(
                     api_endpoint="post_action",
                     network=job_dict["neural_network_name"],
                     action=job_dict["action_name"],

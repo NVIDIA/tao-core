@@ -37,6 +37,7 @@ from nvidia_tao_core.config.common.common_config import (
     TrtConfig,
     CalibrationConfig
 )
+from nvidia_tao_core.config.common.quantization import ModelQuantizationConfig, QuantCalibrationDataset
 
 
 @dataclass
@@ -411,6 +412,10 @@ class SFDatasetSegmentConfig:
         description="Palette, be careful of label_transform, if norm then RGB value from 0~1, else 0~255",
         display_name="Palette"
     )
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for the quantization calibration dataset.",
+    )
 
 
 @dataclass
@@ -468,6 +473,18 @@ class SFTrainExpConfig(TrainConfig):
     )
     segment: SFTrainSegmentConfig = DATACLASS_FIELD(SFTrainSegmentConfig())
     tensorboard: Optional[TensorBoardLogger] = DATACLASS_FIELD(TensorBoardLogger())
+    use_distributed_sampler: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Use distributed sampler for multi-GPU training",
+        display_name="use_distributed_sampler"
+    )
+    sync_batchnorm: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable synchronized batch normalization for multi-GPU training",
+        display_name="sync_batchnorm"
+    )
 
     checkpointer: Optional[Dict[str, Any]] = None
     enable_lr_monitor: Optional[bool] = False
@@ -580,6 +597,10 @@ class ExperimentConfig(CommonExperimentConfig):
     inference: SFInferenceExpConfig = DATACLASS_FIELD(SFInferenceExpConfig())
     export: SFExportExpConfig = DATACLASS_FIELD(SFExportExpConfig())
     gen_trt_engine: SFGenTrtEngineExpConfig = DATACLASS_FIELD(SFGenTrtEngineExpConfig())
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters to run model quantization for a SegFormer experiment.",
+    )
 
     def __post_init__(self):
         """Set default model name for SegFormer."""

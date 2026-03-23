@@ -49,6 +49,8 @@ class OptimConfig:
     )
     lr: float = FLOAT_FIELD(
         value=0.00001,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="learning rate",
         description="The initial learning rate for training the model.",
@@ -56,6 +58,8 @@ class OptimConfig:
     )
     backbone_multiplier: float = FLOAT_FIELD(
         value=0.1,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="backbone learning rate multiplier",
         description="A multiplier for backbone learning rate.",
@@ -64,6 +68,8 @@ class OptimConfig:
     )
     momentum: float = FLOAT_FIELD(
         value=0.9,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="momentum - AdamW",
         description="The momentum for the AdamW optimizer.",
@@ -72,6 +78,8 @@ class OptimConfig:
     )
     weight_decay: float = FLOAT_FIELD(
         value=0.05,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="weight decay",
         description="The weight decay coefficient.",

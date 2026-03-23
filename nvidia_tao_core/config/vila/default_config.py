@@ -376,8 +376,8 @@ class ExperimentConfig:
     """Experiment config."""
 
     model_path: str = STR_FIELD(
-        value="/models/vila",
-        default_value="/models/vila",
+        value="",
+        default_value="",
         display_name="Pretrained model path",
         description="Pretrained model path"
     )

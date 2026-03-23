@@ -15,7 +15,7 @@
 """Unit tests for job timeout monitoring feature in workflow.py"""
 
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
 
 from nvidia_tao_core.microservices.utils.job_utils.timeout_monitor import (
@@ -25,6 +25,10 @@ from nvidia_tao_core.microservices.utils.job_utils.timeout_monitor import (
 )
 from nvidia_tao_core.microservices.utils.job_utils.workflow import (
     check_for_timed_out_jobs
+)
+from nvidia_tao_core.microservices.utils.timeout_utils import (
+    get_all_running_jobs,
+    get_all_running_automl_experiments,
 )
 
 
@@ -315,7 +319,7 @@ class TestCheckJobTimeout:
 class TestTerminateTimedOutJob:
     """Test terminate_timed_out_job function"""
 
-    @patch('nvidia_tao_core.microservices.utils.job_utils.executor.statefulset_executor.StatefulSetExecutor')
+    @patch('nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler.ExecutionHandler')
     @patch('nvidia_tao_core.microservices.utils.job_utils.timeout_monitor.update_job_status')
     def test_terminate_timed_out_regular_job(self, mock_update_status, mock_executor_class):
         """Test terminating a timed out regular job"""
@@ -328,17 +332,16 @@ class TestTerminateTimedOutJob:
             'is_automl': False
         }
 
-        mock_executor = Mock()
-        mock_executor.delete_statefulset.return_value = True
-        mock_executor_class.return_value = mock_executor
+        # Mock the class method directly
+        mock_executor_class.delete_with_handler.return_value = True
 
         result = terminate_timed_out_job(job_info)
 
         assert result is True
         mock_update_status.assert_called_once_with(handler_id, job_id, status="Error", kind='experiment')
-        mock_executor.delete_statefulset.assert_called_once_with(job_id, use_ngc=True)
+        mock_executor_class.delete_with_handler.assert_called_once_with(job_id)
 
-    @patch('nvidia_tao_core.microservices.utils.job_utils.executor.statefulset_executor.StatefulSetExecutor')
+    @patch('nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler.ExecutionHandler')
     @patch('nvidia_tao_core.microservices.utils.job_utils.timeout_monitor.save_automl_controller_info')
     @patch('nvidia_tao_core.microservices.utils.job_utils.timeout_monitor.get_automl_controller_info')
     def test_terminate_timed_out_automl_experiment(
@@ -365,9 +368,8 @@ class TestTerminateTimedOutJob:
         ]
         mock_get_controller.return_value = controller_data
 
-        mock_executor = Mock()
-        mock_executor.delete_statefulset.return_value = True
-        mock_executor_class.return_value = mock_executor
+        # Mock the class method directly
+        mock_executor_class.delete_with_handler.return_value = True
 
         result = terminate_timed_out_job(job_info)
 
@@ -383,10 +385,10 @@ class TestTerminateTimedOutJob:
         assert experiment_5['status'] == 'failure'
         assert 'timeout' in experiment_5['message'].lower()
 
-        # Verify StatefulSet was deleted with the correct job_id
-        mock_executor.delete_statefulset.assert_called_once_with(job_id, use_ngc=True)
+        # Verify ExecutionHandler was deleted with the correct job_id
+        mock_executor_class.delete_with_handler.assert_called_once_with(job_id)
 
-    @patch('nvidia_tao_core.microservices.utils.job_utils.executor.statefulset_executor.StatefulSetExecutor')
+    @patch('nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler.ExecutionHandler')
     def test_terminate_timed_out_job_missing_info(self, mock_executor_class):
         """Test handling of missing job information - treated as orphaned job"""
         job_info = {
@@ -395,22 +397,20 @@ class TestTerminateTimedOutJob:
             'is_automl': False
         }
 
-        # Configure mock to return True (orphaned jobs can still be terminated)
-        mock_executor = Mock()
-        mock_executor.delete_statefulset.return_value = True
-        mock_executor_class.return_value = mock_executor
+        # Mock the class method directly
+        mock_executor_class.delete_with_handler.return_value = True
 
         result = terminate_timed_out_job(job_info)
 
         # Orphaned jobs (without handler_id) can still be terminated
         assert result is True
-        # Verify StatefulSet deletion was attempted
-        mock_executor.delete_statefulset.assert_called_once_with('test-job-123', use_ngc=True)
+        # Verify ExecutionHandler deletion was attempted
+        mock_executor_class.delete_with_handler.assert_called_once_with('test-job-123')
 
-    @patch('nvidia_tao_core.microservices.utils.job_utils.executor.statefulset_executor.StatefulSetExecutor')
+    @patch('nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler.ExecutionHandler')
     @patch('nvidia_tao_core.microservices.utils.job_utils.timeout_monitor.update_job_status')
-    def test_terminate_timed_out_job_statefulset_deletion_fails(self, mock_update_status, mock_executor_class):
-        """Test when StatefulSet deletion fails"""
+    def test_terminate_timed_out_job_execution_handler_deletion_fails(self, mock_update_status, mock_executor_class):
+        """Test when ExecutionHandler deletion fails"""
         job_id = "test-job-123"
         handler_id = "handler-123"
         job_info = {
@@ -420,9 +420,8 @@ class TestTerminateTimedOutJob:
             'is_automl': False
         }
 
-        mock_executor = Mock()
-        mock_executor.delete_statefulset.return_value = False
-        mock_executor_class.return_value = mock_executor
+        # Mock the class method directly
+        mock_executor_class.delete_with_handler.return_value = False
 
         result = terminate_timed_out_job(job_info)
 
@@ -728,3 +727,170 @@ class TestTimeoutWithStatusUpdates:
 
         # Just under 1 minute, should not be timed out
         assert result is False
+
+
+class TestAutoMLBrainExperimentIdFallback:
+    """Test that AutoML brain jobs with experiment_id (no handler_id) are handled.
+
+    AutoML brain jobs created by automl_handler.py write experiment_id and
+    omit handler_id/kind in tao.jobs.  Before the fix, get_all_running_jobs()
+    returned handler_id=None for these jobs, and
+    get_all_running_automl_experiments() skipped them entirely, so their
+    child experiment jobs were never checked for timeout.
+    """
+
+    # -- get_all_running_jobs: handler_id resolved from experiment_id --
+
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.BACKEND', 'local-docker')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.is_request_automl', return_value=False)
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.get_handler_metadata', return_value=None)
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.MongoHandler')
+    def test_running_jobs_resolves_experiment_id_when_handler_id_missing(
+        self, MockMongo, mock_get_handler, mock_is_automl
+    ):
+        """Brain job with handler_id=None but experiment_id set should have
+        handler_id resolved in the returned job_info."""
+        brain_job_doc = {
+            'id': 'brain-001',
+            'handler_id': None,
+            'experiment_id': 'experiment-handler-001',
+            'kind': None,
+            'status': 'Running',
+            'action': 'train',
+            'job_details': {'brain-001': {'automl_brain_info': []}},
+        }
+
+        mock_mongo_instance = MagicMock()
+        # First call: find({'status': ...}) for running jobs
+        # Second call: find({'status': {'$exists': True}}) for automl_experiment_job_ids
+        mock_mongo_instance.find.side_effect = [[brain_job_doc], []]
+        MockMongo.return_value = mock_mongo_instance
+
+        jobs = get_all_running_jobs()
+
+        assert len(jobs) == 1
+        job = jobs[0]
+        assert job['job_id'] == 'brain-001'
+        assert job['handler_id'] == 'experiment-handler-001', \
+            "handler_id should be resolved from experiment_id"
+        assert job['kind'] == 'experiment', \
+            "kind should default to 'experiment' when missing"
+        assert job['is_automl_brain'] is True
+
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.BACKEND', 'local-docker')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.is_request_automl', return_value=False)
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.get_handler_metadata', return_value=None)
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.MongoHandler')
+    def test_running_jobs_keeps_handler_id_when_present(
+        self, MockMongo, mock_get_handler, mock_is_automl
+    ):
+        """Normal job with handler_id set should keep it (no fallback needed)."""
+        normal_job_doc = {
+            'id': 'job-001',
+            'handler_id': 'handler-001',
+            'kind': 'experiment',
+            'status': 'Running',
+            'action': 'train',
+            'job_details': {},
+        }
+
+        mock_mongo_instance = MagicMock()
+        mock_mongo_instance.find.side_effect = [[normal_job_doc], []]
+        MockMongo.return_value = mock_mongo_instance
+
+        jobs = get_all_running_jobs()
+
+        assert len(jobs) == 1
+        assert jobs[0]['handler_id'] == 'handler-001'
+        assert jobs[0]['kind'] == 'experiment'
+
+    # -- get_all_running_automl_experiments: discovers experiments for brain with experiment_id --
+
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.BACKEND', 'local-docker')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.get_automl_controller_info')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.get_handler_metadata')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.is_request_automl', return_value=False)
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.MongoHandler')
+    def test_automl_experiments_found_when_brain_has_experiment_id(
+        self, MockMongo, mock_is_automl, mock_get_handler, mock_get_controller
+    ):
+        """Brain job with handler_id=None but experiment_id set should still
+        have its child experiments discovered for timeout monitoring."""
+        brain_job_doc = {
+            'id': 'brain-001',
+            'handler_id': None,
+            'experiment_id': 'experiment-handler-001',
+            'kind': None,
+            'status': 'Running',
+            'action': 'train',
+            'job_details': {'brain-001': {'automl_brain_info': []}},
+        }
+
+        mock_mongo_instance = MagicMock()
+        # get_all_running_jobs: find running, then find all for automl_experiment_job_ids
+        # get_all_running_automl_experiments calls get_all_running_jobs internally
+        mock_mongo_instance.find.side_effect = [
+            [brain_job_doc], [],  # get_all_running_jobs (called from get_all_running_automl_experiments)
+            [brain_job_doc], [],  # get_all_running_jobs (2nd call in get_all_running_automl_experiments flow)
+        ]
+        # find_one for the raw job doc fallback in get_all_running_automl_experiments
+        mock_mongo_instance.find_one.return_value = brain_job_doc
+        MockMongo.return_value = mock_mongo_instance
+
+        # Handler metadata lookup returns automl_enabled=True for the resolved handler_id
+        mock_get_handler.return_value = {
+            'automl_settings': {'automl_enabled': True}
+        }
+
+        # Controller has one running experiment
+        mock_get_controller.return_value = [
+            {
+                'id': 1,
+                'job_id': 'train-exp-001',
+                'status': 'started',
+            }
+        ]
+
+        experiments = get_all_running_automl_experiments()
+
+        assert len(experiments) == 1, \
+            "Should discover the running experiment from the brain's controller"
+        exp = experiments[0]
+        assert exp['job_id'] == 'train-exp-001'
+        assert exp['is_automl'] is True
+        assert exp['brain_job_id'] == 'brain-001'
+        assert exp['experiment_number'] == '1'
+        assert exp['handler_id'] == 'experiment-handler-001'
+
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.BACKEND', 'local-docker')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.get_automl_controller_info')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.get_handler_metadata')
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.is_request_automl', return_value=False)
+    @patch('nvidia_tao_core.microservices.utils.timeout_utils.MongoHandler')
+    def test_automl_experiments_not_found_when_brain_has_no_ids(
+        self, MockMongo, mock_is_automl, mock_get_handler, mock_get_controller
+    ):
+        """Brain job with neither handler_id nor experiment_id should be skipped
+        gracefully (no crash, no experiments returned)."""
+        brain_job_doc = {
+            'id': 'brain-orphan',
+            'handler_id': None,
+            'kind': None,
+            'status': 'Running',
+            'action': 'train',
+            'job_details': {},
+        }
+
+        mock_mongo_instance = MagicMock()
+        mock_mongo_instance.find.side_effect = [
+            [brain_job_doc], [],
+            [brain_job_doc], [],
+        ]
+        # find_one returns the same doc (no experiment_id either)
+        mock_mongo_instance.find_one.return_value = brain_job_doc
+        MockMongo.return_value = mock_mongo_instance
+
+        experiments = get_all_running_automl_experiments()
+
+        assert len(experiments) == 0
+        mock_get_controller.assert_not_called()

@@ -105,5 +105,5 @@ class ExperimentConfig:
     visualize: VisualizeConfig = DATACLASS_FIELD(VisualizeConfig())
     kpi: KpiConfig = DATACLASS_FIELD(KpiConfig())
     results_dir: Optional[str] = STR_FIELD(
-        value="/results", default_value="/results"
+        value="", default_value=""
     )

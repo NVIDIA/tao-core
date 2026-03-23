@@ -97,8 +97,15 @@ class QuantizationMethodConfig:
         default_value="FP8_DYNAMIC",
         value="FP8_DYNAMIC",
         display_name="Quantization scheme",
-        valid_options="FP8_DYNAMIC,W8A8,W8A16,W4A16",
-        description="Quantization scheme to use (FP8_DYNAMIC for W8A8, W8A16 for weight-only, etc.)"
+        valid_options="FP8_DYNAMIC,NVFP4,FP8,W8A8,W8A16,W4A16",
+        description="Quantization scheme to use (FP8_DYNAMIC, NVFP4, FP8, W8A8, W8A16, W4A16)"
+    )
+    kv_precision: str = STR_FIELD(
+        default_value="bf16",
+        value="bf16",
+        display_name="KV cache precision",
+        valid_options="bf16,fp8",
+        description="Precision for KV cache quantization (bf16 = no KV quantization, fp8 = FP8 KV cache)"
     )
     smoothing_strength: float = FLOAT_FIELD(
         default_value=0.8,
@@ -165,8 +172,8 @@ class ExperimentConfig:
     """Experiment configuration for Cosmos-RL quantization."""
 
     results_dir: str = STR_FIELD(
-        default_value="/results",
-        value="/results",
+        default_value="",
+        value="",
         display_name="Results directory",
         description="Directory to save quantization results and logs"
     )

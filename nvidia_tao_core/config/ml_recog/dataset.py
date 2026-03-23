@@ -65,24 +65,32 @@ class ColorAugmentation:
     brightness: float = FLOAT_FIELD(
         value=0.5,
         default_value=0.5,
+        valid_min=0.0,
+        valid_max=2.0,
         display_name="brightness",
         description="The value of jittering brightness",
     )
     contrast: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
+        valid_min=0.0,
+        valid_max=2.0,
         display_name="contrast",
         description="The value of jittering contrast",
     )
     saturation: float = FLOAT_FIELD(
         value=0.1,
         default_value=0.1,
+        valid_min=0.0,
+        valid_max=2.0,
         display_name="saturation",
         description="The value of jittering saturation",
     )
     hue: float = FLOAT_FIELD(
         value=0.1,
         default_value=0.1,
+        valid_min=0,
+        valid_max=0.5,
         display_name="hue",
         description="The value of jittering hue",
     )

@@ -37,32 +37,114 @@ mongo_client = None  # Initialize to None
 mongo_secret = None
 mongo_namespace = None
 mongo_operator_enabled = None
+_client_initialized = False
 
-if os.getenv("BACKEND"):
-    if os.getenv("HOST_PLATFORM") == "local-docker":
-        mongo_secret = os.getenv("MONGOSECRET", "")
-        mongo_namespace = "default"
-        mongo_operator_enabled = False
-        encoded_secret = parse.quote(mongo_secret, safe='')
-        mongo_uri_prefix = "mongodb"
-        mongo_connection_string = (
-            f"{mongo_uri_prefix}://default-user:{encoded_secret}@mongodb:27017/tao"
-            "?authSource=admin"
-        )
-        mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
-    else:  # k8s
-        mongo_secret = os.getenv("MONGOSECRET", "")
-        mongo_namespace = os.getenv("NAMESPACE", "default")
-        mongo_operator_enabled = os.getenv('MONGO_OPERATOR_ENABLED', 'true') == 'true'
-        encoded_secret = parse.quote(mongo_secret, safe='')
-        mongo_uri_prefix = "mongodb+srv" if mongo_operator_enabled else "mongodb"
-        mongo_connection_string = (
-            f"{mongo_uri_prefix}://default-user:{encoded_secret}@mongodb-svc.{mongo_namespace}"
-            ".svc.cluster.local/tao?replicaSet=mongodb&ssl=false&authSource=admin"
-        )
-        mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
+
+def _init_mongo_client():
+    """Initialize MongoDB client on first use (lazy initialization).
+
+    This is called automatically when MongoHandler is created. It checks environment
+    variables to determine whether to use mongomock (test mode) or real MongoDB (production).
+    """
+    # pylint: disable=global-statement
+    global mongo_client, mongo_secret, mongo_namespace, mongo_operator_enabled, _client_initialized
+
+    if _client_initialized:
+        return
+
+    # Check for test mode FIRST
+    if os.getenv("TAO_TEST_MODE", "").lower() in ["true", "1", "yes"]:
+        # Use mongomock for testing (no Docker/K8s required)
+        logger.info("Running in TEST_MODE - using mongomock for MongoDB operations")
+        try:
+            import mongomock
+            mongo_client = mongomock.MongoClient()
+            mongo_namespace = "test"
+            mongo_operator_enabled = False
+            _client_initialized = True
+            logger.info("Successfully initialized mongomock client for testing")
+        except ImportError as exc:
+            raise ImportError(
+                "mongomock is required for test mode. Install with: pip install mongomock"
+            ) from exc
+    elif os.getenv("BACKEND"):
+        # Production setup (Docker/K8s with real MongoDB)
+        if os.getenv("HOST_PLATFORM") == "local-docker":
+            mongo_secret = os.getenv("MONGOSECRET", "")
+            if not mongo_secret:
+                raise ValueError(
+                    "MONGOSECRET environment variable is required but not set. "
+                    "Please ensure MongoDB credentials are properly configured."
+                )
+            mongo_namespace = "default"
+            mongo_operator_enabled = False
+            encoded_secret = parse.quote(mongo_secret, safe='')
+            mongo_uri_prefix = "mongodb"
+            mongo_connection_string = (
+                f"{mongo_uri_prefix}://default-user:{encoded_secret}@mongodb:27017/tao"
+                "?authSource=admin"
+            )
+            mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
+            _client_initialized = True
+        else:  # k8s
+            mongo_secret = os.getenv("MONGOSECRET", "")
+            if not mongo_secret:
+                raise ValueError(
+                    "MONGOSECRET environment variable is required but not set. "
+                    "Please ensure MongoDB credentials are properly configured."
+                )
+            mongo_namespace = os.getenv("NAMESPACE", "default")
+            mongo_operator_enabled = os.getenv('MONGO_OPERATOR_ENABLED', 'true') == 'true'
+            encoded_secret = parse.quote(mongo_secret, safe='')
+            mongo_uri_prefix = "mongodb+srv" if mongo_operator_enabled else "mongodb"
+            mongo_connection_string = (
+                f"{mongo_uri_prefix}://default-user:{encoded_secret}@mongodb-svc.{mongo_namespace}"
+                ".svc.cluster.local/tao?replicaSet=mongodb&ssl=false&authSource=admin"
+            )
+            mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
+            _client_initialized = True
+
 
 NUM_RETRY = 5
+
+
+def reset_test_db():
+    """Reset the test database (only works in TEST_MODE).
+
+    This function drops all databases in the mongomock client,
+    useful for cleaning up between tests.
+
+    Raises:
+        RuntimeError: If called outside of TEST_MODE
+    """
+    if os.getenv("TAO_TEST_MODE", "").lower() not in ["true", "1", "yes"]:
+        raise RuntimeError("reset_test_db() can only be called in TEST_MODE")
+
+    _init_mongo_client()
+
+    if mongo_client is None:
+        raise RuntimeError("MongoDB client not initialized")
+
+    # Drop all databases except admin, local, and config
+    for db_name in mongo_client.list_database_names():
+        if db_name not in ['admin', 'local', 'config']:
+            mongo_client.drop_database(db_name)
+    logger.info("Test database reset completed")
+
+
+def get_test_client():
+    """Get the MongoDB client (useful for testing).
+
+    Returns:
+        The mongo_client instance
+
+    Raises:
+        RuntimeError: If client is not initialized
+    """
+    _init_mongo_client()
+    if mongo_client is None:
+        raise RuntimeError("MongoDB client not initialized")
+    return mongo_client
 
 
 def retry_method(func):
@@ -102,17 +184,21 @@ class MongoHandler:
             db_name (str): Name of the database to connect to.
             collection_name (str): Name of the collection within the database.
         """
-        global mongo_client  # pylint: disable=global-statement
+        _init_mongo_client()
+
         if mongo_client is None:
-            raise RuntimeError("MongoDB client not initialized. BACKEND environment variable not set.")
+            error_msg = (
+                "MongoDB client not initialized. "
+                "For production: Set BACKEND environment variable. "
+                "For testing: Set TAO_TEST_MODE=true and ensure mongomock is installed."
+            )
+            raise RuntimeError(error_msg)
         self.mongo_client = mongo_client  # pylint: disable=E0606
         self.db = self.mongo_client[db_name]
         self.collection = self.db[collection_name]
-        try:
-            self.create_unique_index("id")
-        except AutoReconnect as e:
-            mongo_client = pymongo.MongoClient(mongo_connection_string, tz_aware=True)
-            raise e
+        # Create unique index on 'id' field
+        # The retry_method decorator will handle AutoReconnect exceptions
+        self.create_unique_index("id")
 
     @retry_method
     def upsert(self, query, new_data):

@@ -16,7 +16,7 @@
 import os
 import logging
 
-from . import ngc_utils, stateless_handler_utils
+from . import stateless_handler_utils
 from .stateless_handler_utils import (
     resolve_metadata,
     get_user
@@ -193,54 +193,3 @@ def get_job_logs(log_file_path):
             if not log_line:
                 break
             yield log_line
-
-
-def is_maxine_request(handler_id, handler_kind, handler_metadata={}):
-    """Check if the request is related to Maxine.
-
-    Args:
-        handler_id (str): The ID of the handler.
-        handler_kind (str): The kind of handler.
-        handler_metadata (dict): The metadata of the handler.
-
-    Returns:
-        bool: True if the request is related to Maxine, False otherwise.
-    """
-    if not handler_metadata:
-        handler_metadata = stateless_handler_utils.get_handler_metadata(handler_id, handler_kind)
-    if handler_kind in ("workspaces", "workspace"):
-        return True
-    if handler_kind in ("datasets", "dataset"):
-        return handler_metadata.get("type", "") == "maxine_dataset"
-    if handler_kind in ("experiments", "experiment"):
-        return handler_metadata.get("network_arch", "") == "maxine_eye_contact"
-    return False
-
-
-def handler_level_access_control(user_id, org_name, handler_id="", handler_kind="",
-                                 handler_metadata={}, base_experiment=False):
-    """Control access to handlers based on user permissions and product entitlements.
-
-    Args:
-        user_id (str): The ID of the user.
-        org_name (str): The name of the organization.
-        handler_id (str, optional): The ID of the handler. Defaults to "".
-        handler_kind (str, optional): The kind of handler. Defaults to "".
-        handler_metadata (dict, optional): The metadata of the handler. Defaults to {}.
-        base_experiment (bool, optional): Whether this is a base experiment. Defaults to False.
-
-    Returns:
-        bool: True if the user has access, False otherwise.
-    """
-    if base_experiment or is_maxine_request(handler_id, handler_kind, handler_metadata):
-        logger.info("Checking if user has MAXINE entitlement")
-        if "MAXINE" not in ngc_utils.get_org_products(user_id, org_name):
-            logger.info("User does not have MAXINE entitlement")
-            return False
-        mongo = MongoHandler("tao", "users")
-        user_metadata = mongo.find_one({'id': user_id})
-        member_of = user_metadata.get('member_of', [])
-        if f"{org_name}/:MAXINE_USER" not in member_of:
-            logger.info("User does not have MAXINE entitlement in NGC metadata")
-            return False
-    return True

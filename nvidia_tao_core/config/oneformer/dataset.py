@@ -25,6 +25,7 @@ from nvidia_tao_core.config.utils.types import (
     DICT_FIELD,
     FLOAT_FIELD
 )
+from nvidia_tao_core.config.common.quantization import QuantCalibrationDataset
 
 
 @dataclass
@@ -211,4 +212,8 @@ class OneFormerDatasetConfig:
         value=0.0,
         description="Cutmix probability",
         display_name="cutmix probability"
+    )
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for the quantization calibration dataset.",
     )

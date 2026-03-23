@@ -80,6 +80,21 @@
         "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval",
         "encryption_key": "key"
     },
+    "metrics": {
+        "available_metrics": [
+            "train_loss",
+            "val_acc_1",
+            "val_accuracy",
+            "accuracy",
+            "loss",
+            "learning_rate"
+        ],
+        "monitoring_metric": "train_loss",
+        "dynamic_metric_patterns": [
+            "^(train|val|test)_(loss|acc_\\d+|accuracy)$",
+            "^best_.*$"
+        ]
+    },
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"

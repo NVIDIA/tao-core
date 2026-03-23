@@ -29,9 +29,9 @@ import traceback
 
 from nvidia_tao_core.microservices.utils.cloud_utils import CloudStorage
 from nvidia_tao_core.microservices.utils.ngc_utils import download_ngc_model, split_ngc_path, get_model_size_info
-from nvidia_tao_core.microservices.utils.nvcf_utils import invoke_function
-from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_internal_job_status_update_data
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import BACKEND, get_internal_job_status_update_data
 from nvidia_tao_core.distributed.decorators import master_node_only
+from nvidia_tao_core.microservices.enum_constants import Backend
 
 
 logger = logging.getLogger(__name__)
@@ -60,12 +60,13 @@ def _untar_file(tar_path, dest, strip_components=0):
             tar.extract(member, path=dest, set_attrs=False)
 
 
-def _extract_images(tar_path, dest):
+def _extract_images(tar_path, dest, remove_tar=True):
     """Function to extract images, other directories on same level as images to root of dataset.
 
     Args:
         tar_path (str): The path to the tar file.
         dest (str): The destination directory where the contents will be extracted.
+        remove_tar (bool): Whether to remove the tar file after extraction. Default: True
     """
     # Infer how many components to strip to get images,labels to top of dataset directory
     # Assumes: images, other necessary directories are in the same level
@@ -81,10 +82,13 @@ def _extract_images(tar_path, dest):
     _untar_file(tar_path, dest, strip_components)
     logger.info("Untarring data complete")
 
-    # Remove .tar.gz file
-    logger.info("Removing data tar file")
-    os.remove(tar_path)
-    logger.info("Deleted data tar file")
+    # Remove .tar.gz file (optional)
+    if remove_tar:
+        logger.info("Removing data tar file")
+        os.remove(tar_path)
+        logger.info("Deleted data tar file")
+    else:
+        logger.info("Keeping tar file (remove_tar=False)")
 
 
 def search_for_ptm(root, network="", parameter_name=""):
@@ -376,22 +380,23 @@ def upload_files(local_path, cloud_storage, file_last_modified=None,
         logger.info("Files to upload: %s", [rel_path for rel_path, _ in files_to_upload])
 
     # Process all files to upload
+    # Defer large file removals until after all uploads complete to avoid
+    # breaking symlinks whose targets are removed mid-batch
+    deferred_removals = []
     for idx, (rel_path, file_path) in enumerate(files_to_upload, 1):
         if exit_event and exit_event.is_set() and progress_tracker is None:
             logger.info("Exit event detected during continuous upload, breaking early")
-            return
+            break
         remaining = len(files_to_upload) - idx
         logger.info("Uploading file %d/%d: %s (remaining: %d)", idx, len(files_to_upload), file_path, remaining)
         try:
             send_callbacks = progress_tracker is not None  # Enable callbacks only for batch uploads
             if "graceful_termination_signal" not in file_path:
-                if not file_last_modified:
-                    # Snapshot mode: upload immediately
+                if not file_last_modified or progress_tracker is not None:
                     cloud_storage.upload_file(
                         file_path, file_path, progress_tracker=progress_tracker,
                         send_status_callbacks=send_callbacks)
                 else:
-                    # Continuous monitoring mode: wait before upload
                     time.sleep(10)
                     cloud_storage.upload_file(
                         file_path, file_path, progress_tracker=progress_tracker,
@@ -415,14 +420,11 @@ def upload_files(local_path, cloud_storage, file_last_modified=None,
                     file_last_modified[file_path] = current_mod_time
                     logger.info("Updated modification time for snapshot-mode file: %s", file_path)
 
-        # Remove file after successful upload only if size > 50MB
-        # During continuous monitoring, check retain_patterns to avoid removing files needed later
-        # During final upload (retain_patterns=None), remove all large files
+        # Schedule large files (>50MB) for deferred removal after all uploads
         try:
             if cloud_storage.is_file(file_path):
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 if file_size_mb > 50:
-                    # Check if file should be retained during continuous monitoring
                     should_retain = False
                     if retain_patterns:
                         for pattern in retain_patterns:
@@ -438,9 +440,7 @@ def upload_files(local_path, cloud_storage, file_last_modified=None,
                                 logger.warning("Invalid regex pattern '%s', skipping", pattern)
 
                     if not should_retain:
-                        os.remove(file_path)
-                        logger.info("Large file (%.2f MB) successfully uploaded and removed: %s",
-                                    file_size_mb, file_path)
+                        deferred_removals.append((file_path, file_size_mb))
                     else:
                         logger.info(
                             "Large file (%.2f MB) successfully uploaded but retained (matches retain pattern): %s",
@@ -450,26 +450,42 @@ def upload_files(local_path, cloud_storage, file_last_modified=None,
                     logger.info("File (%.2f MB) successfully uploaded but retained (under 50MB): %s",
                                 file_size_mb, file_path)
         except Exception as e:  # pylint: disable=broad-except
+            logger.error("Failed to check file size after upload: {} - Error: {}".format(file_path, str(e)))  # noqa pylint: disable=C0209
+
+    # Remove large files after all uploads complete (prevents breaking symlinks)
+    for file_path, file_size_mb in deferred_removals:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info("Large file (%.2f MB) successfully uploaded and removed: %s",
+                            file_size_mb, file_path)
+        except Exception as e:  # pylint: disable=broad-except
             logger.error("Failed to remove file after upload: {} - Error: {}".format(file_path, str(e)))  # noqa pylint: disable=C0209
 
 
 def get_log_file_name():
     """Return log file name"""
     job_id = os.getenv("JOB_ID")
-    logs_dir = os.getenv('TAO_MICROSERVICES_TTY_LOG', '/results')
+    # Use TAO_API_RESULTS_DIR for SLURM compatibility, fallback to /results
+    logs_dir = os.getenv('TAO_MICROSERVICES_TTY_LOG') or os.getenv('TAO_API_RESULTS_DIR', '/results')
     log_file = f'{logs_dir}/{job_id}/microservices_log.txt'
     return log_file
 
 
 def send_logs_to_server(seek_position, retry=0):
     """Sends TTY logs back to Hosted API"""
+    # Skip log callbacks when DEBUG_ENABLED is set (for local debugging)
+    if os.getenv("DEBUG_ENABLED", "").lower() == "true":
+        return seek_position
+
     if os.getenv("CLOUD_BASED") == "True":
         # Skip log upload for k8s and docker backends - server handles it via direct streaming
         # Check TAO_EXECUTION_BACKEND (set by server for job containers)
-        backend = os.getenv("TAO_EXECUTION_BACKEND", "")
-        if backend in ("local-k8s", "local-docker"):
+        backend = os.getenv("TAO_EXECUTION_BACKEND", BACKEND.value)
+        backend = Backend(backend)
+        if backend in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER):
             logger.info(
-                f"Skipping container-side log upload for backend={backend}. "
+                f"Skipping container-side log upload for backend={backend.value}. "
                 "Server-side log streaming is enabled."
             )
             return seek_position
@@ -488,7 +504,6 @@ def send_logs_to_server(seek_position, retry=0):
                 ngc_key = os.getenv("TAO_USER_KEY")
                 headers = {"Authorization": f"Bearer {ngc_key}"}
                 if log_contents and headers:
-                    nvcf_helm_deployment = os.getenv("NVCF_HELM")
                     log_callback_url = os.getenv("TAO_LOGGING_SERVER_URL") + ":log_update"
                     if log_callback_url:
                         headers['Content-Type'] = 'application/json'
@@ -496,29 +511,28 @@ def send_logs_to_server(seek_position, retry=0):
                             'experiment_number': os.getenv("AUTOML_EXPERIMENT_NUMBER", "0"),
                             'log_contents': log_contents
                         }
-                        if not nvcf_helm_deployment:
-                            try:
-                                response = requests.post(
-                                    log_callback_url,
-                                    json=data,
-                                    headers=headers,
-                                    timeout=REQUESTS_TIMEOUT
-                                )
-                                if response.ok:
-                                    return seek_position
-                                logger.info(
-                                    "Failed to send logs. Status code: {}".format(response.status_code)  # noqa pylint: disable=C0209
-                                )
-                                seek_position -= len(log_contents)
-                                retry += 1
+                        try:
+                            response = requests.post(
+                                log_callback_url,
+                                json=data,
+                                headers=headers,
+                                timeout=REQUESTS_TIMEOUT
+                            )
+                            if response.ok:
+                                return seek_position
+                            logger.info(
+                                "Failed to send logs. Status code: {}".format(response.status_code)  # noqa pylint: disable=C0209
+                            )
+                            seek_position -= len(log_contents)
+                            retry += 1
 
-                            except requests.RequestException as e:
-                                logger.info("Exception during log sending: {}".format(e))  # noqa pylint: disable=C0209
-                                seek_position -= len(log_contents)
-                                retry += 1
+                        except requests.RequestException as e:
+                            logger.info("Exception during log sending: {}".format(e))  # noqa pylint: disable=C0209
+                            seek_position -= len(log_contents)
+                            retry += 1
 
-                            time.sleep(5)
-                            return send_logs_to_server(seek_position, retry)
+                        time.sleep(5)
+                        return send_logs_to_server(seek_position, retry)
     return seek_position
 
 
@@ -529,6 +543,11 @@ def status_callback(data_string, retry=0):
         data_string (str): The status data to be sent.
         retry (int, optional): The current retry attempt (default is 0).
     """
+    # Skip callbacks when DEBUG_ENABLED is set (for local debugging)
+    if os.getenv("DEBUG_ENABLED", "").lower() == "true":
+        logger.info("DEBUG_ENABLED=True: Skipping status callback")
+        return
+
     # Check for early stopping based on epoch threshold
     early_stop_epoch = os.getenv("EARLY_STOP_EPOCH")
     if early_stop_epoch:
@@ -570,46 +589,26 @@ def status_callback(data_string, retry=0):
                     "experiment_number": os.getenv("AUTOML_EXPERIMENT_NUMBER", "0"),
                     "status": data_string,
                 }
-                nvcf_helm_deployment = os.getenv("NVCF_HELM")
-                if nvcf_helm_deployment:
-                    url_parts = os.getenv("TAO_LOGGING_SERVER_URL", "").split('/')
-                    # Extract kind, handler_id, and job_id based on their positions
-                    kind = url_parts[7]
-                    handler_id = url_parts[8]
-                    job_id = url_parts[10]
-                    docker_env_vars = {
-                        "TAO_USER_KEY": ngc_key,
-                    }
-                    invoke_function(
-                        deployment_string=nvcf_helm_deployment,
-                        microservice_action="status_update",
-                        docker_env_vars=docker_env_vars,
-                        kind=kind,
-                        handler_id=handler_id,
-                        job_id=job_id,
-                        request_body=data,
+                try:
+                    response = requests.post(status_url, json=data, headers=headers, timeout=REQUESTS_TIMEOUT)
+                    if response.ok:
+                        logger.info(f"Status update with data {data} sent successfully")
+                        return
+                    logger.error(
+                        "Failed to send status update. Status code: {}".format(  # noqa pylint: disable=C0209
+                            response.status_code
+                        )
                     )
-                else:
-                    try:
-                        response = requests.post(status_url, json=data, headers=headers, timeout=REQUESTS_TIMEOUT)
-                        if response.ok:
-                            logger.info(f"Status update with data {data} sent successfully")
-                            return
-                        logger.error(
-                            "Failed to send status update. Status code: {}".format(  # noqa pylint: disable=C0209
-                                response.status_code
-                            )
-                        )
-                        retry += 1
+                    retry += 1
 
-                    except requests.RequestException as e:
-                        logger.error(
-                            "Exception during status update sending: {}".format(e)  # noqa pylint: disable=C0209
-                        )
-                        retry += 1
+                except requests.RequestException as e:
+                    logger.error(
+                        "Exception during status update sending: {}".format(e)  # noqa pylint: disable=C0209
+                    )
+                    retry += 1
 
-                    time.sleep(5)
-                    status_callback(data_string, retry)
+                time.sleep(5)
+                status_callback(data_string, retry)
 
 
 def should_skip_file_for_tarball(file_path, local_path, selective_tarball_config):
@@ -673,11 +672,12 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0,
     # For k8s and docker backends, skip log file uploads (server handles via streaming)
     # But still handle send_logs_to_server for status updates
     # Check TAO_EXECUTION_BACKEND (set by server for job containers)
-    backend = os.getenv("TAO_EXECUTION_BACKEND", "")
-    skip_log_upload = backend in ("local-k8s", "local-docker")
+    backend = os.getenv("TAO_EXECUTION_BACKEND", BACKEND.value)
+    backend = Backend(backend)
+    skip_log_upload = backend in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER)
     if skip_log_upload:
         logger.info(
-            f"Backend={backend}: Server-side log streaming enabled. "
+            f"Backend={backend.value}: Server-side log streaming enabled. "
             "Log files will not be uploaded from container."
         )
 
@@ -703,12 +703,34 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0,
             if exit_event.is_set():
                 # Check if this is a graceful pause (signal file exists) or normal completion
                 signal_file = os.path.join(local_path, ".graceful_termination_signal")
+                # Read signal file content if it exists to determine if it's from early stop
+                is_early_stop_signal = False
                 if os.path.exists(signal_file):
-                    # Graceful pause: exit immediately, snapshot upload will handle remaining files
-                    logger.info("Continuous upload monitor stopped by graceful pause signal")
+                    try:
+                        with open(signal_file, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            # Early stop signals have format "early_stop_epoch_N"
+                            is_early_stop_signal = "early_stop_epoch_" in content
+                    except Exception:
+                        pass
+
+                # If signal exists but it's just an early stop marker (not graceful pause),
+                # we should still do final upload since training completed
+                if os.path.exists(signal_file) and not is_early_stop_signal:
+                    # True graceful pause: exit immediately, snapshot upload will handle remaining files
+                    logger.info("[CLOUD-HANDLERS][UTILS] Continuous upload monitor stopped by graceful pause signal")
                 else:
-                    # Normal completion: do final upload to ensure all files are uploaded
-                    logger.info("Continuous upload monitor stopped, performing final upload")
+                    # Normal completion or early stop completion: do final upload to ensure all files are uploaded
+                    if is_early_stop_signal:
+                        logger.info(
+                            "[CLOUD-HANDLERS][UTILS] Continuous upload monitor stopped "
+                            "(training completed with early stop), performing final upload"
+                        )
+                    else:
+                        logger.info(
+                            "[CLOUD-HANDLERS][UTILS] Continuous upload monitor stopped, "
+                            "performing final upload"
+                        )
 
                     # Count ALL files that need to be uploaded in this final pass
                     files_to_upload = []
@@ -788,7 +810,7 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0,
                          retain_patterns=retain_patterns)
 
             seek_position = send_logs_to_server(seek_position)
-            time.sleep(30)  # Adjust the sleep interval as needed
+            exit_event.wait(30)  # Wakes immediately when exit_event is set
 
     except (KeyboardInterrupt, SystemExit, Exception):
         logger.error("traceback: %s", traceback.format_exc())
@@ -796,8 +818,37 @@ def monitor_and_upload(local_path, cloud_storage, exit_event, seek_position=0,
 
 
 def get_file_path_from_cloud_string(value):
-    """Get the cloud storage class object from the value"""
-    csp_provider = value.split(":")[0]
+    """Get the cloud storage class object from the value
+
+    Args:
+        value (str): Path string with protocol (e.g., aws://bucket/path, lustre://path)
+
+    Returns:
+        tuple: (csp_provider, bucket_name, cloud_file_path)
+               For local mounts (lustre, file, local), bucket_name is empty string
+    """
+    csp_provider = value.split(":")[0].lower()
+
+    # Normalize s3:// to aws://
+    if csp_provider == "s3":
+        csp_provider = "aws"
+
+    # Handle local filesystem protocols (no bucket concept)
+    if csp_provider in ['lustre', 'file', 'local', 'slurm']:
+        # Format: protocol://path
+        cloud_file_path = value.split("://", 1)[1] if "://" in value else value
+
+        # For SLURM, skip the "None" placeholder bucket name
+        # Format: slurm://None/actual/path -> /actual/path
+        if csp_provider == 'slurm' and cloud_file_path.startswith('None/'):
+            cloud_file_path = cloud_file_path[5:]  # Skip "None/"
+
+        # Ensure path starts with /
+        if not cloud_file_path.startswith('/'):
+            cloud_file_path = '/' + cloud_file_path
+        return csp_provider, '', cloud_file_path
+
+    # Handle cloud protocols with bucket (aws, azure, seaweedfs)
     bucket_name = value.split("//")[1].split("/")[0]
     cloud_file_path = value[value.find(bucket_name) + len(bucket_name):]
     return csp_provider, bucket_name, cloud_file_path
@@ -806,13 +857,33 @@ def get_file_path_from_cloud_string(value):
 def get_cloud_storage_class_object(cloud_data, cloud_string):
     """Initalize Apache LibCloud class"""
     csp_provider, bucket_name, cloud_file_path = get_file_path_from_cloud_string(cloud_string)
+
+    # Handle local filesystem and SLURM protocols (no cloud credentials needed)
+    if csp_provider in ['lustre', 'file', 'local', 'slurm']:
+        # For SLURM, files are directly accessible on Lustre mount - no cloud storage needed
+        # For other local protocols (lustre, file, local), also skip cloud storage
+        # These are used when jobs run on nodes with direct filesystem access
+        while cloud_file_path.find("//") != -1:
+            cloud_file_path = cloud_file_path.replace("//", "/")
+        return None, cloud_file_path
+
+    # Handle cloud protocols with credentials
+    account_name = cloud_data[csp_provider][bucket_name].get("account_name")
+    access_key = cloud_data[csp_provider][bucket_name].get("access_key")
+    secret_key = cloud_data[csp_provider][bucket_name].get("secret_key")
+    region = cloud_data[csp_provider][bucket_name].get("cloud_region")
+    endpoint_url = cloud_data[csp_provider][bucket_name].get("endpoint_url")
+    if account_name:
+        csp_provider = "azure"
+        access_key = account_name
+
     cloud_storage = initialize_cloud_storage(
         cloud_type=csp_provider,
         bucket_name=bucket_name,
-        region=cloud_data[csp_provider][bucket_name].get("region"),
-        access_key=cloud_data[csp_provider][bucket_name].get("access_key"),
-        secret_key=cloud_data[csp_provider][bucket_name].get("secret_key"),
-        endpoint_url=cloud_data[csp_provider][bucket_name].get("endpoint_url")
+        region=region,
+        access_key=access_key,
+        secret_key=secret_key,
+        endpoint_url=endpoint_url
     )
     while cloud_file_path.find("//") != -1:
         cloud_file_path = cloud_file_path.replace("//", "/")
@@ -821,10 +892,44 @@ def get_cloud_storage_class_object(cloud_data, cloud_string):
 
 def download_from_user_storage(
     cloud_storage=None, job_id="", cloud_data={}, value="", dictionary={}, key="",
-    preserve_source_path=False, reset_value=False, progress_tracker=None
+    preserve_source_path=False, reset_value=False, progress_tracker=None, exclude_filenames=None
 ):
     """Download a file/folder from user storage"""
     try:
+        # Check if this is a local filesystem path (SLURM, Lustre, file, local)
+        # These paths are directly accessible - no download needed
+        if value.startswith(("slurm://", "lustre://", "file://", "local://")):
+            protocol, _, cloud_file_path = get_file_path_from_cloud_string(value)
+            # Clean up double slashes
+            while cloud_file_path.find("//") != -1:
+                cloud_file_path = cloud_file_path.replace("//", "/")
+
+            logger.info(f"{protocol.upper()} path detected - skipping download, using direct path: {cloud_file_path}")
+
+            # Check if it's a tar file that needs extraction
+            if cloud_file_path.endswith(".tar.gz") or cloud_file_path.endswith(".tar"):
+                extraction_dir = cloud_file_path.replace(".tar.gz", "").replace(".tar", "")
+
+                # Check if tar file exists and extracted directory doesn't
+                if os.path.exists(cloud_file_path) and not os.path.exists(extraction_dir):
+                    logger.info(f"Extracting SLURM tar file (keeping original): {cloud_file_path}")
+                    _extract_images(cloud_file_path, os.path.dirname(cloud_file_path), remove_tar=False)
+                    logger.info(f"Extracted to: {extraction_dir}")
+                elif os.path.exists(extraction_dir):
+                    logger.info(f"SLURM extracted directory already exists: {extraction_dir}")
+                else:
+                    logger.warning(f"SLURM tar file not found: {cloud_file_path}")
+
+                # Return the extracted directory path
+                if reset_value and dictionary and key:
+                    dictionary[key] = extraction_dir
+                return extraction_dir
+
+            # Not a tar file - return as-is
+            if reset_value and dictionary and key:
+                dictionary[key] = cloud_file_path
+            return cloud_file_path
+
         if not cloud_storage:
             cloud_storage, cloud_file_path = get_cloud_storage_class_object(cloud_data, value)
         else:
@@ -849,7 +954,8 @@ def download_from_user_storage(
             if cloud_file_path.endswith(".tar") or cloud_file_path.endswith(".tar.gz"):
                 _extract_images(destination_path, os.path.dirname(destination_path))
         else:
-            cloud_storage.download_folder(cloud_file_path, destination_path, progress_tracker=progress_tracker)
+            cloud_storage.download_folder(cloud_file_path, destination_path, progress_tracker=progress_tracker,
+                                          exclude_filenames=exclude_filenames)
             for root, _, files in os.walk(destination_path):
                 for file in files:
                     abs_filepath = os.path.join(root, file)
@@ -1021,6 +1127,37 @@ def download_files_from_cloud(
             reset_value=reset_value,
             progress_tracker=progress_tracker
         )
+
+    # Handle plain absolute paths for tar files (SLURM case)
+    # This runs in the job container where Lustre is mounted, so we can extract if needed
+    if isinstance(value, str) and os.path.isabs(value):
+        if value.endswith(".tar.gz") or value.endswith(".tar"):
+            extraction_dir = value.replace(".tar.gz", "").replace(".tar", "")
+
+            # Check if tar file exists and needs extraction
+            if os.path.exists(value):
+                if not os.path.exists(extraction_dir):
+                    try:
+                        _extract_images(value, os.path.dirname(value), remove_tar=False)
+                    except Exception as e:
+                        logger.error(f"Failed to extract {value}: {e}")
+                        return value
+                else:
+                    logger.info(f"Extracted directory already exists: {extraction_dir}")
+            else:
+                # Tar file doesn't exist, but maybe directory does
+                if os.path.exists(extraction_dir):
+                    logger.info(f"Tar file not found, but directory exists: {extraction_dir}")
+                else:
+                    logger.warning(f"Neither tar file nor extracted directory found: {value}")
+                    return value
+
+            # Update dictionary to use extracted directory
+            if reset_value and dictionary and key:
+                dictionary[key] = extraction_dir
+
+            return extraction_dir
+
     return None
 
 
@@ -1366,6 +1503,12 @@ def get_results_cloud_data(cloud_data, spec_data, dest_dir=None):
         cloud_storage, cloud_file_path = get_cloud_storage_class_object(cloud_data, results_dir)
         spec_data["results_dir"] = cloud_file_path
         return cloud_storage, spec_data
+
+    # Check if results_dir is an absolute path (e.g., Slurm Lustre paths)
+    if os.path.isabs(results_dir):
+        # Use the absolute path as-is, don't prepend dest_dir
+        return None, spec_data
+
     if not dest_dir:
         cleanup_cuda_contexts()
         raise ValueError("Destination directory is not provided")

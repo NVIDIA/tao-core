@@ -20,7 +20,8 @@ from nvidia_tao_core.config.common.common_config import EvaluateConfig
 from nvidia_tao_core.config.utils.types import (
     INT_FIELD,
     LIST_FIELD,
-    STR_FIELD
+    STR_FIELD,
+    BOOL_FIELD
 )
 
 
@@ -57,4 +58,10 @@ class OneFormerEvaluateConfig(EvaluateConfig):
         value="",
         description="Path to the TensorRT engine to be used for evaluation.",
         display_name="TensorRT Engine",
+    )
+    iou_per_class: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description="Whether to log the IoU per class.",
+        display_name="IoU per class",
     )

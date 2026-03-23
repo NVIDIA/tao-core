@@ -18,7 +18,7 @@ import re
 import sys
 import math
 from datetime import datetime
-from marshmallow import Schema, fields, EXCLUDE, validates_schema, ValidationError, validate
+from marshmallow import Schema, fields, EXCLUDE, RAISE, validates_schema, ValidationError, validate
 from marshmallow_enum import EnumField, Enum
 from marshmallow_oneofschema import OneOfSchema
 
@@ -106,11 +106,9 @@ class EnumFieldPrefix(fields.Field):
     def _deserialize(self, value, attr, data, **kwargs):
         if value in self.enum._value2member_map_:
             return value
-        # Check for best_ prefixed values
+        # Accept any best_* metric (e.g. best_train_loss, best_None from AutoML)
         if value.startswith('best_'):
-            base_value = value[5:]
-            if base_value in self.enum._value2member_map_:
-                return value
+            return value
 
         # Check against dynamic metric patterns for networks like sparse4d
         if self._validate_dynamic_metric(value):
@@ -149,6 +147,7 @@ class JobStatusEnum(Enum):
     """Class defining job status enum"""
 
     Done = 'Done'
+    Started = 'Started'
     Running = 'Running'
     Error = 'Error'
     Pending = 'Pending'
@@ -194,7 +193,6 @@ class AllowedDockerEnvVariables(Enum):
     CLEARML_API_SECRET_KEY = "CLEARML_API_SECRET_KEY"
 
     CLOUD_BASED = "CLOUD_BASED"
-    NVCF_HELM = "NVCF_HELM"
     TELEMETRY_OPT_OUT = "TELEMETRY_OPT_OUT"
     TAO_API_KEY = "TAO_API_KEY"
     TAO_USER_KEY = "TAO_USER_KEY"
@@ -207,50 +205,21 @@ class AllowedDockerEnvVariables(Enum):
     TAO_EXECUTION_BACKEND = "TAO_EXECUTION_BACKEND"
     AUTOML_EXPERIMENT_NUMBER = "AUTOML_EXPERIMENT_NUMBER"
     JOB_ID = "JOB_ID"
+    TAO_API_RESULTS_DIR = "TAO_API_RESULTS_DIR"
     TAO_API_JOB_ID = "TAO_API_JOB_ID"  # Automl brain job id
     RETAIN_CHECKPOINTS_FOR_RESUME = "RETAIN_CHECKPOINTS_FOR_RESUME"
     EARLY_STOP_EPOCH = "EARLY_STOP_EPOCH"
 
+    DEBUG_ENABLED = "DEBUG_ENABLED"
+
     TAO_TELEMETRY_SERVER = "TAO_TELEMETRY_SERVER"
     TAO_CLIENT_TYPE = "TAO_CLIENT_TYPE"  # Client type: container, api, cli, sdk, ui, etc.
     TAO_AUTOML_TRIGGERED = "TAO_AUTOML_TRIGGERED"  # Whether job is triggered by AutoML
+    TAO_LOG_LEVEL = "TAO_LOG_LEVEL"  # Log level passed from brain to train jobs (e.g. INFO, DEBUG)
 
+    CUDA_OVERRIDE_VERSION = "CUDA_OVERRIDE_VERSION"
 
-class NVCFEndpoint(Enum):
-    """Class defining action type enum"""
-
-    login = 'login'
-    org_gpu_types = 'org_gpu_types'
-    workspace_retrieve_datasets = 'workspace_retrieve_datasets'
-    list = 'list'
-    retrieve = 'retrieve'
-    delete = 'delete'
-    bulk_delete = 'bulk_delete'
-    create = 'create'
-    update = 'update'
-    partial_update = 'partial_update'
-    specs_schema = 'specs_schema'
-    job_run = 'job_run'
-    job_retry = 'job_retry'
-    job_list = 'job_list'
-    job_retrieve = 'job_retrieve'
-    job_schema = 'job_schema'
-    job_logs = 'job_logs'
-    job_cancel = 'job_cancel'
-    job_delete = 'job_delete'
-    job_download = 'job_download'
-    job_pause = 'job_pause'
-    jobs_cancel = 'jobs_cancel'
-    bulk_cancel = 'bulk_cancel'
-    job_resume = 'job_resume'
-    automl_details = 'automl_details'
-    get_epoch_numbers = 'get_epoch_numbers'
-    model_publish = 'model_publish'
-    remove_published_model = 'remove_published_model'
-    status_update = 'status_update'
-    log_update = 'log_update'
-    container_job_run = 'container_job_run'
-    container_job_status = 'container_job_status'
+    LEPTON_SHARED_MEMORY_SIZE = "LEPTON_SHARED_MEMORY_SIZE"
 
 
 class CloudPullTypesEnum(Enum):
@@ -261,6 +230,8 @@ class CloudPullTypesEnum(Enum):
     seaweedfs = 'seaweedfs'
     huggingface = 'huggingface'
     self_hosted = 'self_hosted'
+    lepton = 'lepton'
+    slurm = 'slurm'
 
 
 class CloudFileType(Enum):
@@ -276,6 +247,7 @@ class DatasetIntentEnum(Enum):
     training = 'training'
     evaluation = 'evaluation'
     testing = 'testing'
+    calibration = 'calibration'
 
 
 class CheckpointChooseMethodEnum(Enum):
@@ -291,6 +263,12 @@ class AutoMLAlgorithm(Enum):
 
     bayesian = "bayesian"
     hyperband = "hyperband"
+    bohb = "bohb"
+    bfbo = "bfbo"
+    asha = "asha"
+    pbt = "pbt"
+    dehb = "dehb"
+    hyperband_es = "hyperband_es"
 
 
 class SourceType(Enum):
@@ -309,6 +287,19 @@ class MessageOnly(Schema):
     """Class defining dataset upload schema"""
 
     message = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+
+
+class JobEventsRsp(Schema):
+    """Class defining job events response schema"""
+
+    class Meta:
+        """Class enabling sorting field values by the order in which they are declared"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    events = fields.List(fields.Dict(), validate=validate.Length(max=sys.maxsize))
 
 
 class MissingFile(Schema):
@@ -359,6 +350,13 @@ class ErrorRsp(Schema):
     error_code = fields.Int(
         validate=fields.validate.Range(min=-sys.maxsize - 1, max=sys.maxsize),
         format=sys_int_format()
+    )
+    validation_details = fields.Dict(
+        allow_none=True,
+        metadata={
+            "description": "Detailed validation information including expected structure, "
+                           "actual structure, and missing files"
+        }
     )
 
 
@@ -632,26 +630,6 @@ class LoginRsp(Schema):
     user_email = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
 
 
-class NVCFReq(Schema):
-    """Class defining login response schema"""
-
-    class Meta:
-        """Class enabling sorting field values by the order in which they are declared"""
-
-        ordered = True
-    ngc_org_name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
-    api_endpoint = EnumField(NVCFEndpoint)
-    kind = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
-    handler_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    is_base_experiment = fields.Bool()
-    is_job = fields.Bool()
-    job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    action = EnumField(ActionEnum)
-    request_body = fields.Raw()
-    ngc_key = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
-    is_json_request = fields.Bool()
-
-
 class GpuDetails(Schema):
     """Class defining telemetry request schema"""
 
@@ -673,6 +651,8 @@ class GpuDetails(Schema):
     max_limit = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     current_used = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     current_available = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    node_type = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    backend_type = fields.Str(validate=validate.Length(max=2048), allow_none=True)
 
 
 class TelemetryReq(Schema):
@@ -693,8 +673,10 @@ class TelemetryReq(Schema):
     automl_triggered = fields.Bool(allow_none=True)  # Whether job is triggered by AutoML
 
 
-class AWSCloudPull(Schema):
-    """Class defining AWS Cloud pull schema"""
+# Shared field definitions for cloud storage credentials
+# These classes contain reusable field definitions that are mixed into concrete schemas
+class AWSCredentialsFields:
+    """Reusable field definitions for AWS-compatible storage credentials"""
 
     access_key = fields.Str(required=True, validate=validate.Length(min=1, max=2048))
     secret_key = fields.Str(required=True, validate=validate.Length(min=1, max=2048))
@@ -704,14 +686,8 @@ class AWSCloudPull(Schema):
     cloud_type = fields.Constant(CloudPullTypesEnum.aws.value)
 
 
-class SeaweedfsCloudPull(AWSCloudPull):
-    """Class defining Seaweed Cloud pull schema"""
-
-    cloud_type = fields.Constant(CloudPullTypesEnum.seaweedfs.value)
-
-
-class AzureCloudPull(Schema):
-    """Class defining Azure Cloud pull schema"""
+class AzureCredentialsFields:
+    """Reusable field definitions for Azure storage credentials"""
 
     account_name = fields.Str(required=True, validate=validate.Length(min=1, max=2048))
     access_key = fields.Str(required=True, validate=validate.Length(min=1, max=2048))
@@ -721,11 +697,169 @@ class AzureCloudPull(Schema):
     cloud_type = fields.Constant(CloudPullTypesEnum.azure.value)
 
 
-class HuggingFaceCloudPull(Schema):
-    """Class defining Hugging Face Cloud pull schema"""
+class HuggingFaceCredentialsFields:
+    """Reusable field definitions for Hugging Face credentials"""
 
     token = fields.Str(validate=validate.Length(max=2048))
     cloud_type = fields.Constant(CloudPullTypesEnum.huggingface.value)
+
+
+class AWSCloudPull(AWSCredentialsFields, Schema):
+    """Class defining AWS Cloud pull schema"""
+
+    cloud_type = fields.Constant(CloudPullTypesEnum.aws.value)
+
+
+class SeaweedfsCloudPull(AWSCredentialsFields, Schema):
+    """Class defining Seaweed Cloud pull schema"""
+
+    cloud_type = fields.Constant(CloudPullTypesEnum.seaweedfs.value)
+
+
+class AzureCloudPull(AzureCredentialsFields, Schema):
+    """Class defining Azure Cloud pull schema"""
+
+    cloud_type = fields.Constant(CloudPullTypesEnum.azure.value)
+
+
+class HuggingFaceCloudPull(HuggingFaceCredentialsFields, Schema):
+    """Class defining Hugging Face Cloud pull schema"""
+
+    cloud_type = fields.Constant(CloudPullTypesEnum.huggingface.value)
+
+
+class StorageBackendAWS(AWSCredentialsFields, Schema):
+    """AWS storage backend for Lepton - uses same credentials as AWSCloudPull"""
+
+    storage_type = fields.Constant('aws')
+
+
+class StorageBackendSeaweedfs(AWSCredentialsFields, Schema):
+    """Seaweedfs storage backend for Lepton - uses same credentials as SeaweedfsCloudPull"""
+
+    storage_type = fields.Constant('seaweedfs')
+
+
+class StorageBackendAzure(AzureCredentialsFields, Schema):
+    """Azure storage backend for Lepton - uses same credentials as AzureCloudPull"""
+
+    storage_type = fields.Constant('azure')
+
+
+class StorageBackendHuggingface(HuggingFaceCredentialsFields, Schema):
+    """Huggingface storage backend for Lepton - uses same credentials as HuggingFaceCloudPull"""
+
+    storage_type = fields.Constant('huggingface')
+
+
+class LeptonStorageBackend(OneOfSchema):
+    """Polymorphic storage backend for Lepton"""
+
+    type_schemas = {
+        "aws": StorageBackendAWS,
+        "azure": StorageBackendAzure,
+        "seaweedfs": StorageBackendSeaweedfs,
+        "huggingface": StorageBackendHuggingface,
+    }
+    type_field = "storage_type"
+
+    def get_obj_type(self, obj):
+        """Determine the schema to use based on storage_type"""
+        storage_type = obj.get("storage_type")
+        if storage_type in self.type_schemas:
+            return storage_type
+        raise ValidationError(f"Invalid storage type: {storage_type}")
+
+
+class SlurmCloudPull(Schema):
+    """Class defining Slurm Cloud pull schema
+
+    slurm_hostname must be a list of hostname strings for multi-host failover support.
+    """
+
+    slurm_user = fields.Str(validate=validate.Length(max=2048), required=True)
+    slurm_hostname = fields.List(fields.Str(validate=validate.Length(max=2048)),
+                                 required=True, validate=validate.Length(min=1))
+    base_results_dir = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    cloud_type = fields.Constant(CloudPullTypesEnum.slurm.value)
+
+
+class LocalBackendDetails(Schema):
+    """Backend details for local execution - no additional parameters"""
+
+    backend_type = fields.Constant("local")
+
+
+class SlurmBackendDetails(Schema):
+    """Backend details for Slurm execution"""
+
+    backend_type = fields.Constant("slurm")
+    partition = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    cluster_name = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    slurm_metadata = fields.Dict(allow_none=True)  # For storing slurm_job_id and other runtime metadata
+
+
+class LeptonBackendDetails(Schema):
+    """Backend details for Lepton execution"""
+
+    backend_type = fields.Constant("lepton")
+    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+
+
+class BackendDetails(OneOfSchema):
+    """Class defining polymorphic backend execution details schema"""
+
+    type_schemas = {
+        "local": LocalBackendDetails,
+        "slurm": SlurmBackendDetails,
+        "lepton": LeptonBackendDetails,
+    }
+    type_field = "backend_type"
+
+    def get_obj_type(self, obj):
+        """Determine the schema to use based on the properties of the Python object"""
+        backend_type = obj.get("backend_type")
+        if backend_type in self.type_schemas:
+            return backend_type
+        raise fields.ValidationError(f"Invalid backend type: {backend_type}")
+
+
+class LeptonCloudPull(Schema):
+    """Class defining Lepton Cloud pull schema
+
+    Lepton workspaces can use AWS S3 or Azure Blob storage.
+    Provide either AWS credentials (access_key, secret_key) or Azure credentials (account_name, access_key).
+    """
+
+    # Lepton-specific fields
+    lepton_workspace_id = fields.Str(validate=validate.Length(max=2048), required=True)
+    lepton_auth_token = fields.Str(validate=validate.Length(max=2048), required=True)
+    cloud_type = fields.Constant(CloudPullTypesEnum.lepton.value)
+
+    # AWS fields (optional - required if using AWS storage)
+    access_key = fields.Str(validate=validate.Length(min=1, max=2048), allow_none=True)
+    secret_key = fields.Str(validate=validate.Length(min=1, max=2048), allow_none=True)
+
+    # Azure fields (optional - required if using Azure storage)
+    account_name = fields.Str(validate=validate.Length(min=1, max=2048), allow_none=True)
+
+    # Shared fields
+    cloud_region = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    endpoint_url = fields.Str(validate=[validate_endpoint_url, validate.Length(max=2048)], allow_none=True)
+    cloud_bucket_name = fields.Str(validate=validate.Length(min=1, max=2048), allow_none=True)
+
+    @validates_schema
+    def validate_storage_credentials(self, data, **kwargs):
+        """Ensure either AWS or Azure credentials are provided, but not both"""
+        has_aws = data.get('access_key') and data.get('secret_key')
+        has_azure = data.get('account_name') and data.get('access_key') and not data.get('secret_key')
+        has_lepton = data.get('lepton_workspace_id') and data.get('lepton_auth_token')
+
+        if not (has_aws or has_azure) or not has_lepton:
+            raise ValidationError(
+                'Must provide either AWS credentials (access_key, secret_key) '
+                'or Azure credentials (account_name, access_key) and Lepton workspace ID and auth token'
+            )
 
 
 class CloudSpecificDetails(OneOfSchema):
@@ -736,6 +870,8 @@ class CloudSpecificDetails(OneOfSchema):
         "azure": AzureCloudPull,
         "huggingface": HuggingFaceCloudPull,
         "seaweedfs": SeaweedfsCloudPull,
+        "lepton": LeptonCloudPull,
+        "slurm": SlurmCloudPull,
     }
     type_field = "cloud_type"
 
@@ -760,6 +896,7 @@ class WorkspaceReq(Schema):
     version = fields.Str(format="regex", regex=r'^\d+\.\d+\.\d+$', validate=fields.validate.Length(max=10))
     cloud_type = EnumField(CloudPullTypesEnum, allow_none=False)
     cloud_specific_details = fields.Nested(CloudSpecificDetails, allow_none=False)
+    force_create = fields.Bool(allow_none=True)
 
     @validates_schema
     def validate_cloud_specific_details(self, data, **kwargs):
@@ -776,6 +913,10 @@ class WorkspaceReq(Schema):
                 schema = AWSCloudPull()
             elif cloud_type == CloudPullTypesEnum.huggingface:
                 schema = HuggingFaceCloudPull()
+            elif cloud_type == CloudPullTypesEnum.lepton:
+                schema = LeptonCloudPull()
+            elif cloud_type == CloudPullTypesEnum.slurm:
+                schema = SlurmCloudPull()
             else:
                 schema = Schema()
 
@@ -831,10 +972,10 @@ class WorkspaceListRsp(Schema):
     pagination_info = fields.Nested(PaginationInfo, allow_none=True)
 
 
-class DatasetPathLst(Schema):
+class DatasetUriLst(Schema):
     """Class defining dataset actions schema"""
 
-    dataset_paths = fields.List(
+    dataset_uris = fields.List(
         fields.Str(
             format="regex",
             regex=r'.*',
@@ -854,7 +995,7 @@ class DatasetActions(Schema):
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
 
 
 class LstStr(Schema):
@@ -872,7 +1013,7 @@ class LstStr(Schema):
     accepted_dataset_intents = fields.List(
         EnumField(DatasetIntentEnum),
         allow_none=True,
-        validate=validate.Length(max=3)
+        validate=validate.Length(max=4)
     )
 
 
@@ -914,7 +1055,7 @@ class DatasetReq(Schema):
     client_secret = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     filters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     status = EnumField(PullStatus)
-    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=3))
+    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=4))
     base_experiment_pull_complete = EnumField(PullStatus)
     base_experiment_ids = fields.List(
         fields.Str(format="uuid", validate=fields.validate.Length(max=36)),
@@ -935,6 +1076,7 @@ class DatasetReq(Schema):
         ),
         validate=validate.Length(max=16)
     )
+    force_create = fields.Bool(allow_none=True)
 
 
 class DatasetJob(Schema):
@@ -960,7 +1102,7 @@ class DatasetJob(Schema):
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     dataset_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
     epoch_numbers = fields.List(
         fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize)),
@@ -1018,7 +1160,7 @@ class DatasetRsp(Schema):
     client_secret = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     filters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     status = EnumField(PullStatus)
-    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=3))
+    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=4))
     base_experiment_pull_complete = EnumField(PullStatus)
     base_experiment_ids = fields.List(
         fields.Str(format="uuid", validate=fields.validate.Length(max=36)),
@@ -1063,7 +1205,7 @@ class ExperimentActions(Schema):
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
 
 
 class PublishModel(Schema):
@@ -1080,9 +1222,10 @@ class JobResume(Schema):
 
     parent_job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
     specs = fields.Raw(allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
 
 
-class ParameterRangeSchema(Schema):
+class ParameterRange(Schema):
     """Schema for parameter attributes (used for both default and custom)"""
 
     class Meta:
@@ -1105,6 +1248,8 @@ class ParameterRangeSchema(Schema):
     math_cond = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
     depends_on = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     parent_param = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
+    # When True, skip network-specific logic and treat as pure float for optimization
+    disable_list = fields.Bool(allow_none=True)
 
 
 class AutoMLParameterDetail(Schema):
@@ -1117,8 +1262,8 @@ class AutoMLParameterDetail(Schema):
         unknown = EXCLUDE
     parameter = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
     value_type = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
-    default = fields.Nested(ParameterRangeSchema)
-    custom = fields.Nested(ParameterRangeSchema, allow_none=True)
+    default = fields.Nested(ParameterRange)
+    custom = fields.Nested(ParameterRange, allow_none=True)
 
 
 class AutoMLParameterDetailsRsp(Schema):
@@ -1143,43 +1288,152 @@ class AutoMLUpdateParameterRangesReq(Schema):
     job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), required=True)
     network_arch = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), required=True)
     parameter_ranges = fields.List(
-        fields.Nested(ParameterRangeSchema),
+        fields.Nested(ParameterRange),
         validate=validate.Length(min=1, max=sys.maxsize),
         required=True
     )
 
 
+# Algorithm-specific parameter schemas (nested structure)
+class AutoMLBayesianParams(Schema):
+    """Schema for Bayesian and BFBO algorithm parameters"""
+
+    class Meta:
+        """Marshmallow schema configuration"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    automl_max_recommendations = fields.Int(
+        format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True
+    )
+
+
+class AutoMLHyperbandParams(Schema):
+    """Schema for Hyperband algorithm parameters"""
+
+    class Meta:
+        """Marshmallow schema configuration"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    automl_max_epochs = fields.Int(format="int64", validate=validate.Range(min=2, max=sys.maxsize), required=True)
+    automl_reduction_factor = fields.Int(format="int64", validate=validate.Range(min=2, max=sys.maxsize), required=True)
+    epoch_multiplier = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+
+
+class AutoMLBOHBParams(AutoMLHyperbandParams):
+    """Schema for BOHB algorithm parameters"""
+
+    automl_kde_samples = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True)
+    automl_top_n_percent = fields.Float(validate=validate.Range(min=0.0, max=100.0), allow_none=True)
+    automl_min_points_in_model = fields.Int(
+        format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True
+    )
+
+
+class AutoMLASHAParams(AutoMLHyperbandParams):
+    """Schema for ASHA algorithm parameters"""
+
+    automl_max_concurrent = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+    automl_max_trials = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True)
+
+
+class AutoMLDEHBParams(AutoMLHyperbandParams):
+    """Schema for DEHB algorithm parameters"""
+
+    automl_mutation_factor = fields.Float(validate=validate.Range(min=0.0, max=2.0), allow_none=True)
+    automl_crossover_prob = fields.Float(validate=validate.Range(min=0.0, max=1.0), allow_none=True)
+
+
+class AutoMLHyperBandESParams(AutoMLHyperbandParams):
+    """Schema for HyperBand with Early Stopping algorithm parameters"""
+
+    automl_early_stop_threshold = fields.Float(validate=validate.Range(min=0.0, max=1.0), allow_none=True)
+    automl_min_early_stop_epochs = fields.Int(
+        format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True
+    )
+
+
+class AutoMLPBTParams(Schema):
+    """Schema for Population-Based Training algorithm parameters"""
+
+    class Meta:
+        """Marshmallow schema configuration"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    automl_population_size = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+    automl_eval_interval = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+    automl_perturbation_factor = fields.Float(validate=validate.Range(min=1.0, max=10.0), allow_none=True)
+
+
 class AutoML(Schema):
-    """Class defining automl parameters in a schema"""
+    """AutoML schema with nested algorithm-specific parameters"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-        unknown = EXCLUDE
+        unknown = RAISE
+
     automl_enabled = fields.Bool(allow_none=True)
     automl_algorithm = EnumField(AutoMLAlgorithm, allow_none=True)
-    automl_max_recommendations = fields.Int(
-        format="int64",
-        validate=validate.Range(min=0, max=sys.maxsize),
-        allow_none=True
-    )
     automl_delete_intermediate_ckpt = fields.Bool(allow_none=True)
     override_automl_disabled_params = fields.Bool(allow_none=True)
-    automl_R = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    automl_nu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    epoch_multiplier = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     automl_hyperparameters = fields.Str(
-        format="regex",
-        regex=r'\[.*\]',
-        validate=fields.validate.Length(max=5000),
-        allow_none=True
+        format="regex", regex=r'\[.*\]', validate=fields.validate.Length(max=5000), allow_none=True
     )
     automl_range_override = fields.List(
-        fields.Nested(ParameterRangeSchema),
+        fields.Nested(ParameterRange),
         validate=validate.Length(max=sys.maxsize),
         allow_none=True
     )
+    # Nested algorithm-specific parameters
+    algorithm_specific_params = fields.Field(allow_none=True)
+    metric = fields.Str(allow_none=True)
+
+    @validates_schema
+    def validate_algorithm_specific_params(self, data, **kwargs):
+        """Validate algorithm-specific parameters based on algorithm type"""
+        if not data.get('automl_enabled', False):
+            return
+
+        algorithm = data.get('automl_algorithm')
+        if not algorithm:
+            raise ValidationError('automl_algorithm is required when automl_enabled is True')
+
+        # Convert enum to string if needed
+        algo_str = algorithm.value if hasattr(algorithm, 'value') else str(algorithm)
+
+        # Select appropriate schema based on algorithm
+        if algo_str in ('bayesian', 'b', 'bfbo'):
+            schema = AutoMLBayesianParams()
+        elif algo_str in ('hyperband', 'h'):
+            schema = AutoMLHyperbandParams()
+        elif algo_str == 'bohb':
+            schema = AutoMLBOHBParams()
+        elif algo_str == 'asha':
+            schema = AutoMLASHAParams()
+        elif algo_str == 'dehb':
+            schema = AutoMLDEHBParams()
+        elif algo_str in ('hyperband_es', 'hes'):
+            schema = AutoMLHyperBandESParams()
+        elif algo_str == 'pbt':
+            schema = AutoMLPBTParams()
+        else:
+            raise ValidationError(f'Unknown automl_algorithm: {algo_str}')
+
+        # Always validate algorithm-specific parameters (required fields will error if missing)
+        params = data.get('algorithm_specific_params') or {}
+        try:
+            schema.load(params, unknown=EXCLUDE)
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise fields.ValidationError(str(e))
 
 
 class BaseExperimentMetadata(Schema):
@@ -1245,6 +1499,13 @@ class InferenceMicroserviceReq(Schema):
         allow_none=True,
         required=False
     )
+    hf_model = fields.Str(
+        validate=fields.validate.Length(max=2048),
+        description="HuggingFace model name (e.g., meta-llama/Llama-3-8B-Instruct, Qwen/Qwen-VL-Chat)",
+        example="meta-llama/Llama-3-8B-Instruct",
+        allow_none=True,
+        required=False
+    )
     enable_lora = fields.Bool(
         description="Enable LoRA for inference",
         default=False
@@ -1253,6 +1514,20 @@ class InferenceMicroserviceReq(Schema):
         description="Base model path (e.g., hf_model://nvidia/Cosmos-Reason1-7B)",
         required=False,
         allow_none=True
+    )
+    torch_dtype = fields.Str(
+        validate=fields.validate.Length(max=50),
+        description="PyTorch data type for HuggingFace models (auto, float16, bfloat16, float32)",
+        example="auto",
+        allow_none=True,
+        required=False
+    )
+    device_map = fields.Str(
+        validate=fields.validate.Length(max=50),
+        description="Device mapping strategy for HuggingFace models (auto, cuda, cpu)",
+        example="auto",
+        allow_none=True,
+        required=False
     )
     docker_image = fields.Str(
         validate=fields.validate.Length(max=2048),
@@ -1272,7 +1547,7 @@ class InferenceMicroserviceReq(Schema):
     )
     workspace = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
     docker_env_vars = fields.Dict(
-        keys=EnumField(AllowedDockerEnvVariables),
+        keys=fields.Str(validate=validate.OneOf([e.value for e in AllowedDockerEnvVariables])),
         values=fields.Str(
             format="regex",
             regex=r'.*',
@@ -1296,7 +1571,32 @@ class InferenceMicroserviceReq(Schema):
             allow_none=True
         )
     )
-    network_arch = EnumField(ExperimentNetworkArch, allow_none=False)
+    network_arch = EnumField(ExperimentNetworkArch, allow_none=True)
+    custom_pipeline_loader = fields.Str(
+        validate=fields.validate.Length(max=10000),
+        description=(
+            "Python code string defining a load_pipeline(model_name, **kwargs) "
+            "function for custom model loading"
+        ),
+        example=(
+            "def load_pipeline(model_name, **kwargs):\n"
+            "    from diffusers import WanPipeline\n"
+            "    return WanPipeline.from_pretrained(model_name), 'diffusion'"
+        ),
+        allow_none=True,
+        required=False
+    )
+    custom_inference_fn = fields.Str(
+        validate=fields.validate.Length(max=10000),
+        description="Python code string defining a run_inference(pipeline, **kwargs) function for custom inference",
+        example=(
+            "def run_inference(pipeline, **kwargs):\n"
+            "    output = pipeline(kwargs['prompt'])\n"
+            "    return {'response': 'done', 'frames': output.frames}"
+        ),
+        allow_none=True,
+        required=False
+    )
 
 
 class InferenceMicroserviceRsp(Schema):
@@ -1345,16 +1645,54 @@ class InferenceReq(Schema):
         required=False,
         allow_none=True
     )
+    images = fields.List(
+        fields.Str(
+            description="Image paths/URLs for VLM inference",
+            required=False
+        ),
+        allow_none=True
+    )
     model = fields.Str(
         description="Model identifier (e.g. nvidia/nvdino-v2)",
         required=False,
         allow_none=True
     )
     prompt = fields.Str(
-        description="Text prompt for VLM inference",
+        description="Text prompt for LLM/VLM inference",
         required=False,
         allow_none=True,
         default=""
+    )
+    system_prompt = fields.Str(
+        description="System prompt for chat models",
+        required=False,
+        allow_none=True
+    )
+    max_new_tokens = fields.Int(
+        format="int64",
+        validate=validate.Range(min=1, max=32768),
+        description="Maximum number of new tokens to generate",
+        default=512,
+        allow_none=True
+    )
+    temperature = fields.Float(
+        validate=validate.Range(min=0.0, max=2.0),
+        description="Sampling temperature (0.0 = deterministic, higher = more random)",
+        default=0.7,
+        allow_none=True
+    )
+    top_p = fields.Float(
+        validate=validate.Range(min=0.0, max=1.0),
+        description="Nucleus sampling parameter",
+        default=0.9,
+        allow_none=True
+    )
+    top_k = fields.Int(
+        format="int64",
+        validate=validate.Range(min=1, max=1000),
+        description="Top-k sampling parameter",
+        default=50,
+        allow_none=True
     )
     enable_lora = fields.Bool(
         description="Enable LoRA for inference",
@@ -1364,6 +1702,52 @@ class InferenceReq(Schema):
     base_model_path = fields.Str(
         description="Base model path (e.g., hf_model://nvidia/Cosmos-Reason1-7B)",
         required=False,
+        allow_none=True
+    )
+    # Diffusion model parameters (for Cosmos-Predict2, Stable Diffusion, etc.)
+    negative_prompt = fields.Str(
+        description="Negative prompt for diffusion models (what to avoid in generation)",
+        required=False,
+        allow_none=True
+    )
+    num_inference_steps = fields.Int(
+        format="int64",
+        validate=validate.Range(min=1, max=1000),
+        description="Number of denoising steps for diffusion models (default: 50)",
+        default=50,
+        allow_none=True
+    )
+    guidance_scale = fields.Float(
+        validate=validate.Range(min=0.0, max=50.0),
+        description="Classifier-free guidance scale for diffusion models (default: 7.5)",
+        default=7.5,
+        allow_none=True
+    )
+    width = fields.Int(
+        format="int64",
+        validate=validate.Range(min=64, max=4096),
+        description="Output image width for diffusion models",
+        required=False,
+        allow_none=True
+    )
+    height = fields.Int(
+        format="int64",
+        validate=validate.Range(min=64, max=4096),
+        description="Output image height for diffusion models",
+        required=False,
+        allow_none=True
+    )
+    seed = fields.Int(
+        format="int64",
+        description="Random seed for reproducible diffusion generation",
+        required=False,
+        allow_none=True
+    )
+    num_images = fields.Int(
+        format="int64",
+        validate=validate.Range(min=1, max=16),
+        description="Number of images to generate (default: 1)",
+        default=1,
         allow_none=True
     )
 
@@ -1418,14 +1802,14 @@ class DatasetJobReq(Schema):
         ordered = True
         unknown = EXCLUDE
 
-    dataset_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=False, required=True)
+    dataset_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True, load_default=None)
     parent_job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
     action = EnumField(ActionEnum)
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     epoch_numbers = fields.List(
         fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize)),
         validate=validate.Length(max=sys.maxsize),
@@ -1437,6 +1821,52 @@ class DatasetJobReq(Schema):
         fields.Str(format="uuid", validate=fields.validate.Length(max=36)),
         validate=validate.Length(max=2)
     )
+    # New fields for direct dataset paths (alternative to UUID-based dataset_id)
+    train_dataset_uris = fields.List(
+        fields.Str(validate=fields.validate.Length(max=1000)),
+        validate=validate.Length(max=sys.maxsize),
+        allow_none=True,
+        metadata={"description": "List of dataset URIs (aws://, azure://, lustre://, file://, or local)"}
+    )
+    eval_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Evaluation dataset URI"}
+    )
+    inference_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Inference dataset URI"}
+    )
+    calibration_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Calibration dataset URI"}
+    )
+    dataset_format = fields.Str(
+        validate=fields.validate.Length(max=100),
+        allow_none=True,
+        metadata={"description": "Dataset format (e.g., 'kitti', 'coco', 'custom')"}
+    )
+    dataset_type = fields.Str(
+        validate=fields.validate.Length(max=100),
+        allow_none=True,
+        metadata={
+            "description": "Dataset type (e.g., 'object_detection', 'classification'). "
+                           "Required when using direct dataset paths."
+        }
+    )
+    skip_dataset_validation = fields.Bool(
+        allow_none=True,
+        metadata={"description": "Skip dataset structure validation. Default: False."}
+    )
+    workspace = fields.Str(
+        format="uuid",
+        validate=fields.validate.Length(max=36),
+        allow_none=True,
+        metadata={"description": "Workspace ID. Used when creating jobs with direct dataset paths."}
+    )
+    force_create = fields.Bool(allow_none=True)
 
 
 class ExperimentJobReq(Schema):
@@ -1522,18 +1952,41 @@ class ExperimentJobReq(Schema):
         ),
         validate=validate.Length(max=sys.maxsize)
     )
+    # New fields for direct dataset paths (alternative to UUID-based dataset references)
+    train_dataset_uris = fields.List(
+        fields.Str(validate=fields.validate.Length(max=1000)),
+        validate=validate.Length(max=sys.maxsize),
+        allow_none=True,
+        metadata={"description": "List of dataset URIs (aws://, azure://, lustre://, file://, or local)"}
+    )
+    eval_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Evaluation dataset URI"}
+    )
+    inference_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Inference dataset URI"}
+    )
+    calibration_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Calibration dataset URI"}
+    )
+    dataset_format = fields.Str(
+        validate=fields.validate.Length(max=100),
+        allow_none=True,
+        metadata={
+            "description": "Dataset format (e.g., 'llava', 'coco', 'kitti'). "
+                           "If not specified, uses network's default format"
+        }
+    )
     read_only = fields.Bool()
     public = fields.Bool()
     automl_settings = fields.Nested(AutoML, allow_none=True)
     metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
-    realtime_infer = fields.Bool(default=False)
     model_params = fields.Dict(allow_none=True)
-    bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
-    realtime_infer_request_timeout = fields.Int(
-        format="int64",
-        validate=validate.Range(min=0, max=sys.maxsize),
-        allow_none=True
-    )
     experiment_actions = fields.List(
         fields.Nested(ExperimentActions, allow_none=True),
         validate=validate.Length(max=sys.maxsize)
@@ -1558,13 +2011,21 @@ class ExperimentJobReq(Schema):
     action = EnumField(ActionEnum)
     specs = fields.Raw()
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     epoch_numbers = fields.List(
         fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize)),
         validate=validate.Length(max=sys.maxsize),
         allow_none=True
     )
+    skip_dataset_validation = fields.Bool(
+        allow_none=True,
+        metadata={
+            "description": "Skip dataset structure validation at job creation. "
+                           "Default: False. Set to True to bypass validation checks."
+        }
+    )
     kind = fields.Constant(JobKindEnum.experiment.value)
+    force_create = fields.Bool(allow_none=True)
 
 
 class JobReq(OneOfSchema):
@@ -1608,7 +2069,7 @@ class DatasetJobRsp(Schema):
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     dataset_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
     epoch_numbers = fields.List(
         fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize)),
@@ -1630,7 +2091,7 @@ class ExperimentJobRsp(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-        load_only = ("user_id", "docker_env_vars", "realtime_infer_endpoint", "realtime_infer_model_name")
+        load_only = ("user_id", "docker_env_vars")
         unknown = EXCLUDE
 
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
@@ -1717,6 +2178,36 @@ class ExperimentJobRsp(Schema):
         ),
         validate=validate.Length(max=sys.maxsize)
     )
+    # New fields for direct dataset paths (alternative to UUID-based dataset references)
+    train_dataset_uris = fields.List(
+        fields.Str(validate=fields.validate.Length(max=1000)),
+        validate=validate.Length(max=sys.maxsize),
+        allow_none=True,
+        metadata={"description": "List of dataset URIs (aws://, azure://, lustre://, file://, or local)"}
+    )
+    eval_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Evaluation dataset URI"}
+    )
+    inference_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Inference dataset URI"}
+    )
+    calibration_dataset_uri = fields.Str(
+        validate=fields.validate.Length(max=1000),
+        allow_none=True,
+        metadata={"description": "Calibration dataset URI"}
+    )
+    dataset_format = fields.Str(
+        validate=fields.validate.Length(max=100),
+        allow_none=True,
+        metadata={
+            "description": "Dataset format (e.g., 'llava', 'coco', 'kitti'). "
+                           "If not specified, uses network's default format"
+        }
+    )
     read_only = fields.Bool()
     public = fields.Bool()
     actions = fields.List(EnumField(ActionEnum), allow_none=True, validate=validate.Length(max=sys.maxsize))
@@ -1732,27 +2223,7 @@ class ExperimentJobRsp(Schema):
     all_jobs_cancel_status = EnumField(JobStatusEnum, allow_none=True)
     automl_settings = fields.Nested(AutoML)
     metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
-    realtime_infer = fields.Bool(allow_none=True)
-    realtime_infer_support = fields.Bool()
-    realtime_infer_endpoint = fields.Str(
-        format="regex",
-        regex=r'.*',
-        validate=fields.validate.Length(max=1000),
-        allow_none=True
-    )
-    realtime_infer_model_name = fields.Str(
-        format="regex",
-        regex=r'.*',
-        validate=fields.validate.Length(max=1000),
-        allow_none=True
-    )
     model_params = fields.Dict(allow_none=True)
-    realtime_infer_request_timeout = fields.Int(
-        format="int64",
-        validate=validate.Range(min=0, max=86400),
-        allow_none=True
-    )
-    bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     base_experiment_metadata = fields.Nested(BaseExperimentMetadata, allow_none=True)
     source_type = EnumField(SourceType, allow_none=True)
     experiment_actions = fields.List(
@@ -1788,13 +2259,14 @@ class ExperimentJobRsp(Schema):
     sync = fields.Bool()
     specs = fields.Raw(allow_none=True)
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     experiment_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
     epoch_numbers = fields.List(
         fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize)),
         validate=validate.Length(max=sys.maxsize),
         allow_none=True
     )
+    kind = fields.Constant(JobKindEnum.experiment.value)
 
 
 class JobRsp(OneOfSchema):

@@ -32,8 +32,15 @@ class InferenceConfig:
     media: str = STR_FIELD(
         default_value="",
         value="",
-        display_name="File path",
-        description="File to be used for inference"
+        display_name="Media path",
+        description="Path to a single video/image file or a folder containing multiple files for batch inference"
+    )
+    type: str = STR_FIELD(
+        default_value="video",
+        value="video",
+        display_name="Media type",
+        description="Type of media to process",
+        valid_options="video,image",
     )
     prompt: str = STR_FIELD(
         default_value="Describe this video.",
@@ -71,7 +78,7 @@ class InferenceConfig:
         default_value=False,
         value=False,
         display_name="Enable LoRA merging",
-        description="Enable LoRA model merging (merge LoRA weights with base model before evaluation)"
+        description="Enable LoRA model merging (merge LoRA weights with base model before inference)"
     )
     base_model_path: Optional[str] = STR_FIELD(
         default_value="",
@@ -85,4 +92,10 @@ class InferenceConfig:
 class ExperimentConfig:
     """Experiment config."""
 
+    results_dir: str = STR_FIELD(
+        default_value="",
+        value="",
+        display_name="Results directory",
+        description="Directory to save inference results"
+    )
     inference: InferenceConfig = DATACLASS_FIELD(InferenceConfig(), description="Inference config.")

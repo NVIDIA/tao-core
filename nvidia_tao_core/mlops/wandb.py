@@ -18,6 +18,7 @@
 
 from datetime import datetime
 import logging
+from typing import Optional
 
 import wandb
 from wandb import AlertLevel
@@ -71,7 +72,8 @@ def initialize_wandb(project: str = "TAO Toolkit",
                      name: str = "train",
                      config=None,
                      wandb_logged_in: bool = False,
-                     results_dir: str = os.getcwd()):
+                     results_dir: str = os.getcwd(),
+                     group: Optional[str] = None):
     """Function to initialize wandb client with the weights and biases server.
 
     If wandb initialization fails, then the function just catches the exception
@@ -88,6 +90,7 @@ def initialize_wandb(project: str = "TAO Toolkit",
             file used to run the job.
         wandb_logged_in (bool): Boolean flag to check if wandb was logged in.
         results_dir (str): Output directory of the experiment.
+        group (Optional[str]): WandB group name for grouping related runs (e.g., AutoML trials).
 
     Returns:
         No explicit returns.
@@ -106,15 +109,24 @@ def initialize_wandb(project: str = "TAO Toolkit",
             os.makedirs(wandb_dir)
         wandb_name = f"{name}_{time_string}"
         # wandb.tensorboard.patch(root_logdir=results_dir)
-        wandb.init(
-            project=project,
-            entity=entity,
-            sync_tensorboard=sync_tensorboard,
-            save_code=save_code,
-            name=wandb_name,
-            config=config,
-            dir=wandb_dir
-        )
+
+        # Build init kwargs
+        init_kwargs = {
+            "project": project,
+            "entity": entity,
+            "sync_tensorboard": sync_tensorboard,
+            "save_code": save_code,
+            "name": wandb_name,
+            "config": config,
+            "dir": wandb_dir
+        }
+
+        # Add group if provided (for AutoML child runs)
+        if group:
+            init_kwargs["group"] = group
+
+        wandb.init(**init_kwargs)
+
         global _WANDB_INITIALIZED  # pylint: disable=W0602,W0603 # noqa: F824
         _WANDB_INITIALIZED = True
     except Exception as e:

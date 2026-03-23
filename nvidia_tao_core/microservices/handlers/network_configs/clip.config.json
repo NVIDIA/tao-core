@@ -1,0 +1,159 @@
+{
+    "api_params": {
+        "dataset_type": "image_text",
+        "actions": ["train", "evaluate", "export", "inference", "gen_trt_engine"],
+        "formats": ["default"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference",
+            "gen_trt_engine": "gen_trt_engine"
+        }
+    },
+    "data_sources": {
+        "train": {
+            "dataset.train.datasets": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz"
+                    },
+                    "image_list_file": {
+                        "path": "image_list.txt",
+                        "optional": true
+                    },
+                    "caption_dir": {
+                        "path": "captions.tar.gz"
+                    },
+                    "caption_file_suffix": {
+                        "optional": true
+                    }
+                }
+            },
+            "dataset.val.datasets": {
+                "source": "eval_dataset",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz"
+                    },
+                    "image_list_file": {
+                        "path": "image_list.txt",
+                        "optional": true
+                    },
+                    "caption_dir": {
+                        "path": "captions.tar.gz"
+                    },
+                    "caption_file_suffix": {
+                        "optional": true
+                    }
+                }
+            }
+        },
+        "evaluate": {
+            "dataset.val.datasets": {
+                "source": "eval_dataset",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz"
+                    },
+                    "image_list_file": {
+                        "path": "image_list.txt",
+                        "optional": true
+                    },
+                    "caption_dir": {
+                        "path": "captions.tar.gz"
+                    },
+                    "caption_file_suffix": {
+                        "optional": true
+                    }
+                }
+            }
+        },
+        "inference": {
+            "inference.datasets": {
+                "source": "inference_dataset",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz"
+                    }
+                }
+            },
+            "inference.text_file": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "optional": true,
+                "path": "prompts.txt"
+            }
+        }
+    },
+    "metrics": {
+        "available_metrics": [
+            "val/i2t_mAP",
+            "val/i2t_R@1",
+            "val/i2t_R@5",
+            "val/i2t_MedR",
+            "val/i2t_MeanR",
+            "val/i2t_AUC",
+            "val/t2i_mAP",
+            "val/t2i_R@1",
+            "val/t2i_R@5",
+            "val/t2i_MedR",
+            "val/t2i_MeanR",
+            "val/t2i_AUC",
+            "test/i2t_mAP",
+            "test/i2t_R@1",
+            "test/i2t_R@5",
+            "test/i2t_MedR",
+            "test/i2t_MeanR",
+            "test/i2t_AUC",
+            "test/t2i_mAP",
+            "test/t2i_R@1",
+            "test/t2i_R@5",
+            "test/t2i_MedR",
+            "test/t2i_MeanR",
+            "test/t2i_AUC"
+        ],
+        "monitoring_metric": "val/t2i_mAP"
+    },
+    "spec_params": {
+        "train": {
+            "results_dir": "output_dir",
+            "train.pretrained_model_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
+        },
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "evaluate.trt_engine": "parent_model",
+            "encryption_key": "key"
+        },
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
+        },
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "inference.trt_engine": "parent_model",
+            "encryption_key": "key"
+        },
+        "gen_trt_engine": {
+            "results_dir": "output_dir",
+            "encryption_key": "key",
+            "gen_trt_engine.onnx_file": "parent_model",
+            "gen_trt_engine.trt_engine": "create_engine_file"
+        }
+    },
+    "companion_onnx_bin_download": true
+}

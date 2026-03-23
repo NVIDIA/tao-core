@@ -34,6 +34,8 @@ class LRConfig:
 
     bias_lr_factor: float = FLOAT_FIELD(
         value=1,
+        valid_min=1.0,
+        valid_max=10.0,
         math_cond=">= 1",
         display_name="bias lr factor",
         description="The bias learning rate factor for the WarmupMultiStepLR",
@@ -41,6 +43,8 @@ class LRConfig:
     )
     base_lr: float = FLOAT_FIELD(
         value=0.00035,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="base lr",
         description="The initial learning rate for the training",
@@ -48,6 +52,8 @@ class LRConfig:
     )
     momentum: float = FLOAT_FIELD(
         value=0.9,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="momentum",
         description="The momentum for the WarmupMultiStepLR optimizer",
@@ -55,6 +61,8 @@ class LRConfig:
     )
     weight_decay: float = FLOAT_FIELD(
         value=0.0005,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="weight_decay",
         description="The weight decay coefficient for the optimizer",
@@ -62,6 +70,8 @@ class LRConfig:
     )
     weight_decay_bias: float = FLOAT_FIELD(
         value=0.0005,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="weight_decay_bias",
         description="The weight decay bias for the optimizer",
@@ -87,6 +97,8 @@ class OptimConfig:
     )
     gamma: float = FLOAT_FIELD(
         value=0.1,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="gamma",
         description="The decay rate for the WarmupMultiStepLR scheduler",
@@ -94,6 +106,8 @@ class OptimConfig:
     )
     warmup_factor: float = FLOAT_FIELD(
         value=0.01,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="warmup_factor",
         description="The warmup factor for the WarmupMultiStepLR scheduler",
@@ -101,6 +115,8 @@ class OptimConfig:
     )
     warmup_iters: int = INT_FIELD(
         value=10,
+        valid_min=1,
+        valid_max=10000,
         math_cond="> 0",
         description="The number of warmup iterations for the WarmupMultiStepLR scheduler.",
         display_name="warmup_iters",
@@ -115,6 +131,8 @@ class OptimConfig:
     )
     triplet_loss_margin: float = FLOAT_FIELD(
         value=0.3,
+        valid_min=0.0,
+        valid_max=2.0,
         math_cond="> 0.0",
         display_name="triplet_loss_margin",
         description="""The desired difference between the anchor-positive distance and the
@@ -133,6 +151,8 @@ class OptimConfig:
     )
     miner_function_margin: float = FLOAT_FIELD(
         value=0.1,
+        valid_min=0.0,
+        valid_max=2.0,
         math_cond="> 0.0",
         display_name="triplet_loss_margin",
         description="""Negative pairs are chosen if they have similarity greater than the hardest

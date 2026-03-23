@@ -20,7 +20,6 @@ import json
 from time import sleep
 import os
 import logging
-from datetime import datetime, timezone
 
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_handler_metadata_with_jobs
 from nvidia_tao_core.microservices.utils.handler_utils import filter_file_objects
@@ -53,18 +52,10 @@ def pull_tf_events(results_dir, action, cs_instance, experiment_id):
             if not os.path.exists(destination):
                 cs_instance.download_file(file, destination)
                 logger.info("Downloaded tfevents file to %s", destination)
-            else:
-                current_last_modified = os.path.getmtime(destination)
-                if hasattr(obj, 'last_modified'):
-                    obj_last_modified = obj.last_modified
-                else:
-                    obj_last_modified = obj.extra['last_modified']
-                date_obj = datetime.strptime(obj_last_modified, '%Y-%m-%dT%H:%M:%S.%fZ')
-                timestamp_float = date_obj.replace(tzinfo=timezone.utc).timestamp()
-                if timestamp_float > current_last_modified:
-                    logger.info("File has been modified, downloading file now")
-                    cs_instance.download_file(file, destination)
-                    logger.info("Downloaded tfevents file to %s", destination)
+            elif cs_instance.is_file_modified(file, destination):
+                logger.info("File has been modified, downloading file now")
+                cs_instance.download_file(file, destination)
+                logger.info("Downloaded tfevents file to %s", destination)
     else:
         logger.warning(
             "Path %s does not exist in cloud storage for experiment %s",
@@ -107,7 +98,8 @@ if __name__ == "__main__":
         sleep(30)
         handler_metadata = get_handler_metadata_with_jobs(experiment_id, "experiment")
         automl_enabled = handler_metadata.get("automl_settings", {}).get("automl_enabled", False)
-        results_root = "/results"
+        # Use TAO_API_RESULTS_DIR for SLURM compatibility, fallback to /results
+        results_root = os.getenv('TAO_API_RESULTS_DIR', '/results')
         jobs = handler_metadata.get("jobs", [])
         if len(jobs) == 0:
             logger.info("No jobs found for experiment %s", experiment_id)

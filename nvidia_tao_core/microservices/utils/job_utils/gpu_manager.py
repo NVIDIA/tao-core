@@ -16,23 +16,36 @@
 import logging
 import os
 from pymongo import ReturnDocument
+from nvidia_tao_core.microservices.enum_constants import Backend
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import BACKEND
+
+if os.getenv("BACKEND"):
+    from nvidia_tao_core.microservices.utils.mongo_utils import MongoHandler
+else:
+    MongoHandler = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
-if os.getenv("BACKEND") in ("local-k8s", "local-docker"):
-    from nvidia_tao_core.microservices.utils.mongo_utils import MongoHandler
-
+# Initialize docker_client at module level to avoid possibly-used-before-assignment
+docker_client = None
 if os.getenv("BACKEND") == "local-docker":
     import docker
     try:
-        docker_client = docker.from_env() if os.getenv("DOCKER_HOST") else None
+        # Initialize docker client - from_env() uses DOCKER_HOST if set,
+        # otherwise falls back to default socket (/var/run/docker.sock)
+        docker_client = docker.from_env()
     except Exception as e:
         logger.error(f"Failed to initialize docker client: {e}")
         docker_client = None
 
 
 class GPUManager:
-    """Simple GPU manager that stores the GPU state in DB."""
+    """Simple GPU manager that stores the GPU state in DB.
+
+    NOTE: This manager should ONLY be used for local-docker backend.
+    For SLURM and other cluster schedulers, GPU management is handled
+    by the scheduler itself, not by this manager.
+    """
 
     # Sentinel values for tracking GPU release sources (for debugging)
     RELEASE_INIT = -1              # Released during initialization
@@ -43,7 +56,10 @@ class GPUManager:
     RELEASE_MANUAL = -6            # Released via manual release_gpus() call
 
     def __init__(self, num_gpus=-1):
-        """Initialize the GPU manager."""
+        """Initialize the GPU manager.
+
+        NOTE: This should only be called for local-docker backend.
+        """
         if num_gpus == -1:
             num_gpus = int(os.getenv('NUM_GPU_PER_NODE', default='1'))
         self.num_gpus = num_gpus
@@ -93,6 +109,7 @@ class GPUManager:
         Returns:
             bool: True if container is running, False otherwise
         """
+        from docker.errors import NotFound
         if os.getenv("BACKEND") != "local-docker":
             logger.warning(f"Container check not supported for backend {os.getenv('BACKEND')}")
             return True  # Assume running for non-docker backends
@@ -106,7 +123,7 @@ class GPUManager:
             is_running = container.status.lower() == 'running'
             logger.debug(f"Container {container_name} status: {container.status}, is_running: {is_running}")
             return is_running
-        except docker.errors.NotFound:
+        except NotFound:
             logger.debug(f"Container {container_name} not found (likely completed or failed)")
             return False
         except Exception as e:
@@ -121,7 +138,8 @@ class GPUManager:
 
         Terminal states for normal jobs: Done, Error, Canceled, Paused
         Terminal states for AutoML: success, failure, error, done, canceled
-        Non-terminal states: Running, Pending, Creating, Canceling, Pausing, running, pending, canceling
+        Pre-launch states (container NOT expected): Pending, pending, Creating
+        Post-launch non-terminal states (container expected): Started, Running, running, Canceling, Pausing, canceling
 
         Returns:
             int: Number of GPUs reclaimed
@@ -137,6 +155,11 @@ class GPUManager:
         TERMINAL_STATES = {
             "Done", "Error", "Canceled", "Paused", "success", "failure", "error", "done", "canceled"
         }
+
+        # Pre-launch states: container/pod has NOT been created yet.
+        # Do NOT check for container existence or reclaim GPUs in these states —
+        # the container is not expected to exist yet.
+        PRE_LAUNCH_STATES = {"Pending", "pending", "Creating"}
 
         reclaimed_count = 0
         for gpu in assigned_gpus:
@@ -164,7 +187,7 @@ class GPUManager:
 
             # First try as normal job
             job_metadata = get_handler_job_metadata(assigned_job_id)
-            logger.debug(f"Job metadata (gpu_manager) for {assigned_job_id}: {job_metadata}")
+            # logger.debug(f"Job metadata (gpu_manager) for {assigned_job_id}: {job_metadata}")
             if job_metadata:
                 job_status = job_metadata.get("status", "")
                 logger.debug(f"Normal Job status (gpu_manager) for {assigned_job_id}: {job_status}")
@@ -174,16 +197,16 @@ class GPUManager:
                 # Check if this job has a parent_id
                 mongo_jobs = MongoHandler("tao", "jobs")
                 job_doc = mongo_jobs.find_one({"id": assigned_job_id})
-                logger.debug(
-                    f"Job doc (gpu_manager) for {assigned_job_id}: {job_doc}"
-                )
+                # logger.debug(
+                #     f"Job doc (gpu_manager) for {assigned_job_id}: {job_doc}"
+                # )
                 if job_doc and "parent_id" in job_doc:
                     parent_id = job_doc.get("parent_id")
                     logger.debug(f"Parent ID (gpu_manager) for {assigned_job_id}: {parent_id}")
                     # Verify parent is an AutoML brain job (not just a regular parent like train->eval)
                     mongo_automl_jobs = MongoHandler("tao", "automl_jobs")
                     automl_parent = mongo_automl_jobs.find_one({"id": parent_id})
-                    logger.debug(f"Automl parent (gpu_manager) for {assigned_job_id}: {automl_parent}")
+                    # logger.debug(f"Automl parent (gpu_manager) for {assigned_job_id}: {automl_parent}")
                     if automl_parent:
                         # This is an AutoML experiment! Get status from controller
                         from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
@@ -191,11 +214,11 @@ class GPUManager:
                         )
 
                         controller_info = get_automl_controller_info(parent_id)
-                        logger.debug(f"Controller info (gpu_manager) for {assigned_job_id}: {controller_info}")
+                        # logger.debug(f"Controller info (gpu_manager) for {assigned_job_id}: {controller_info}")
                         if controller_info and isinstance(controller_info, list):
                             # Find the recommendation matching this experiment job_id
                             for recommendation in controller_info:
-                                logger.debug(f"Recommendation (gpu_manager) for {assigned_job_id}: {recommendation}")
+                                # logger.debug(f"Recommendation (gpu_manager) for {assigned_job_id}: {recommendation}")
                                 if recommendation.get("job_id") == assigned_job_id:
                                     job_status = recommendation.get("status", "")
                                     logger.debug(f"Job status (gpu_manager) for {assigned_job_id}: {job_status}")
@@ -267,11 +290,39 @@ class GPUManager:
                         f"terminal state '{job_status}' BUT container still running, "
                         f"keeping GPU assignment (cleanup in progress)"
                     )
-            else:
+            elif job_status in PRE_LAUNCH_STATES:
+                # Job is queued / being set up — container is NOT expected to exist.
+                # Skip container check entirely; reclaiming here is wrong.
                 logger.debug(
                     f"GPU {gpu_id} assigned to job {assigned_job_id} "
-                    f"in non-terminal state '{job_status}', keeping assignment"
+                    f"in pre-launch state '{job_status}' - keeping assignment "
+                    f"(container not expected yet)"
                 )
+            else:
+                # Job is in a post-launch, non-terminal state (e.g. Started, Running).
+                # Container SHOULD exist — verify it does.
+                container_running = self._is_container_running(assigned_job_id)
+                if container_running:
+                    logger.debug(
+                        f"GPU {gpu_id} assigned to job {assigned_job_id} "
+                        f"in non-terminal state '{job_status}', container running - keeping assignment"
+                    )
+                else:
+                    logger.warning(
+                        f"[GPU_RELEASE] GPU {gpu_id} assigned to job {assigned_job_id}: "
+                        f"DB status '{job_status}' but container NOT running (crashed/removed). "
+                        f"Reason: Non-terminal state but container gone "
+                        f"(sentinel: {self.RELEASE_NO_STATUS_NO_CONTAINER})"
+                    )
+                    self.mongo_handler.upsert(
+                        {"id": gpu_id},
+                        {"id": gpu_id, "status": "available", "job_id": self.RELEASE_NO_STATUS_NO_CONTAINER}
+                    )
+                    logger.debug(
+                        f"[GPU_RELEASE] GPU {gpu_id} → AVAILABLE "
+                        f"(was: assigned to {assigned_job_id}, sentinel: {self.RELEASE_NO_STATUS_NO_CONTAINER})"
+                    )
+                    reclaimed_count += 1
 
         if reclaimed_count > 0:
             logger.debug(f"Reclaimed {reclaimed_count} GPU(s) from completed/failed containers")
@@ -279,6 +330,64 @@ class GPUManager:
             logger.debug("No stale GPU assignments found")
 
         return reclaimed_count
+
+    @staticmethod
+    def _should_manage_gpus_for_job(job_id):
+        """Check if GPU manager should manage GPUs for this job.
+
+        SLURM and other cluster schedulers manage their own GPUs,
+        so we should not track/assign them in MongoDB.
+
+        Args:
+            job_id: Job ID to check
+
+        Returns:
+            bool: True if GPU manager should manage GPUs, False otherwise
+        """
+        try:
+            from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
+                get_handler_job_metadata,
+                get_handler_metadata
+            )
+
+            job_metadata = get_handler_job_metadata(job_id)
+            if not job_metadata:
+                # If we can't find metadata, assume we should manage (for backward compatibility)
+                return True
+
+            # Check if job is using a SLURM workspace
+            workspace_id = job_metadata.get("workspace_id") or job_metadata.get("platform_id")
+
+            # If not in job metadata, check handler/experiment metadata
+            if not workspace_id:
+                handler_id = job_metadata.get("experiment_id") or job_metadata.get("handler_id")
+                kind = job_metadata.get("kind", "experiment")
+                if handler_id:
+                    handler_metadata = get_handler_metadata(handler_id, kind + "s")
+                    if handler_metadata:
+                        workspace_id = handler_metadata.get("workspace") or handler_metadata.get("platform_id")
+
+            if workspace_id:
+                workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+                if workspace_metadata:
+                    # Check both top-level and nested cloud_type (for robustness)
+                    cloud_type = workspace_metadata.get("cloud_type")
+                    if not cloud_type:
+                        # Fallback: check inside cloud_specific_details
+                        cloud_type = workspace_metadata.get("cloud_specific_details", {}).get("cloud_type")
+
+                    if cloud_type == "slurm":
+                        logger.debug(
+                            f"[GPU_MANAGER] Job {job_id} is using SLURM workspace, "
+                            f"GPU manager will NOT manage GPUs (SLURM handles scheduling)"
+                        )
+                        return False
+
+            return True
+        except Exception as e:
+            logger.debug(f"[GPU_MANAGER] Error checking if should manage GPUs for job {job_id}: {e}")
+            # Default to managing GPUs if we can't determine (backward compatibility)
+            return True
 
     @classmethod
     def decode_sentinel(cls, job_id):
@@ -308,9 +417,13 @@ class GPUManager:
         """Assign GPUs to a job.
 
         This method now implements lazy garbage collection:
-        1. First checks all assigned GPUs to see if their containers are still running
-        2. Frees GPUs from containers that have stopped
-        3. Then assigns requested number of GPUs to the new job
+        1. First releases any stale GPU assignments for this SAME job_id (for PBT job ID reuse)
+        2. Then checks all assigned GPUs to see if their containers are still running
+        3. Frees GPUs from containers that have stopped
+        4. Finally assigns requested number of GPUs to the new job
+
+        NOTE: For SLURM jobs, this method returns an empty list since SLURM
+        manages its own GPU scheduling and we should not assign GPUs in MongoDB.
 
         Args:
             job_id: Unique identifier for the job (typically container name)
@@ -318,8 +431,31 @@ class GPUManager:
 
         Returns:
             list: List of assigned GPU IDs as strings, empty list if insufficient GPUs
+                  or if job uses SLURM (SLURM manages its own GPUs)
         """
+        # Check if this job should have GPUs managed by this manager
+        # SLURM and other cluster schedulers manage their own GPUs
+        if not self._should_manage_gpus_for_job(job_id):
+            logger.info(
+                f"[GPU_MANAGER] Job {job_id} uses external scheduler (e.g., SLURM), "
+                f"skipping GPU assignment in MongoDB"
+            )
+            return []
+
         logger.debug(f"GPU assignment request for job {job_id}: requesting {num_gpus} GPU(s)")
+
+        # Step 0: Release any existing GPU assignments for THIS job_id
+        # This handles PBT's job ID reuse where the same job_id is resubmitted for a new generation
+        existing_assignments = list(self.mongo_handler.find({"job_id": job_id, "status": "assigned"}))
+        if existing_assignments:
+            logger.debug(
+                f"[GPU_RELEASE] Found {len(existing_assignments)} existing GPU assignment(s) for job {job_id}, "
+                f"releasing before new assignment (PBT job ID reuse). GPUs: {[g['id'] for g in existing_assignments]}"
+            )
+            self.mongo_handler.update_many(
+                {"job_id": job_id},
+                {"job_id": self.RELEASE_MANUAL, "status": "available"}
+            )
 
         # Step 1: Reclaim GPUs from completed/failed containers
         reclaimed = self._reclaim_stale_gpus()
@@ -424,9 +560,19 @@ class GPUManager:
         All GPU cleanup happens automatically when containers stop and
         new jobs request GPU assignments.
 
+        For SLURM jobs, this method does nothing since SLURM manages its own GPUs.
+
         Args:
             job_id: Job identifier whose GPUs should be released
         """
+        # Check if this job should have GPUs managed by this manager
+        if not self._should_manage_gpus_for_job(job_id):
+            logger.debug(
+                f"[GPU_MANAGER] Job {job_id} uses external scheduler (e.g., SLURM), "
+                f"skipping GPU release in MongoDB"
+            )
+            return
+
         assigned_gpus = self.mongo_handler.find({"job_id": job_id})
         gpu_ids = [gpu.get("id") for gpu in assigned_gpus if "id" in gpu]
 
@@ -450,12 +596,25 @@ class GPUManager:
             )
 
     def get_assigned_gpu_ids(self, job_id):
-        """Get all GPUs assigned to a job."""
+        """Get all GPUs assigned to a job.
+
+        For SLURM jobs, this returns an empty list since SLURM manages its own GPUs.
+        """
+        # Check if this job should have GPUs managed by this manager
+        if not self._should_manage_gpus_for_job(job_id):
+            logger.debug(
+                f"[GPU_MANAGER] Job {job_id} uses external scheduler (e.g., SLURM), "
+                f"returning empty GPU list"
+            )
+            return []
+
         assigned_gpus = self.mongo_handler.find({"job_id": job_id})
         gpu_ids = [str(gpu["id"]) for gpu in assigned_gpus if "id" in gpu]
         logger.debug(f"Query for GPUs assigned to job {job_id}: {gpu_ids if gpu_ids else 'none'}")
         return gpu_ids
 
 
-if os.getenv("BACKEND") == "local-docker":
+if BACKEND == Backend.LOCAL_DOCKER:
     gpu_manager = GPUManager()
+else:
+    gpu_manager = None  # type: ignore

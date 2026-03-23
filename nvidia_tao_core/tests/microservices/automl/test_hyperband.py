@@ -56,8 +56,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -97,8 +97,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -151,8 +151,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -204,8 +204,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -269,8 +269,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -339,8 +339,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -386,8 +386,8 @@ class TestHyperBandCustomRanges:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -443,8 +443,8 @@ class TestHyperBandGetValidRangeIntegration:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 
@@ -501,8 +501,8 @@ class TestHyperBandGetValidRangeIntegration:
             root="/path/to/root/subdir",
             network="image_classification",
             parameters=parameters,
-            R=81,
-            nu=3,
+            max_epochs=81,
+            reduction_factor=3,
             epoch_multiplier=1
         )
 

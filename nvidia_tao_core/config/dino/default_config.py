@@ -43,6 +43,9 @@ from nvidia_tao_core.config.dino.dataset import (
 from nvidia_tao_core.config.dino.deploy import DINOGenTrtEngineExpConfig
 from nvidia_tao_core.config.dino.model import DINOModelConfig
 from nvidia_tao_core.config.dino.train import DINOTrainExpConfig
+from nvidia_tao_core.config.common.quantization.default_config import (
+    ModelQuantizationConfig,
+)
 
 
 @dataclass
@@ -202,6 +205,11 @@ class ExperimentConfig(CommonExperimentConfig):
     distill: Optional[DINODistillationConfig] = DATACLASS_FIELD(
         None,
         description="Configurable parameters to construct the distiller for a DINO experiment.",
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        default_value={},
+        description="Configurable parameters to run model quantization for a DINO experiment.",
     )
 
     def __post_init__(self):

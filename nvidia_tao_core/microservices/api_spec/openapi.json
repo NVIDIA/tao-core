@@ -22,7 +22,7 @@
         "schemas": {
             "AutoML": {
                 "properties": {
-                    "automl_R": {
+                    "automl_max_epochs": {
                         "format": "int64",
                         "maximum": 9223372036854775807,
                         "minimum": 0,
@@ -58,7 +58,7 @@
                         "nullable": true,
                         "type": "integer"
                     },
-                    "automl_nu": {
+                    "automl_reduction_factor": {
                         "format": "int64",
                         "maximum": 9223372036854775807,
                         "minimum": 0,
@@ -546,7 +546,6 @@
                     },
                     "type": {
                         "enum": [
-                            "maxine_eye_contact",
                             "object_detection",
                             "segmentation",
                             "image_classification",
@@ -775,7 +774,6 @@
                     },
                     "type": {
                         "enum": [
-                            "maxine_eye_contact",
                             "object_detection",
                             "segmentation",
                             "image_classification",
@@ -1235,8 +1233,7 @@
                             "centerpose",
                             "rtdetr",
                             "auto_label",
-                            "image",
-                            "maxine_eye_contact"
+                            "image"
                         ],
                         "type": "string"
                     },
@@ -1288,8 +1285,7 @@
                     },
                     "type": {
                         "enum": [
-                            "vision",
-                            "maxine"
+                            "vision"
                         ],
                         "type": "string"
                     },
@@ -1469,7 +1465,6 @@
                     },
                     "dataset_type": {
                         "enum": [
-                            "maxine_eye_contact",
                             "object_detection",
                             "segmentation",
                             "image_classification",
@@ -1604,8 +1599,7 @@
                             "centerpose",
                             "rtdetr",
                             "auto_label",
-                            "image",
-                            "maxine_eye_contact"
+                            "image"
                         ],
                         "type": "string"
                     },
@@ -1664,8 +1658,7 @@
                     },
                     "type": {
                         "enum": [
-                            "vision",
-                            "maxine"
+                            "vision"
                         ],
                         "nullable": true,
                         "type": "string"

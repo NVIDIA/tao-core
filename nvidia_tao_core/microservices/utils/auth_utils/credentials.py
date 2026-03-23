@@ -44,8 +44,6 @@ logging.basicConfig(
 logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
-BACKEND = os.getenv("BACKEND", "local-k8s")
-
 
 def get_from_ngc(key, org_name: str, enable_telemetry: bool | None = None) -> tuple[dict, str]:
     """Get signing key from token"""

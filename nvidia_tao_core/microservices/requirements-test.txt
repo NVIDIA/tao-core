@@ -1,0 +1,16 @@
+# Test dependencies for TAO microservices
+# Install with: pip install -r requirements-test.txt
+
+# Core testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
+pytest-timeout>=2.1.0
+
+# MongoDB mocking for tests without Docker/K8s
+mongomock>=4.1.0
+
+# Additional test utilities
+faker>=18.0.0  # For generating test data
+freezegun>=1.2.0  # For mocking time in tests
+responses>=0.23.0  # For mocking HTTP requests

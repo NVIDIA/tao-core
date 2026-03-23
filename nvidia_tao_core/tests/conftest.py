@@ -19,11 +19,17 @@ import pytest
 
 @pytest.fixture
 def ngc_key():
-    """Configure NGC key."""
-    return os.environ["NGC_KEY"]
+    """Configure NGC key. Skip test if not set."""
+    key = os.environ.get("NGC_KEY")
+    if not key:
+        pytest.skip("NGC_KEY environment variable not set")
+    return key
 
 
 @pytest.fixture
 def ngc_path():
-    """Configure NGC path."""
-    return os.environ["NGC_PATH"]
+    """Configure NGC path. Skip test if not set."""
+    path = os.environ.get("NGC_PATH")
+    if not path:
+        pytest.skip("NGC_PATH environment variable not set")
+    return path

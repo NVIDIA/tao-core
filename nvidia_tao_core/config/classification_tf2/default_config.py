@@ -318,7 +318,7 @@ class ExperimentConfig:
     model_name: Optional[str] = STR_FIELD(value=None)
     num_gpus: int = INT_FIELD(value=1, popular="yes", display_name="Number of GPUs")
     gpu_ids: List[int] = LIST_FIELD(arrList=[0])
-    results_dir: str = STR_FIELD(value="/results")
+    results_dir: str = STR_FIELD(value="")
     encryption_key: Optional[str] = STR_FIELD(None)
     data_format: str = STR_FIELD(
         value="channels_first", valid_options="channels_first,channels_last"

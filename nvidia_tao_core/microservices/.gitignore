@@ -1,3 +1,12 @@
 __pycache__
 *.pyc
 *.ipynb_checkpoints
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.coverage
+coverage.xml
+*.log

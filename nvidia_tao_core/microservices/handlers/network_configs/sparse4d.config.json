@@ -1,7 +1,7 @@
 {
     "api_params": {
         "dataset_type": "sparse4d",
-        "actions": ["dataset_convert", "train", "evaluate", "export", "inference"],
+        "actions": ["dataset_convert", "train", "quantize", "evaluate", "export", "inference"],
         "formats": ["ovpkl"],
         "accepted_ds_intents": ["training", "evaluation", "testing"],
         "image": "TAO_PYTORCH",
@@ -12,6 +12,7 @@
         "actions_pipe": {
             "dataset_convert": "pyt_odconvert",
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference"
@@ -46,6 +47,11 @@
         "upload_strategy": {
             "dataset_convert": "tarball_after_completion",
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     },
 
@@ -118,6 +124,74 @@
                     }
                 },
                 "transform": ["use_dataset_convert_job"]
+            }
+        },
+        "quantize": {
+            "dataset.data_root": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                }
+            },
+            "model.head.instance_bank.anchor": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "/results/{dataset_convert_job_id}/anchor_init.npy",
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.train_dataset.ann_file": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "train"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.val_dataset.ann_file": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.test_dataset.ann_file": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path_from_convert_job_spec": {
+                    "spec_path": "aicity.split",
+                    "mapping": {
+                        "train": "train",
+                        "val": "val",
+                        "test": "test",
+                        "*": "val"
+                    }
+                },
+                "transform": ["use_dataset_convert_job"]
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
             }
         },
         "evaluate": {
@@ -264,6 +338,11 @@
             "results_dir": "output_dir",
             "train.pretrained_model_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
+        },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
             "encryption_key": "key"
         },
         "evaluate": {

@@ -32,7 +32,8 @@
             "inference": ["/merged/"]
         },
         "upload_strategy": {
-            "evaluate": "tarball_after_completion"
+            "evaluate": "tarball_after_completion",
+            "inference": "tarball_after_completion"
         }
     },
 
@@ -63,6 +64,12 @@
                     "llava": ["images.tar.gz", "videos.tar.gz"],
                     "*": "images.tar.gz"
                 }
+            }
+        },
+        "inference": {
+            "enable_lora": {
+                "source": "parent_job_specs",
+                "check_key_exists": "policy.lora"
             }
         },
         "evaluate": {
@@ -97,6 +104,10 @@
                     "llava": ["images.tar.gz", "videos.tar.gz"],
                     "*": "images.tar.gz"
                 }
+            },
+            "model.enable_lora": {
+                "source": "parent_job_specs",
+                "check_key_exists": "policy.lora"
             }
         }
     },
@@ -138,19 +149,61 @@
             "event",
             "accuracy",
             "config",
-            "detailed_results"
+            "detailed_results",
+            "epoch",
+            "max_epoch",
+            "time_per_epoch",
+            "eta",
+            "avg_loss",
+            "best_val/avg_loss",
+            "val/avg_loss",
+            "val/reward_avg",
+            "val/reward_std",
+            "val/reward_max",
+            "val/reward_min",
+            "evaluation_status",
+            "total_samples",
+            "correct_samples",
+            "results_path",
+            "soft_accuracy",
+            "soft_correct",
+            "soft_threshold",
+            "weighted_score",
+            "balanced_accuracy",
+            "f1_score",
+            "tasks_processed",
+            "inference_time_seconds",
+            "prepared_inputs",
+            "TP",
+            "FP",
+            "TN",
+            "FN",
+            "precision",
+            "recall",
+            "positive_accuracy",
+            "negative_accuracy",
+            "results_dir"
         ],
-        "monitoring_metric": "val/loss",
+        "monitoring_metric": ["val/avg_loss", "val/reward_avg", "val/loss"],
         "dynamic_metric_patterns": [
-            "^train/(iteration_time|loss_avg|loss_max|learning_rate|grad_norm|model_flops|mfu)$",
-            "^val/(loss|step)$",
+            "^train/(iteration_time|loss_avg|loss_max|learning_rate|grad_norm|total_steps|cur_epoch|total_epochs|model_flops|mfu)$",
+            "^steps_per_epoch$",
+            "^val/(cur_epoch|avg_loss|train_epochs|total_steps|train_step|loss|step)$",
+            "^val_avg_loss$",
+            "^component$",
             "^(error|error_type|error_message)$",
             "^(interrupted|step_name|replica_type)$",
-            "^(max_epochs|current_epoch)$",
+            "^(max_epochs?|current_epoch|epoch)$",
             "^(training_phase|training_completed)$",
             "^(correct_samples|total_samples)$",
+            "^(loss|avg_loss)$",
+            "^(balanced_accuracy|f1_score)$",
+            "^(TP|FP|TN|FN|precision|recall)$",
+            "^(positive_accuracy|negative_accuracy)$",
             "^(evaluation_phase|evaluation_status)$",
-            "^(validation_phase|dataset_size|total_batches|batches_processed|progress_percent)$",
+            "^(validation_phase|validation_dataset_size|dataset_size|total_batches|batches_processed|progress_percent)$",
+            "^(batch_index|batch_loss|is_last_step)$",
+            "^phase$",
             "^(inference_time_seconds|total_inference_time_seconds|model_name|prepared_inputs)$",
             "^(results_dir|results_path)$",
             "^(shard_id|total_shards|total_tasks|tasks_processed)$",
@@ -164,7 +217,11 @@
             "^bertscore_(precision|recall|f1)$",
             "^(count|distance|left_right|mcq|quantitative|qualitative)_(accuracy|total|correct)$",
             "^(going.straight|turning.left|turning.right)_(accuracy|total|correct)$",
-            "^(quantization_status|quantization_scheme|num_calibration_samples|smoothing_strength)$",
+            "^(inference_status|total_files|successful|failed)$",
+            "^(total_tokens_generated|total_time_s|media_path|media_type)$",
+            "^result_.*$",
+            "^(quantization_status|quantization_scheme|num_calibration_samples|smoothing_strength|kv_precision)$",
+            "^(time_per_epoch|eta)$",
             "^model_path$"
         ]
     }

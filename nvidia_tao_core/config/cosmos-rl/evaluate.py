@@ -115,8 +115,8 @@ class ModelConfig:
     """Model configuration for evaluation."""
 
     model_name: str = STR_FIELD(
-        default_value="nvidia/Cosmos-Reason1-7B",
-        value="nvidia/Cosmos-Reason1-7B",
+        default_value="nvidia/Cosmos-Reason2-8B",
+        value="nvidia/Cosmos-Reason2-8B",
         display_name="Model name",
         description="Model name or path to safetensors directory"
     )
@@ -145,6 +145,14 @@ class ModelConfig:
         valid_max=1000000,
         display_name="Maximum sequence length",
         description="Maximum sequence length for the model"
+    )
+    tp_size: int = INT_FIELD(
+        default_value=1,
+        value=1,
+        valid_min=1,
+        valid_max=8,
+        display_name="Tensor parallel size",
+        description="Tensor parallel size for vLLM model loading (num_gpus = total_shard x tp_size)"
     )
     enable_lora: bool = BOOL_FIELD(
         default_value=False,
@@ -224,23 +232,34 @@ class EvaluationConfig:
 
 @dataclass
 class VisionConfig:
-    """Vision processing configuration."""
+    """Vision config."""
 
     fps: int = INT_FIELD(
-        default_value=4,
-        value=4,
+        value=None,
+        default_value=None,
         valid_min=1,
-        valid_max=30,
-        display_name="Video FPS",
-        description="Downsample video frame rate"
+        valid_max=3,
+        display_name="FPS",
+        description="Frames per second for vision processing.",
+        automl_enabled="TRUE"
     )
+
     total_pixels: int = INT_FIELD(
-        default_value=3136000,
-        value=3136000,
-        valid_min=100000,
-        valid_max=10000000,
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
         display_name="Total pixels",
-        description="Video or image resolution in total pixels"
+        description="Total number of pixels for vision processing."
+    )
+
+    nframes: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        valid_max=8,
+        display_name="Number of frames",
+        description="Number of frames for vision processing."
     )
 
 
@@ -377,8 +396,8 @@ class ExperimentConfig:
     """Experiment configuration for Cosmos-RL evaluation."""
 
     results_dir: str = STR_FIELD(
-        default_value="/results",
-        value="/results",
+        default_value="",
+        value="",
         display_name="Results directory",
         description="Directory to save evaluation results"
     )

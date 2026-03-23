@@ -13,8 +13,11 @@
 # limitations under the License.
 
 """Inference Microservice handler using StatefulSets for long-lived inference"""
+import base64
+import json
 import logging
 import requests
+import shlex
 from datetime import datetime, timezone
 from typing import Dict, Any
 import os
@@ -23,12 +26,10 @@ from .docker_images import DOCKER_IMAGE_MAPPER
 from nvidia_tao_core.microservices.utils.handler_utils import (
     Code, add_workspace_to_cloud_metadata, get_model_results_path
 )
-from nvidia_tao_core.microservices.utils.job_utils.executor import (
-    ServiceExecutor,
-    StatefulSetExecutor
-)
-from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_handler_metadata
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_handler_metadata, BACKEND
 from nvidia_tao_core.microservices.utils.core_utils import read_network_config
+from nvidia_tao_core.microservices.enum_constants import Backend
+from nvidia_tao_core.microservices.handlers.execution_handlers.kubernetes_handler import KubernetesHandler
 
 
 # Configure logging
@@ -59,41 +60,68 @@ class InferenceMicroserviceHandler:
         """Starts a long-lived Inference Microservice using StatefulSet
 
         The network architecture is automatically determined from the experiment metadata.
+        If hf_model is provided, uses the HuggingFace inference microservice instead.
         """
         from nvidia_tao_core.microservices.utils.stateless_handler_utils import write_job_metadata
         from nvidia_tao_core.microservices.utils import get_admin_key
-        from nvidia_tao_core.microservices.utils.job_utils.executor.base_executor import get_cluster_ip
 
         logger.info("Starting Inference Microservice %s for experiment %s", job_id, experiment_id)
 
-        # Get experiment metadata to determine network architecture
+        # Check if HuggingFace model is specified - this takes precedence over network_arch
+        hf_model = job_config.get("hf_model")
+        use_huggingface = hf_model is not None and hf_model.strip() != ""
+
+        if use_huggingface:
+            logger.info("HuggingFace model specified: %s - using HuggingFace inference microservice", hf_model)
+            network_arch = "huggingface"  # Virtual network arch for HuggingFace models
+        else:
+            # Get experiment metadata to determine network architecture
+            experiment_metadata = get_handler_metadata(experiment_id, kind="experiments")
+            network_arch = job_config.get("network_arch")
+            if hasattr(network_arch, 'value'):
+                network_arch = network_arch.value
+            if not network_arch:
+                network_arch = experiment_metadata.get("network_arch", "vila")
+            logger.info("Network architecture from experiment metadata: %s", network_arch)
+
+        # Get experiment metadata (needed for workspace and other settings)
         experiment_metadata = get_handler_metadata(experiment_id, kind="experiments")
-        network_arch = experiment_metadata.get("network_arch", "vila")  # Default to vila if not found
-        logger.info("Network architecture from experiment metadata: %s", network_arch)
 
         folder_path_function = "parent_model"
-        # Read network config to get docker image name
-        try:
-            network_config = read_network_config(network_arch.lower())
 
-            if network_config:
-                image_key = network_config.get('api_params', {}).get('image', network_arch.upper())
-                image = DOCKER_IMAGE_MAPPER.get(image_key, "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt")
-                logger.info("Using Docker image: %s (from network_arch: %s)", image, network_arch)
-                folder_path_function = network_config.get('spec_params', {}).get('inference', {}).get('model_path', "")
-            else:
-                # Fallback if network config is empty
+        # Determine Docker image based on model type
+        if use_huggingface:
+            # Use TAO_PYTORCH image for HuggingFace models (has transformers installed)
+            image = job_config.get("docker_image") or DOCKER_IMAGE_MAPPER.get(
+                "TAO_PYTORCH", "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt"
+            )
+            logger.info("Using Docker image for HuggingFace model: %s", image)
+        else:
+            # Read network config to get docker image name
+            try:
+                network_config = read_network_config(network_arch.lower())
+
+                if network_config:
+                    image_key = network_config.get('api_params', {}).get('image', network_arch.upper())
+                    image = DOCKER_IMAGE_MAPPER.get(image_key, "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt")
+                    logger.info("Using Docker image: %s (from network_arch: %s)", image, network_arch)
+                    folder_path_function = (
+                        network_config.get('spec_params', {})
+                        .get('inference', {})
+                        .get('model_path', "")
+                    )
+                else:
+                    # Fallback if network config is empty
+                    image = DOCKER_IMAGE_MAPPER.get(network_arch.upper(), "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt")
+                    logger.info("Using fallback Docker image: %s", image)
+            except Exception as e:
+                logger.warning("Could not read network config for %s: %s. Using default image.", network_arch, str(e))
                 image = DOCKER_IMAGE_MAPPER.get(network_arch.upper(), "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt")
                 logger.info("Using fallback Docker image: %s", image)
-        except Exception as e:
-            logger.warning("Could not read network config for %s: %s. Using default image.", network_arch, str(e))
-            image = DOCKER_IMAGE_MAPPER.get(network_arch.upper(), "nvcr.io/nvidia/tao/tao-toolkit:6.0.0-pyt")
-            logger.info("Using fallback Docker image: %s", image)
 
         # Build command for Inference Microservice integrated into TAO container
         parent_id = job_config.get("parent_job_id", job_config.get("parent_id", ""))
 
-        # Check if parent job is in Done state
         if parent_id:
             from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
                 get_handler_job_metadata
@@ -115,24 +143,36 @@ class InferenceMicroserviceHandler:
                 logger.error(error_msg)
                 return Code(400, {}, error_msg)
 
-        folder_path = "folder" in folder_path_function
-        model_path = job_config.get("model_path", get_model_results_path(experiment_metadata, parent_id, folder_path))
-        logger.info("Using model path: %s", model_path)
+        # Determine model path
+        if use_huggingface:
+            # For HuggingFace models, model_path is the HuggingFace model name
+            model_path = hf_model
+            logger.info("Using HuggingFace model: %s", model_path)
+        else:
+            folder_path = "folder" in folder_path_function
+            model_path = job_config.get(
+                "model_path",
+                get_model_results_path(experiment_metadata, parent_id, folder_path)
+            )
+            logger.info("Using model path: %s", model_path)
+
         if not model_path:
-            return Code(400, {}, "Model path is required for Inference Microservice")
+            return Code(400, {}, "Model path or hf_model is required for Inference Microservice")
 
         # cli_args = convert_dict_to_cli_args(job_config)
         # cli_args = " ".join(cli_args)
         # logger.info("Using CLI args: %s", cli_args)
 
-        docker_env_vars = experiment_metadata.get("docker_env_vars", {})
-        docker_env_vars["TAO_EXECUTION_BACKEND"] = os.getenv("BACKEND", "local-k8s")
+        docker_env_vars = dict(job_config.get("docker_env_vars", {}))
+
+        docker_env_vars["TAO_EXECUTION_BACKEND"] = BACKEND.value
         docker_env_vars["TAO_API_JOB_ID"] = job_id
 
         # Set up environment variables for status callbacks (auto-deletion)
         docker_env_vars["CLOUD_BASED"] = "True"
         host_base_url = os.getenv("HOSTBASEURL", "no_url")
-        if os.getenv("BACKEND", "local-k8s") == "local-k8s":
+        if BACKEND == Backend.LOCAL_K8S:
+            from nvidia_tao_core.microservices.utils.executor_utils import get_cluster_ip
             cluster_ip, cluster_port = get_cluster_ip()
             if cluster_ip and cluster_port:
                 host_base_url = f"http://{cluster_ip}:{cluster_port}"
@@ -155,11 +195,26 @@ class InferenceMicroserviceHandler:
         }
 
         # Propagate additional parameters from job_config to specs
-        # These include enable_lora, base_model_path, and any other user-provided configs
+        # These include enable_lora, base_model_path, torch_dtype, device_map, and any other user-provided configs
+        # NOTE: docker_env_vars must be excluded - it's handled separately and contains URLs that would
+        # be incorrectly parsed as cloud storage paths by download_files_from_spec
+        excluded_keys = ["parent_id", "parent_job_id", "model_path", "hf_model", "network_arch", "docker_env_vars"]
         for key, value in job_config.items():
-            if key not in ["parent_id", "parent_job_id", "model_path"]:
+            if key not in excluded_keys:
+                # Convert enum values to their string representation
+                if hasattr(value, 'value'):
+                    value = value.value
                 specs[key] = value
                 logger.info(f"Propagating parameter to specs: {key} = {value}")
+
+        # For HuggingFace models, ensure HF-specific parameters are in specs
+        if use_huggingface:
+            specs["hf_model"] = hf_model
+            # Set default torch_dtype and device_map if not provided
+            if "torch_dtype" not in specs:
+                specs["torch_dtype"] = "auto"
+            if "device_map" not in specs:
+                specs["device_map"] = "auto"
 
         job_metadata = {
             "job_id": job_id,
@@ -168,32 +223,86 @@ class InferenceMicroserviceHandler:
             "neural_network_name": network_arch,
         }
 
+        # Base64 encode custom function strings to avoid shell escaping issues
+        # These contain Python code with quotes, parentheses, etc. that break bash parsing
+        if specs.get("custom_pipeline_loader"):
+            specs["custom_pipeline_loader"] = base64.b64encode(
+                specs["custom_pipeline_loader"].encode()
+            ).decode()
+            specs["custom_pipeline_loader_encoded"] = True
+        if specs.get("custom_inference_fn"):
+            specs["custom_inference_fn"] = base64.b64encode(
+                specs["custom_inference_fn"].encode()
+            ).decode()
+            specs["custom_inference_fn_encoded"] = True
+
+        # Determine the inference microservice command based on model type
+        if use_huggingface:
+            # Use the HuggingFace inference microservice from tao-core
+            inference_command = (
+                "python -m nvidia_tao_core.microservices.handlers"
+                ".huggingface_inference_microservice_server"
+            )
+            logger.info("Using HuggingFace inference microservice")
+        else:
+            # Use the network-specific inference microservice
+            inference_command = f"{network_arch}-inference-microservice"
+            logger.info("Using network-specific inference microservice: %s", inference_command)
+
+        # Serialize job_metadata to JSON and shell-escape it for safe bash execution
+        job_metadata_json = json.dumps(job_metadata)
+        docker_env_vars_json = json.dumps(docker_env_vars)
+
         # Clean TAO-compliant StatefulSet setup: Pure container_handler.py approach
         run_command = f"""
 umask 0 &&
 
 
-{network_arch}-inference-microservice --job "{str(job_metadata)}" --docker_env_vars "{str(docker_env_vars)}"
+{inference_command} --job {shlex.quote(job_metadata_json)} --docker_env_vars {shlex.quote(docker_env_vars_json)}
         """
         logger.info("Using run command: %s", run_command)
+        run_command = ["/bin/bash", "-c", run_command]
 
         try:
             # Create long-lived inference service StatefulSet
             # IMPORTANT: This overrides the default container entrypoint (e.g., "flask run")
             # with our custom command that starts the persistent model server + container_handler.py
-            statefulset_executor = StatefulSetExecutor()
-            success = statefulset_executor.create_statefulset(
-                job_id=job_id,
-                num_gpu_per_node=1,
-                num_nodes=replicas,
-                image=image,
-                api_port=api_port,
-                statefulset_type="inference_microservice",
-                custom_command=run_command,
-                org_name=org_name,
-                experiment_id=experiment_id,
-                is_long_lived=True
+            from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+            execution_handler = ExecutionHandler.create_handler(
+                backend=BACKEND,
+                container_image=image,
+                job_id=job_id
             )
+            # Get number of GPUs from job config (default to 1)
+            num_gpus = job_config.get("num_gpus", 1)
+            if num_gpus == 0:
+                num_gpus = 1  # Inference requires at least 1 GPU
+
+            try:
+                success = execution_handler.create_microservice(
+                    job_id=job_id,
+                    image=image,
+                    custom_command=run_command,
+                    api_port=api_port,
+                    num_gpu=num_gpus,
+                    inference_microservice=True,
+                    docker_env_vars=docker_env_vars  # Pass env vars to container
+                )
+            except RuntimeError as e:
+                error_msg = str(e)
+                try:
+                    from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import (
+                        ExecutionHandler,
+                    )
+                    ExecutionHandler.delete_job_with_handler(job_id, inference_microservice=True)
+                    logger.info("Cleaned up failed IMS resources for job %s", job_id)
+                except Exception as cleanup_err:
+                    logger.warning("Failed to clean up IMS resources for job %s: %s", job_id, cleanup_err)
+                if "GPU" in error_msg or "gpu" in error_msg:
+                    logger.error("GPU allocation failed: %s", error_msg)
+                    return Code(503, {}, f"Insufficient GPU resources: {error_msg}")
+                logger.error("Microservice creation failed: %s", error_msg)
+                return Code(500, {}, f"Failed to create Inference Microservice: {error_msg}")
 
             if not success:
                 return Code(500, {}, "Failed to create Inference Microservice StatefulSet")
@@ -202,15 +311,23 @@ umask 0 &&
             service_id = f"ims-svc-{job_id}"
             logger.info("Waiting for Inference Microservice service %s to be ready", service_id)
 
-            if os.getenv("BACKEND") == "local-k8s":
-                service_executor = ServiceExecutor()
-                service_status = service_executor.wait_for_service(job_id, service_name=service_id)
+            if BACKEND == Backend.LOCAL_K8S:
+                kubernetes_handler = KubernetesHandler()
+                service_status = kubernetes_handler.wait_for_service(job_id, service_name=service_id)
                 if service_status != "Running":
                     logger.error("Inference Microservice service failed to become ready. Status: %s", service_status)
+                    try:
+                        from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import (
+                            ExecutionHandler,
+                        )
+                        ExecutionHandler.delete_job_with_handler(job_id, inference_microservice=True)
+                        logger.info("Cleaned up failed IMS resources for job %s", job_id)
+                    except Exception as cleanup_err:
+                        logger.warning("Failed to clean up IMS resources for job %s: %s", job_id, cleanup_err)
                     return Code(500, {}, f"Inference Microservice service failed to become ready: {service_status}")
 
             # For Kubernetes services, we typically use cluster IP for internal communication
-            service_url = f"http://{service_id}:{api_port}"
+            service_url = InferenceMicroserviceHandler.get_inference_microservice_url(job_id, None, api_port)
 
             logger.info("Inference Microservice created at %s", service_url)
 
@@ -227,7 +344,7 @@ umask 0 &&
                 "user_id": experiment_metadata.get("user_id"),
                 "network": network_arch,
                 "parent_id": job_config.get("parent_id", ""),
-                "num_gpu": 1,
+                "num_gpu": num_gpus,
                 "platform_id": None,
                 "kind": "experiment",
                 "specs": {},
@@ -256,36 +373,43 @@ umask 0 &&
             return Code(500, {}, f"Failed to start Inference Microservice: {str(e)}. Try again")
 
     @staticmethod
-    def stop_inference_microservice(job_id: str, auto_deletion: bool = False) -> Code:
+    def stop_inference_microservice(
+        job_id: str, auto_deletion: bool = False, reason: str = ""
+    ) -> Code:
         """Stop a running Inference Microservice
 
         Args:
             job_id: Job ID for the microservice to stop
-            auto_deletion: True if called due to idle timeout, False if manual stop
+            auto_deletion: True if called due to auto-deletion, False if manual stop
+            reason: Reason for auto-deletion (e.g. "idle_timeout_exceeded",
+                    "initialization_failed", "model_loading_failed")
 
         Returns:
             Code object with status and result information
         """
         action = "Auto-deleting" if auto_deletion else "Stopping"
-        reason = "due to inactivity" if auto_deletion else "manually"
+        reason_desc = f"(reason: {reason})" if reason else "manually"
 
-        logger.info("%s Inference Microservice %s %s", action, job_id, reason)
+        logger.info("%s Inference Microservice %s %s", action, job_id, reason_desc)
 
         try:
-            # Delete the StatefulSet and associated service using the enhanced delete function
-            statefulset_executor = StatefulSetExecutor()
-            deletion_success = statefulset_executor.delete_statefulset(
-                job_id, resource_type="inference_microservice"
-            )
+            from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+            success = ExecutionHandler.delete_job_with_handler(job_id, inference_microservice=True)
 
-            if deletion_success:
-                success_message = "auto-deleted due to inactivity" if auto_deletion else "stopped successfully"
+            if success:
+                is_failure = reason in (
+                    "initialization_failed", "model_loading_failed"
+                )
+                job_status = "Error" if is_failure else "Done"
+                success_message = (
+                    f"auto-deleted ({reason})" if auto_deletion
+                    else "stopped successfully"
+                )
                 logger.info(
                     "Successfully %s Inference Microservice %s",
                     "auto-deleted" if auto_deletion else "stopped", job_id
                 )
 
-                # Update job status to Done in database
                 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
                     update_job_status, get_handler_job_metadata
                 )
@@ -296,17 +420,20 @@ umask 0 &&
                         update_job_status(
                             experiment_id,
                             job_id,
-                            status="Done",
+                            status=job_status,
                             kind="experiments"
                         )
-                        logger.info("Updated job status to Done for %s", job_id)
+                        logger.info(
+                            "Updated job status to %s for %s", job_status, job_id
+                        )
 
                 result = {
                     "status": "success",
                     "message": f"Inference microservice for job {job_id} {success_message}",
                     "job_id": job_id,
                     "timestamp": datetime.now().isoformat(),
-                    "auto_deletion": auto_deletion
+                    "auto_deletion": auto_deletion,
+                    "reason": reason,
                 }
                 return Code(200, result, f"Inference Microservice {success_message}")
 
@@ -324,7 +451,7 @@ umask 0 &&
         statefulset_name = f"ims-{job_id}"
 
         try:
-            stat_dict = StatefulSetExecutor().get_statefulset_status(
+            stat_dict = KubernetesHandler().get_statefulset_status(
                 statefulset_name, replicas=1, resource_type="Inference Microservice"
             )
             status = stat_dict.get("status", "Unknown")
@@ -357,7 +484,7 @@ umask 0 &&
 
             # Check if StatefulSet pods exist and are running
             try:
-                stat_dict = StatefulSetExecutor().get_statefulset_status(
+                stat_dict = KubernetesHandler().get_statefulset_status(
                     statefulset_name, replicas=1, resource_type="Inference Microservice"
                 )
                 statefulset_status = stat_dict.get("status", "Unknown")
@@ -421,16 +548,19 @@ umask 0 &&
 
         # Always use simple service name for both Kubernetes and docker-compose
         # This works reliably for intra-cluster communication and avoids DNS issues
-        if os.environ.get('BACKEND', 'local-k8s') == 'local-docker':
-            url = f"http://{job_id}:{api_port}/api/v1/{endpoint}"
+        if BACKEND == Backend.LOCAL_DOCKER:
+            url = f"http://{job_id}:{api_port}"
         else:
-            url = f"http://{service_name}:{api_port}/api/v1/{endpoint}"
+            url = f"http://{service_name}:{api_port}"
+
+        if endpoint:
+            url = f"{url}/api/v1/{endpoint}"
 
         logger.info(f"Inference microservice URL: {url}")
         return url
 
     @staticmethod
-    def process_inference_microservice_request_direct(
+    def process_inference_microservice_request(
             job_id: str, request_data: Dict[str, Any], api_port: int = 8080
     ) -> Dict[str, Any]:
         """Process inference request directly to the StatefulSet microservice
@@ -599,7 +729,7 @@ umask 0 &&
         """Get Inference Microservice service status with model readiness information"""
         try:
             statefulset_name = f"ims-{job_id}"
-            stat_dict = StatefulSetExecutor().get_statefulset_status(
+            stat_dict = KubernetesHandler().get_statefulset_status(
                 statefulset_name, replicas=1, resource_type="Inference Microservice"
             )
 

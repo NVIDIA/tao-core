@@ -17,7 +17,7 @@ import enum
 import json
 import os
 import pathlib
-from typing import Set
+from typing import Set, Tuple
 import logging
 
 # Configure logging
@@ -31,11 +31,11 @@ logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
-def _scan_config_files() -> tuple[Set[str], Set[str]]:
+def _scan_config_files() -> Tuple[Set[str], Set[str]]:
     """Scan all .config.json files to collect dataset types and formats.
 
     Returns:
-        tuple[Set[str], Set[str]]: Set of dataset types and formats
+        Tuple[Set[str], Set[str]]: Set of dataset types and formats
     """
     config_dir = pathlib.Path(__file__).parent / "handlers" / "network_configs"
     dataset_types = set()
@@ -147,7 +147,7 @@ def _get_valid_config_json_param_for_network(network_name: str, param: str):
     return actions
 
 
-def _get_mapped_network_architectures(config: dict, architectures: set[str], arch_name: str = None) -> None:
+def _get_mapped_network_architectures(config: dict, architectures: Set[str], arch_name: str = None) -> None:
     """Get mapped network architectures from config files."""
     actions_mapping = config.get("actions_mapping", {})
     for _, mapping in actions_mapping.items():
@@ -157,11 +157,11 @@ def _get_mapped_network_architectures(config: dict, architectures: set[str], arc
                 architectures.remove(arch_name)
 
 
-def _get_network_architectures(get_mapped: bool = False) -> set[str]:
+def _get_network_architectures(get_mapped: bool = False) -> Set[str]:
     """Scan config directory for .config.json files to determine valid network architectures.
 
     Returns:
-        list[str]: List of valid network architecture names
+        Set[str]: Set of valid network architecture names
     """
     config_dir = pathlib.Path(__file__).parent / "handlers" / "network_configs"
 
@@ -179,8 +179,7 @@ def _get_network_architectures(get_mapped: bool = False) -> set[str]:
                                          "object_detection",
                                          "segmentation",
                                          "character_recognition",
-                                         "vlm",
-                                         "maxine_dataset"]:
+                                         "vlm"]:
                         architectures.add(arch_name)
                     else:
                         # Add networks from action mappings
@@ -194,11 +193,11 @@ def _get_network_architectures(get_mapped: bool = False) -> set[str]:
     return architectures
 
 
-def _get_all_metrics() -> set[str]:
+def _get_all_metrics() -> Set[str]:
     """Scan all config files to collect available metrics.
 
     Returns:
-        set[str]: Set of all available metrics
+        Set[str]: Set of all available metrics
     """
     config_dir = pathlib.Path(__file__).parent / "handlers" / "network_configs"
     all_metrics = set()
@@ -219,11 +218,11 @@ def _get_all_metrics() -> set[str]:
     return all_metrics
 
 
-def _get_dynamic_metric_patterns() -> set[str]:
+def _get_dynamic_metric_patterns() -> Set[str]:
     """Get dynamic metric patterns from config files.
 
     Returns:
-        set[str]: Set of regex patterns for dynamic metrics
+        Set[str]: Set of regex patterns for dynamic metrics
     """
     config_dir = pathlib.Path(__file__).parent / "handlers" / "network_configs"
     patterns = set()
@@ -432,6 +431,22 @@ class BaseExperimentLicense(enum.Enum):
     nvidia_model_eula = "nvidia model eula"
     cc_by_nc_sa_4 = "cc by nc sa 4.0"
 
+
+class Backend(enum.Enum):
+    """Class defining execution backend enum"""
+
+    LOCAL_K8S = "local-k8s"
+    LOCAL_DOCKER = "local-docker"
+    SLURM = "slurm"
+    LEPTON = "lepton"
+
+    @classmethod
+    def _missing_(cls, value):
+        """Enable lookup by value"""
+        for member in cls:
+            if member.value == value:
+                return member
+        return None
 
 # Create Enums
 

@@ -43,7 +43,7 @@ def validate(user_id, org_name, url, token):
     #     mongo = MongoHandler("tao", "users")
     #     user_metadata = mongo.find_one({'id': user_id})
     #     member_of = user_metadata.get('member_of', [])
-    #     pattern = fr"{org_name}/.*:(TAO_USER|MAXINE_USER)"
+    #     pattern = fr"{org_name}/.*:TAO_USER"
     #     if not any(re.match(pattern, member) for member in member_of):
     #         err = AccessControlError("No access granted for user in org " + org_name)
     return err

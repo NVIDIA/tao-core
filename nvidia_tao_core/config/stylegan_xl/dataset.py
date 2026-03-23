@@ -28,14 +28,14 @@ class DataConvertExpConfig:
     """Configuration parameters for Data Converter"""
 
     source: str = STR_FIELD(
-        value="/path/to/your/torchvision_datasets_ImageFolder",
-        default_value="/path/to/your/torchvision_datasets_ImageFolder",
+        value="",
+        default_value="",
         display_name="Sorce dataset",
         description="Sorce dataset which follows torchvision.datasets.ImageFolder format",
     )
     results_dir: str = STR_FIELD(
-        value="/path/to/your/results_dir",
-        default_value="/path/to/your/results_dir",
+        value="",
+        default_value="",
         display_name="Result directory",
         description="Result directory",
     )

@@ -16,7 +16,6 @@
 import logging
 import traceback
 
-from nvidia_tao_core.microservices.constants import MAXINE_NETWORKS
 from nvidia_tao_core.microservices.utils import ngc_utils
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     check_read_access,
@@ -55,56 +54,48 @@ class ModelHandler:
         """
         handler_metadata = resolve_metadata("experiment", experiment_id)
         if not handler_metadata:
-            return Code(404, {"message": "Experiment not found"})
+            return Code(404, {"error_desc": "Experiment not found", "error_code": 404})
 
         user_id = handler_metadata.get("user_id")
         if not check_read_access(user_id, org_name, experiment_id, kind="experiments"):
-            return Code(404, {"message": "Experiment cant be read"})
+            return Code(404, {"error_desc": "Experiment cant be read", "error_code": 404})
 
         job_metadata = get_handler_job_metadata(job_id)
         if not job_metadata:
-            return Code(404, {"message": "Job trying to retrieve not found"})
+            return Code(404, {"error_desc": "Job trying to retrieve not found", "error_code": 404})
 
         job_status = job_metadata.get("status", "Error")
         if job_status not in ("Success", "Done"):
-            return Code(404, {"message": "Job is not in success or Done state"})
+            return Code(
+                404,
+                {"error_desc": f"Job is not in Success or Done state (current: {job_status})", "error_code": 404}
+            )
         job_action = job_metadata.get("action", "")
         if job_action not in ("train", "distill", "quantize", "prune", "retrain", "export", "gen_trt_engine"):
             return Code(
                 404,
-                {"message": "Publish model is available only for train, distill, quantize, prune, retrain, export, "
-                 "gen_trt_engine actions"}
+                {"error_desc": "Publish model is available only for train, distill, quantize, prune, retrain, "
+                 "export, gen_trt_engine actions", "error_code": 404}
             )
 
         try:
-            network_arch = handler_metadata.get('network_arch')
             source_files = []
-            if job_action == 'gen_trt_engine' and network_arch in MAXINE_NETWORKS:
-                encoder_regex = r'.*encoder.*\.(engine|engine\.trtpkg)$'
-                encoder_file = resolve_checkpoint_root_and_search(handler_metadata, job_id, regex=encoder_regex)
-                if encoder_file:
-                    source_files.append(encoder_file)
-                decoder_regex = r'.*decoder.*\.(engine|engine\.trtpkg)$'
-                decoder_file = resolve_checkpoint_root_and_search(handler_metadata, job_id, regex=decoder_regex)
-                if decoder_file:
-                    source_files.append(decoder_file)
-            else:
-                source_file = resolve_checkpoint_root_and_search(handler_metadata, job_id)
-                source_files.append(source_file)
+            source_file = resolve_checkpoint_root_and_search(handler_metadata, job_id)
+            source_files.append(source_file)
             if not source_files:
-                return Code(404, {"message": "Unable to find a model for the given job"})
+                return Code(404, {"error_desc": "Unable to find a model for the given job", "error_code": 404})
 
             # Create NGC model
             ngc_key = ngc_utils.get_user_key(user_id, org_name)
             if not ngc_key:
-                return Code(403, {"message": "User does not have access to publish model"})
+                return Code(403, {"error_desc": "User does not have access to publish model", "error_code": 403})
 
             code, message = ngc_utils.create_model(
                 org_name, team_name, handler_metadata, source_files[0], ngc_key, display_name, description
             )
             if code not in [200, 201]:
                 logger.error("Error while creating NGC model")
-                return Code(code, {"message": message})
+                return Code(code, {"error_desc": message, "error_code": code})
 
             # Upload model version
             response_code, response_message = ngc_utils.upload_model(
@@ -114,11 +105,13 @@ class ModelHandler:
                 response_message = (
                     "Version trying to upload already exists, use remove_published_model endpoint to reupload the model"
                 )
-            return Code(response_code, {"message": response_message})
+            if response_code == 200:
+                return Code(response_code, {"message": response_message})
+            return Code(response_code, {"error_desc": response_message, "error_code": response_code})
         except Exception as e:
             logger.error("Exception thrown in publish_model is %s", str(e))
             logger.error(traceback.format_exc())
-            return Code(404, {"message": "Unable to publish model"})
+            return Code(404, {"error_desc": f"Unable to publish model: {str(e)}", "error_code": 404})
 
     @staticmethod
     def remove_published_model(org_name, team_name, experiment_id, job_id):
@@ -137,40 +130,48 @@ class ModelHandler:
         """
         handler_metadata = resolve_metadata("experiment", experiment_id)
         if not handler_metadata:
-            return Code(404, {"message": "Experiment not found"})
+            return Code(404, {"error_desc": "Experiment not found", "error_code": 404})
 
         user_id = handler_metadata.get("user_id")
         if not check_read_access(user_id, org_name, experiment_id, kind="experiments"):
-            return Code(404, {"message": "Experiment cant be read"})
+            return Code(404, {"error_desc": "Experiment cant be read", "error_code": 404})
 
         job_metadata = get_handler_job_metadata(job_id)
         if not job_metadata:
-            return Code(404, {"message": "Job trying to retrieve not found"})
+            return Code(404, {"error_desc": "Job trying to retrieve not found", "error_code": 404})
 
         job_status = job_metadata.get("status", "Error")
         if job_status not in ("Success", "Done"):
-            return Code(404, {"message": "Job is not in success or Done state"})
+            return Code(
+                404,
+                {"error_desc": f"Job is not in Success or Done state (current: {job_status})", "error_code": 404}
+            )
         job_action = job_metadata.get("action", "")
         if job_action not in ("train", "distill", "quantize", "prune", "retrain", "export", "gen_trt_engine"):
             return Code(
                 404,
-                {},
-                "Delete published model is available only for train, distill, ",
-                "quantize, prune, retrain, export, gen_trt_engine actions"
+                {"error_desc": "Delete published model is available only for train, distill, "
+                 "quantize, prune, retrain, export, gen_trt_engine actions", "error_code": 404}
             )
 
         try:
             ngc_key = ngc_utils.get_user_key(user_id, org_name)
             if not ngc_key:
-                return Code(403, {"message": "User does not have access to remove published model"})
+                return Code(
+                    403,
+                    {"error_desc": "User does not have access to remove published model", "error_code": 403}
+                )
 
             response = ngc_utils.delete_model(
                 org_name, team_name, handler_metadata, ngc_key, job_id, job_action
             )
             if response.ok:
                 return Code(response.status_code, {"message": "Successfully deleted model"})
-            return Code(response.status_code, {"message": "Unable to delete published model"})
+            return Code(
+                response.status_code,
+                {"error_desc": "Unable to delete published model", "error_code": response.status_code}
+            )
         except Exception as e:
             logger.error("Exception thrown in remove_published_model is %s", str(e))
             logger.error(traceback.format_exc())
-            return Code(404, {"message": "Unable to delete published model"})
+            return Code(404, {"error_desc": f"Unable to delete published model: {str(e)}", "error_code": 404})

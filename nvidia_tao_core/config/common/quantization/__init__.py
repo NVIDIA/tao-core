@@ -20,6 +20,7 @@ from nvidia_tao_core.config.common.quantization.default_config import (
     ActivationQuantizationConfig,
     LayerQuantizationConfig,
     ModelQuantizationConfig,
+    QuantCalibrationDataset,
 )
 
 
@@ -29,4 +30,5 @@ __all__ = [
     "ActivationQuantizationConfig",
     "LayerQuantizationConfig",
     "ModelQuantizationConfig",
+    "QuantCalibrationDataset",
 ]

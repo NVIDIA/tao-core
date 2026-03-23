@@ -381,8 +381,9 @@ class TrainConfig:
         valid_max="inf",
         display_name="Learning rate",
         description="Learning rate for optimizer. Can be a single float (applied to whole model) "
-                    "or a list of 2 floats [llm_lr, vision_lr] for separate learning rates "
-                    "for language model and vision encoder during full SFT finetuning.",
+                    "or a list of 2-4 floats [llm_lr, vision_lr, projector_lr, lm_head_lr] for "
+                    "separate learning rates for each model part during full SFT finetuning. "
+                    "List length must match number of model parts (set via num_model_parts).",
         automl_enabled="TRUE"
     )
 
@@ -601,6 +602,14 @@ class ValidationConfig:
         description="Number of batches to prefetch per worker."
     )
 
+    enable_dataset_cache: Optional[bool] = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Enable validation dataset cache",
+        description="Enable dataset caching for validation. Set to False (recommended) to avoid "
+                    "potential segfaults during validation. If not set, uses the training setting."
+    )
+
 
 @dataclass
 class PolicyParallelismConfig:
@@ -674,8 +683,8 @@ class PolicyConfig:
     """Policy config."""
 
     model_name_or_path: str = STR_FIELD(
-        value="nvidia/Cosmos-Reason1-7B",
-        default_value="nvidia/Cosmos-Reason1-7B",
+        value="nvidia/Cosmos-Reason2-8B",
+        default_value="nvidia/Cosmos-Reason2-8B",
         display_name="Model name or path",
         description="Model name or path."
     )
@@ -707,8 +716,8 @@ class VisionConfig:
     """Vision config."""
 
     fps: int = INT_FIELD(
-        value=1,
-        default_value=1,
+        value=None,
+        default_value=None,
         valid_min=1,
         valid_max=3,
         display_name="FPS",
@@ -717,12 +726,21 @@ class VisionConfig:
     )
 
     total_pixels: int = INT_FIELD(
-        value=313600,
-        default_value=313600,
+        value=None,
+        default_value=None,
         valid_min=1,
         valid_max="inf",
         display_name="Total pixels",
         description="Total number of pixels for vision processing."
+    )
+
+    nframes: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        valid_max=8,
+        display_name="Number of frames",
+        description="Number of frames for vision processing."
     )
 
 
@@ -756,8 +774,8 @@ class ExperimentConfig:
         description="Redis."
     )
     results_dir: str = STR_FIELD(
-        value="/results",
-        default_value="/results",
+        value="",
+        default_value="",
         display_name="Output directory",
         description="Output directory."
     )

@@ -126,7 +126,10 @@
         "available_metrics": [
             "cmc_rank_1"
         ],
-        "monitoring_metric": "cmc_rank_1"
+        "monitoring_metric": "cmc_rank_1",
+        "dynamic_metric_patterns": [
+            "^cmc_rank_\\d+$"
+        ]
     },
     "cloud_upload": {
         "upload_strategy": {

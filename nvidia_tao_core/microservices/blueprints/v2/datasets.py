@@ -38,6 +38,21 @@ logger = logging.getLogger(__name__)
 # v2 Datasets Blueprint - URL prefix will be set during registration
 datasets_bp_v2 = Blueprint('datasets_v2', __name__, template_folder='templates')
 
+# Deprecation constants for dataset APIs
+DATASET_API_SUNSET_DATE = 'Tue, 30 Jun 2026 23:59:59 GMT'  # 4 months from Feb 2026
+DATASET_API_DEPRECATION_MESSAGE = (
+    'Dataset APIs are deprecated. Use direct dataset paths in job/experiment creation instead. '
+    'See migration guide: https://docs.nvidia.com/tao/dataset-migration'
+)
+
+
+def add_deprecation_headers(response):
+    """Add deprecation headers to response per RFC 8594"""
+    response.headers['X-API-Warn'] = DATASET_API_DEPRECATION_MESSAGE
+    response.headers['Sunset'] = DATASET_API_SUNSET_DATE
+    response.headers['Deprecation'] = 'true'
+    return response
+
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets:get_formats', methods=['GET'])
 def get_dataset_formats(org_name):
@@ -91,7 +106,12 @@ def get_dataset_formats(org_name):
         schema = ErrorRsp()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
+    logger.warning(
+        f"DEPRECATED API USAGE: Get dataset formats via deprecated endpoint. "
+        f"Sunset date: {DATASET_API_SUNSET_DATE}"
+    )
+    response_obj = make_response(jsonify(schema_dict), response.code)
+    return add_deprecation_headers(response_obj)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets', methods=['GET'])
@@ -206,7 +226,7 @@ def dataset_list(org_name):
         }
     schema = DatasetListRsp()
     response = make_response(jsonify(schema.dump(schema.load(metadata))))
-    return response
+    return add_deprecation_headers(response)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets/<dataset_id>', methods=['GET'])
@@ -270,7 +290,7 @@ def dataset_retrieve(org_name, dataset_id):
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRsp()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
+        return add_deprecation_headers(response)
     # Get response
     response = DatasetHandler.retrieve_dataset(org_name, dataset_id)
     # Get schema
@@ -289,7 +309,12 @@ def dataset_retrieve(org_name, dataset_id):
             schema = ErrorRsp()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
+    logger.warning(
+        f"DEPRECATED API USAGE: Dataset retrieve via deprecated endpoint. "
+        f"Sunset date: {DATASET_API_SUNSET_DATE}"
+    )
+    response_obj = make_response(jsonify(schema_dict), response.code)
+    return add_deprecation_headers(response_obj)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets/<dataset_id>', methods=['DELETE'])
@@ -367,7 +392,7 @@ def dataset_delete(org_name, dataset_id):
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRsp()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
+        return add_deprecation_headers(response)
     # Get response
     response = DatasetHandler.delete_dataset(org_name, dataset_id)
     # Get schema
@@ -378,7 +403,12 @@ def dataset_delete(org_name, dataset_id):
         schema = ErrorRsp()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
+    logger.warning(
+        f"DEPRECATED API USAGE: Dataset delete via deprecated endpoint. "
+        f"Sunset date: {DATASET_API_SUNSET_DATE}"
+    )
+    response_obj = make_response(jsonify(schema_dict), response.code)
+    return add_deprecation_headers(response_obj)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets', methods=['POST'])
@@ -449,10 +479,35 @@ def dataset_create(org_name):
                     if ds_format == "monai"
                     else DataMonitorLogTypeEnum.tao_dataset)
         log_api_error(user_id, org_name, schema_dict, log_type, action="creation")
+    else:
+        # Log deprecation warning for successful dataset creation
+        logger.warning(
+            f"DEPRECATED API USAGE: User {user_id} created dataset via deprecated endpoint. "
+            f"Sunset date: {DATASET_API_SUNSET_DATE}"
+        )
 
+    # Determine appropriate status code:
+    # - 201 for newly created dataset
+    # - 200 for existing dataset returned due to deduplication
     if response.code == 200:
-        response.code = 201
-    return make_response(jsonify(schema_dict), response.code)
+        if "already exists" in response.message:
+            # Return 200 for existing dataset
+            http_status = 200
+            # Add informational message to response
+            schema_dict['_message'] = (
+                "A dataset with the same configuration already exists. "
+                "Returning existing dataset. "
+                "To create a new dataset anyway, set 'force_create': true in the request body."
+            )
+            schema_dict['_duplicate'] = True
+        else:
+            # Return 201 for newly created dataset
+            http_status = 201
+    else:
+        http_status = response.code
+
+    resp = make_response(jsonify(schema_dict), http_status)
+    return add_deprecation_headers(resp)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets/<dataset_id>', methods=['PUT'])
@@ -526,7 +581,7 @@ def dataset_update(org_name, dataset_id):
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRsp()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
+        return add_deprecation_headers(response)
     schema = DatasetReq()
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
@@ -539,7 +594,12 @@ def dataset_update(org_name, dataset_id):
         schema = ErrorRsp()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
+    logger.warning(
+        f"DEPRECATED API USAGE: Dataset update via deprecated endpoint. "
+        f"Sunset date: {DATASET_API_SUNSET_DATE}"
+    )
+    response_obj = make_response(jsonify(schema_dict), response.code)
+    return add_deprecation_headers(response_obj)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets/<dataset_id>', methods=['PATCH'])
@@ -613,7 +673,7 @@ def dataset_partial_update(org_name, dataset_id):
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRsp()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
+        return add_deprecation_headers(response)
     schema = DatasetReq()
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
@@ -626,7 +686,12 @@ def dataset_partial_update(org_name, dataset_id):
         schema = ErrorRsp()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
+    logger.warning(
+        f"DEPRECATED API USAGE: Dataset partial update via deprecated endpoint. "
+        f"Sunset date: {DATASET_API_SUNSET_DATE}"
+    )
+    response_obj = make_response(jsonify(schema_dict), response.code)
+    return add_deprecation_headers(response_obj)
 
 
 @datasets_bp_v2.route('/orgs/<org_name>/datasets', methods=['DELETE'])
@@ -710,7 +775,8 @@ def bulk_dataset_delete(org_name):
     if not dataset_ids or not isinstance(dataset_ids, list):
         metadata = {"error_desc": "Invalid dataset IDs", "error_code": 1}
         schema = ErrorRsp()
-        return make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        response_obj = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return add_deprecation_headers(response_obj)
 
     results = []
     for dataset_id in dataset_ids:
@@ -730,4 +796,9 @@ def bulk_dataset_delete(org_name):
     # Return status for all datasets
     schema = BulkOpsRsp()
     schema_dict = schema.dump(schema.load({"results": results}))
-    return make_response(jsonify(schema_dict), 200)
+    logger.warning(
+        f"DEPRECATED API USAGE: Bulk dataset delete via deprecated endpoint. "
+        f"Sunset date: {DATASET_API_SUNSET_DATE}"
+    )
+    response_obj = make_response(jsonify(schema_dict), 200)
+    return add_deprecation_headers(response_obj)

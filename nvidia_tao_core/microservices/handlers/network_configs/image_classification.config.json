@@ -16,7 +16,8 @@
                     "any_of": [
                         {"path": "images_train.tar.gz", "type": "file"},
                         {"path": "images_val.tar.gz", "type": "file"},
-                        {"path": "images_test.tar.gz", "type": "file"}
+                        {"path": "images_test.tar.gz", "type": "file"},
+                        {"path": "images.tar.gz", "type": "file"}
                     ]
                 }
             ],

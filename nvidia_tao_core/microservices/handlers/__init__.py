@@ -23,6 +23,10 @@ from .spec_handler import SpecHandler
 from .mongo_handler import MongoBackupHandler
 from .model_handler import ModelHandler
 
+# Import inference microservice servers
+from .base_inference_microservice_server import BaseInferenceMicroserviceServer
+from .huggingface_inference_microservice_server import HuggingFaceInferenceMicroserviceServer
+
 # Export all handlers
 __all__ = [
     'DatasetHandler',
@@ -31,5 +35,8 @@ __all__ = [
     'JobHandler',
     'SpecHandler',
     'MongoBackupHandler',
-    'ModelHandler'
+    'ModelHandler',
+    # Inference microservice servers
+    'BaseInferenceMicroserviceServer',
+    'HuggingFaceInferenceMicroserviceServer',
 ]

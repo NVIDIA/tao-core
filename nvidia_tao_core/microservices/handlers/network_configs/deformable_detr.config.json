@@ -3,6 +3,7 @@
         "dataset_type": "object_detection",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -15,12 +16,14 @@
         "accepted_ds_intents": [
             "training",
             "evaluation",
-            "testing"
+            "testing",
+            "calibration"
         ],
         "image": "TAO_PYTORCH",
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -45,6 +48,47 @@
             "dataset.val_data_sources": {
                 "source": "train_datasets",
                 "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "data_services_as_parent_possible"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            }
+        },
+        "quantize": {
+            "dataset.train_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "data_services_as_parent_possible"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            },
+            "dataset.val_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "data_services_as_parent_possible"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            },
+            "dataset.quant_calibration_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": false,
                 "mapping": {
                     "image_dir": {
                         "path": "images.tar.gz",
@@ -155,6 +199,11 @@
             "train.resume_training_checkpoint_path": "resume_model",
             "encryption_key": "key"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "evaluate.checkpoint": "parent_model",
@@ -198,6 +247,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

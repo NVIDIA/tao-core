@@ -36,6 +36,9 @@ from nvidia_tao_core.config.deformable_detr.dataset import (
 from nvidia_tao_core.config.deformable_detr.deploy import DDGenTrtEngineExpConfig
 from nvidia_tao_core.config.deformable_detr.model import DDModelConfig
 from nvidia_tao_core.config.deformable_detr.train import DDTrainExpConfig
+from nvidia_tao_core.config.common.quantization.default_config import (
+    ModelQuantizationConfig,
+)
 
 
 @dataclass
@@ -155,6 +158,11 @@ class ExperimentConfig(CommonExperimentConfig):
             "Configurable parameters to construct the TensorRT engine builder "
             "for a Deformable DETR experiment."
         ),
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        default_value={},
+        description="Configurable parameters to run model quantization for a Deformable DETR experiment.",
     )
 
     def __post_init__(self):

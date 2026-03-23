@@ -158,7 +158,8 @@ def get_automl_param_details(org_name, experiment_id):
                         "option_weights": custom_ranges[param_name].get("option_weights"),
                         "depends_on": custom_ranges[param_name].get("depends_on"),
                         "math_cond": custom_ranges[param_name].get("math_cond"),
-                        "parent_param": custom_ranges[param_name].get("parent_param")
+                        "parent_param": custom_ranges[param_name].get("parent_param"),
+                        "disable_list": custom_ranges[param_name].get("disable_list")
                     }
 
                 param_detail = {
@@ -287,6 +288,7 @@ def update_automl_param_ranges(org_name, experiment_id):
             custom_depends_on = param_range.get("depends_on")
             custom_math_cond = param_range.get("math_cond")
             custom_parent_param = param_range.get("parent_param")
+            disable_list = param_range.get("disable_list", False)
 
             # Check if parameter exists in schema
             if param_name not in format_json_schema:
@@ -413,7 +415,8 @@ def update_automl_param_ranges(org_name, experiment_id):
                 "option_weights": custom_weights,
                 "depends_on": custom_depends_on,
                 "math_cond": custom_math_cond,
-                "parent_param": custom_parent_param
+                "parent_param": custom_parent_param,
+                "disable_list": disable_list
             }
 
         if errors:
