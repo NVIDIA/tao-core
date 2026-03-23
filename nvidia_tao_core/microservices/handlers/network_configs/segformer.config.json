@@ -3,6 +3,7 @@
         "dataset_type": "segmentation",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -19,6 +20,7 @@
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -28,6 +30,18 @@
     "data_sources": {
         "train": {
             "dataset.segment.root_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
+            }
+        },
+        "quantize": {
+            "dataset.segment.root_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
+            },
+            "dataset.segment.quant_calibration_dataset.images_dir": {
                 "source": "train_datasets",
                 "multiple_sources": false,
                 "path": ""
@@ -61,6 +75,11 @@
             "model.backbone.pretrained_backbone_path": "ptm_if_no_resume_model",
             "train.pretrained_model_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
+        },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
             "encryption_key": "key"
         },
         "evaluate": {
@@ -108,6 +127,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

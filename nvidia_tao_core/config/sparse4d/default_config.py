@@ -23,6 +23,7 @@ from nvidia_tao_core.config.common.common_config import (
     CommonExperimentConfig,
     ExportConfig,
 )
+from nvidia_tao_core.config.common.quantization import ModelQuantizationConfig
 from nvidia_tao_core.config.sparse4d.model import Sparse4DModelConfig
 from nvidia_tao_core.config.sparse4d.dataset import Omniverse3DDetTrackDatasetConfig
 from nvidia_tao_core.config.sparse4d.train import Sparse4DTrainConfig
@@ -76,6 +77,10 @@ class ExperimentConfig(CommonExperimentConfig):
         Sparse4DVisualizeConfig(),
         description="Visualize config",
         display_name="Visualize config"
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters for model quantization.",
     )
 
     def __post_init__(self):

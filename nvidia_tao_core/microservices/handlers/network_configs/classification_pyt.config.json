@@ -168,7 +168,7 @@
         "results_dir": "automl_output_dir",
         "model.backbone.pretrained_backbone_path": "automl_assign_ptm",
         "train.pretrained_model_path": "automl_assign_ptm",
-        "distill.teacher_model_path": "automl_resume_model",
+        "distill.pretrained_teacher_model_path": "automl_resume_model",
         "train.resume_training_checkpoint_path": "automl_resume_model",
         "train.checkpoint_interval": "assign_const_value,train.num_epochs",
         "train.validation_interval": "assign_const_value,train.num_epochs,train.checkpoint_interval"
@@ -177,7 +177,10 @@
         "available_metrics": [
             "val_acc_1"
         ],
-        "monitoring_metric": "val_acc_1"
+        "monitoring_metric": "val_acc_1",
+        "dynamic_metric_patterns": [
+            "^(train|val|test)_acc_\\d+$"
+        ]
     },
     "cloud_upload": {
         "upload_strategy": {

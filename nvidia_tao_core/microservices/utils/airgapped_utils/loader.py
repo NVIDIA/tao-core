@@ -38,7 +38,7 @@ class AirgappedExperimentLoader:
         Args:
             cloud_config (dict, optional): Cloud storage configuration.
         """
-        self.mongo_handler = MongoHandler("tao", "experiments")
+        self.mongo_handler = MongoHandler("tao", "jobs")
         self.local_json_file = None
 
         if not cloud_config:
@@ -70,39 +70,52 @@ class AirgappedExperimentLoader:
             str: Path to local temporary JSON file, or None if download failed
         """
         try:
-            # Construct cloud path using LOCAL_MODEL_REGISTRY environment variable
-            local_model_registry = os.getenv('LOCAL_MODEL_REGISTRY')
+            # Construct cloud path using LOCAL_MODEL_REGISTRY (e.g. /shared-storage/models or shared-storage/models)
+            local_model_registry = (os.getenv('LOCAL_MODEL_REGISTRY') or "").strip().strip('/')
             if not local_model_registry:
-                raise ValueError("LOCAL_MODEL_REGISTRY environment variable is not set")
+                raise ValueError(
+                    "LOCAL_MODEL_REGISTRY environment variable is not set. "
+                    "Set it to the path where ptm_metadatas.json was uploaded (e.g. shared-storage/models)."
+                )
 
             cloud_json_path = f"{local_model_registry}/{self.json_file_path}"
-            logger.info("Downloading JSON file from cloud storage: %s", cloud_json_path)
+            logger.info(
+                "Downloading JSON file from cloud storage: %s (LOCAL_MODEL_REGISTRY=%s)",
+                cloud_json_path, os.getenv('LOCAL_MODEL_REGISTRY')
+            )
 
-            # Check if file exists in cloud storage
-            if not self.cloud_storage.is_file(cloud_json_path):
-                logger.error("JSON file not found in cloud storage: %s", cloud_json_path)
-                return None
-
-            # Create temporary directory and filename for download
+            # Download directly so connection errors (e.g. workspace endpoint_url=localhost
+            # from Docker) surface in the response
             temp_dir = tempfile.mkdtemp()
             temp_filename = f"airgapped_models_{uuid.uuid4().hex}.json"
             temp_path = os.path.join(temp_dir, temp_filename)
-
             try:
-                # Download the file
                 self.cloud_storage.download_file(cloud_json_path, temp_path)
                 logger.info("Successfully downloaded JSON file to: %s", temp_path)
                 return temp_path
-
             except Exception as e:
-                logger.error("Failed to download JSON file from cloud storage: %s", e)
-                # Clean up temporary directory if download failed
+                logger.exception("Download failed for %s", cloud_json_path)
                 try:
                     shutil.rmtree(temp_dir)
                 except OSError:
                     pass
-                return None
+                err_str = str(e).lower()
+                if "connection" in err_str or "refused" in err_str or "resolve" in err_str or "timeout" in err_str:
+                    raise RuntimeError(
+                        f"Cannot reach Seaweed at workspace endpoint: {e}. "
+                        "When TAO API runs in Docker, workspace endpoint_url must be "
+                        "http://seaweedfs-s3:8333 (not localhost). "
+                        "Re-run the 'Create Cloud Workspace' cell so the workspace has the "
+                        "correct endpoint, or use a new workspace."
+                    ) from e
+                raise FileNotFoundError(
+                    f"JSON file not found at {cloud_json_path}: {e}. "
+                    "Ensure the 'copy to Seaweed' step ran and TAO API has "
+                    "LOCAL_MODEL_REGISTRY=shared-storage/models."
+                ) from e
 
+        except (ValueError, RuntimeError, FileNotFoundError):
+            raise
         except Exception as e:
             logger.error("Error setting up JSON file download from cloud storage: %s", e)
             return None
@@ -149,8 +162,8 @@ class AirgappedExperimentLoader:
     def _download_experiment_yaml_from_cloud(self, experiment, path_part, version):
         """Download experiment.yaml from cloud storage"""
         try:
-            # Construct cloud path: /data/nvstaging/tao/ocrnet/trainable_v2.0/
-            cloud_dir = f"{os.getenv('LOCAL_MODEL_REGISTRY')}/{path_part}/{version}/"
+            local_model_registry = (os.getenv('LOCAL_MODEL_REGISTRY') or "").strip().strip('/')
+            cloud_dir = f"{local_model_registry}/{path_part}/{version}/"
             logger.debug("Searching for model directories in cloud path: %s", cloud_dir)
 
             # List directories to find the model subdirectory
@@ -295,6 +308,7 @@ class AirgappedExperimentLoader:
 
         for exp_id, experiment in experiments.items():
             try:
+                experiment['public'] = True
                 self.mongo_handler.upsert({'id': exp_id}, experiment)
                 success_count += 1
                 logger.debug("Successfully imported experiment: %s", exp_id)

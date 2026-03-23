@@ -35,6 +35,9 @@ from nvidia_tao_core.config.grounding_dino.default_config import (
     GDINOExportExpConfig,
     GDINOGenTrtEngineExpConfig,
 )
+from nvidia_tao_core.config.common.quantization.default_config import (
+    ModelQuantizationConfig,
+)
 
 
 @dataclass
@@ -152,6 +155,24 @@ class MaskGDINODatasetConfig(GDINODatasetConfig):
 class MaskGDINOModelConfig(GDINOModelConfig):
     """DINO model config."""
 
+    enc_layers: int = INT_FIELD(
+        value=6,
+        default_value=6,
+        description="Number of encoder layers in the transformer (fixed at 6 for Mask Grounding DINO)",
+        valid_min=6,
+        valid_max=6,
+        automl_enabled="FALSE",
+        display_name="encoder layers",
+    )
+    dec_layers: int = INT_FIELD(
+        value=6,
+        default_value=6,
+        description="Number of decoder layers in the transformer (fixed at 6 for Mask Grounding DINO)",
+        valid_min=6,
+        valid_max=6,
+        automl_enabled="FALSE",
+        display_name="decoder layers",
+    )
     has_mask: bool = BOOL_FIELD(
         value=True,
         default_value=True,
@@ -266,6 +287,11 @@ class ExperimentConfig(CommonExperimentConfig):
             "Configurable parameters to construct the TensorRT engine builder "
             "for a Mask Grounding DINO experiment."
         ),
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        default_value={},
+        description="Configurable parameters to run model quantization for a Mask Grounding DINO experiment.",
     )
 
     def __post_init__(self):

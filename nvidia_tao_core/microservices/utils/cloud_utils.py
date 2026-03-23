@@ -16,6 +16,7 @@
 import os
 import copy
 import time
+import traceback
 import fsspec
 import logging
 import functools
@@ -24,6 +25,7 @@ from datetime import datetime
 # Lazy import to avoid circular dependencies
 from nvidia_tao_core.distributed.decorators import master_node_only
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import report_health_beat
+from nvidia_tao_core.microservices.utils.slurm_cloud_storage import SlurmCloudStorageAdapter
 
 NUM_RETRY = 5
 
@@ -125,10 +127,12 @@ def create_cs_instance_with_decrypted_metadata(decrypted_metadata):
     cloud_type = handler_metadata_copy.get("cloud_type", "aws")
     cloud_specific_details = handler_metadata_copy.get("cloud_specific_details", {})
     cloud_bucket_name = cloud_specific_details.get("cloud_bucket_name")
+    if 'container_name' in cloud_specific_details:
+        cloud_bucket_name = cloud_specific_details.get("container_name")
 
     # Original cloud providers
     cs_instance = None
-    if cloud_specific_details and cloud_bucket_name:
+    if cloud_specific_details and (cloud_bucket_name or cloud_type == "slurm"):
         if cloud_type == "aws":
             cs_instance = CloudStorage(
                 cloud_type="aws",
@@ -149,13 +153,71 @@ def create_cs_instance_with_decrypted_metadata(decrypted_metadata):
             )
         elif cloud_type == "seaweedfs":
             return _create_seaweedfs_instance(cloud_specific_details)
+        elif cloud_type == "lepton":
+            # Lepton workspaces use cloud storage
+            cloud_type = "aws"
+            key = cloud_specific_details.get("access_key")
+            secret = cloud_specific_details.get("secret_key")
+            if 'account_name' in cloud_specific_details:
+                cloud_type = "azure"
+                key = cloud_specific_details.get("account_name")
+                secret = cloud_specific_details.get("access_key")
+            cs_instance = CloudStorage(
+                cloud_type=cloud_type,
+                bucket_name=cloud_bucket_name,
+                region=cloud_specific_details.get("cloud_region"),
+                key=key,
+                secret=secret,
+                client_kwargs={"endpoint_url": cloud_specific_details.get("endpoint_url")}
+            )
+        elif cloud_type == "slurm":
+            # SLURM uses SSH-based remote filesystem access
+            slurm_user = cloud_specific_details.get("slurm_user")
+            slurm_hostname = cloud_specific_details.get("slurm_hostname")
+            base_results_dir = cloud_specific_details.get("base_results_dir")
+
+            if not base_results_dir:
+                # Default path if not specified
+                base_results_dir = f"/lustre/fsw/portfolios/edgeai/users/{slurm_user}"
+
+            if not slurm_user or not slurm_hostname:
+                raise ValueError("SLURM workspace requires slurm_user and slurm_hostname")
+
+            # Validate hostname is a list
+            if not isinstance(slurm_hostname, list):
+                raise ValueError("SLURM slurm_hostname must be a list of strings")
+            if not slurm_hostname:
+                raise ValueError("SLURM hostname list cannot be empty")
+
+            logger.info(f"SLURM workspace configured with {len(slurm_hostname)} hostname(s) for failover")
+
+            # Use SSH key from environment variable or auto-detect from common locations
+            ssh_key_path = os.getenv('SSH_KEY_PATH')
+            if not ssh_key_path or not os.path.exists(ssh_key_path):
+                # Try common locations for SSH keys
+                for candidate in ["/root/.ssh/id_ed25519", "/root/.ssh/id_rsa",
+                                  "/home/www-data/.ssh/id_ed25519", "/home/www-data/.ssh/id_rsa"]:
+                    if os.path.exists(candidate):
+                        ssh_key_path = candidate
+                        logger.info(f"Auto-detected SSH key: {ssh_key_path}")
+                        break
+                else:
+                    ssh_key_path = None
+                    logger.warning("No SSH key found for SLURM connection")
+
+            cs_instance = SlurmCloudStorageAdapter(
+                slurm_user=slurm_user,
+                slurm_hostname=slurm_hostname,
+                base_results_dir=base_results_dir,
+                ssh_key_path=ssh_key_path
+            )
         else:
             raise ValueError(f"Unsupported cloud_type: {cloud_type}")
 
     return cs_instance, cloud_specific_details
 
 
-def create_cs_instance(handler_metadata):
+def create_cs_instance(workspace_metadata):
     """Create a cloud storage instance based on handler metadata
 
     Args:
@@ -172,20 +234,23 @@ def create_cs_instance(handler_metadata):
     # Clear caches before creating new instance
     clear_fsspec_caches()
 
-    handler_metadata_copy = copy.deepcopy(handler_metadata)
+    handler_metadata_copy = copy.deepcopy(workspace_metadata)
     cloud_type = handler_metadata_copy.get("cloud_type", "aws")
     cloud_specific_details = handler_metadata_copy.get("cloud_specific_details", {})
 
-    # Decrypt cloud details for original cloud providers
-    config_path = os.getenv("VAULT_SECRET_PATH", None)
-    if config_path:
-        from .encrypt_utils import NVVaultEncryption
-        encryption = NVVaultEncryption(config_path)
-        for key, encrypted_value in cloud_specific_details.items():
-            if encryption.check_config()[0]:
-                cloud_specific_details[key] = encryption.decrypt(encrypted_value)
+    # Decrypt cloud details for original cloud providers (not needed for Slurm)
+    if cloud_type != "slurm":
+        config_path = os.getenv("VAULT_SECRET_PATH", None)
+        if config_path:
+            from .encrypt_utils import NVVaultEncryption
+            encryption = NVVaultEncryption(config_path)
+            for key, encrypted_value in cloud_specific_details.items():
+                if encryption.check_config()[0]:
+                    cloud_specific_details[key] = encryption.decrypt(encrypted_value)
 
     cloud_bucket_name = cloud_specific_details.get("cloud_bucket_name")
+    if 'container_name' in cloud_specific_details:
+        cloud_bucket_name = cloud_specific_details.get("container_name")
 
     cs_instance = None
     if cloud_specific_details:
@@ -209,10 +274,69 @@ def create_cs_instance(handler_metadata):
             )
         elif cloud_type == "seaweedfs":
             cs_instance, _ = _create_seaweedfs_instance(cloud_specific_details)
+        elif cloud_type == "lepton":
+            # Lepton workspaces use AWS S3 for storage with the same credential structure as AWS
+            cloud_type = "aws"
+            key = cloud_specific_details.get("access_key")
+            secret = cloud_specific_details.get("secret_key")
+            if 'account_name' in cloud_specific_details:
+                cloud_type = "azure"
+                key = cloud_specific_details.get("account_name")
+                secret = cloud_specific_details.get("access_key")
+            cs_instance = CloudStorage(
+                cloud_type=cloud_type,
+                bucket_name=cloud_bucket_name,
+                region=cloud_specific_details.get("cloud_region"),
+                key=key,
+                secret=secret,
+                client_kwargs={"endpoint_url": cloud_specific_details.get("endpoint_url")}
+            )
+        elif cloud_type == "slurm":
+            # SLURM uses SSH-based remote filesystem access
+            slurm_user = cloud_specific_details.get("slurm_user")
+            slurm_hostname = cloud_specific_details.get("slurm_hostname")
+            base_results_dir = cloud_specific_details.get("base_results_dir")
+
+            if not base_results_dir:
+                # Default path if not specified
+                base_results_dir = f"/lustre/fsw/portfolios/edgeai/users/{slurm_user}"
+
+            if not slurm_user or not slurm_hostname:
+                raise ValueError("SLURM workspace requires slurm_user and slurm_hostname")
+
+            # Validate hostname is a list
+            if not isinstance(slurm_hostname, list):
+                raise ValueError("SLURM slurm_hostname must be a list of strings")
+            if not slurm_hostname:
+                raise ValueError("SLURM hostname list cannot be empty")
+
+            logger.info(f"SLURM workspace configured with {len(slurm_hostname)} hostname(s) for failover")
+
+            # Use SSH key from environment variable or auto-detect from common locations
+            ssh_key_path = os.getenv('SSH_KEY_PATH')
+            if not ssh_key_path or not os.path.exists(ssh_key_path):
+                # Try common locations for SSH keys
+                for candidate in ["/root/.ssh/id_ed25519", "/root/.ssh/id_rsa",
+                                  "/home/www-data/.ssh/id_ed25519", "/home/www-data/.ssh/id_rsa"]:
+                    if os.path.exists(candidate):
+                        ssh_key_path = candidate
+                        logger.info(f"Auto-detected SSH key: {ssh_key_path}")
+                        break
+                else:
+                    ssh_key_path = None
+                    logger.warning("No SSH key found for SLURM connection")
+
+            cs_instance = SlurmCloudStorageAdapter(
+                slurm_user=slurm_user,
+                slurm_hostname=slurm_hostname,
+                base_results_dir=base_results_dir,
+                ssh_key_path=ssh_key_path
+            )
         else:
             raise ValueError(f"Unsupported cloud_type: {cloud_type}")
 
-    if cs_instance and cloud_bucket_name:
+    # Validate connection for all cloud providers including SLURM
+    if cs_instance and (cloud_bucket_name or cloud_type == "slurm"):
         logger.info(f"Validating {cloud_type} credentials...")
         try:
             # Directly validate the connection using the instance method
@@ -293,14 +417,24 @@ class CloudStorage:
             'skip_instance_cache': True   # Skip fsspec instance caching
         }
 
-        if cloud_type == 'aws':
+        if cloud_type in ['aws', 'lepton']:
             # Merge fsspec config with user kwargs
             aws_kwargs = {**kwargs, **fsspec_config}
             self.fs = fsspec.filesystem('s3', **aws_kwargs)
             self.root = f'{bucket_name}/'
         elif cloud_type == 'azure':
+            # Azure requires account_name and account_key at the top level
+            # Extract credentials from kwargs
+            account_name = kwargs.pop('key', None)
+            account_key = kwargs.pop('secret', None)
+
             # Merge fsspec config with user kwargs
-            azure_kwargs = {**kwargs, **fsspec_config}
+            azure_kwargs = {
+                'account_name': account_name,
+                'account_key': account_key,
+                **kwargs,
+                **fsspec_config
+            }
             self.fs = fsspec.filesystem('az', **azure_kwargs)
             self.root = f'{bucket_name}/'
         elif cloud_type == 'seaweedfs':
@@ -324,7 +458,11 @@ class CloudStorage:
             self.fs = fsspec.filesystem('s3', **seaweedfs_kwargs)
             self.root = f'{bucket_name}/'
         else:
-            raise ValueError("Unsupported cloud_type. Use 'aws', 'azure', or 'seaweedfs'.")
+            raise ValueError(
+                f"Unsupported cloud_type: '{cloud_type}'. "
+                "Use 'aws', 'azure', or 'seaweedfs'. "
+                "For SLURM, use SlurmCloudStorageAdapter directly via create_cs_instance()."
+            )
 
     def reset_filesystem_state(self):
         """Reset the filesystem state to clear any corrupted caches."""
@@ -384,9 +522,14 @@ class CloudStorage:
     def is_folder(self, cloud_path):
         """Check if the given cloud path is a folder."""
         full_path = self.root + cloud_path.strip('/') + '/'
+        # Azure specific path handling
+        if self.cloud_type == 'azure':
+            # For Azure, remove trailing slash and use isdir without it
+            full_path = full_path.rstrip('/')
         try:
             return self.fs.isdir(full_path)
         except Exception as e:
+            traceback.print_exc()
             logger.error(f"is_folder error: {e}")
             return False
 
@@ -407,6 +550,10 @@ class CloudStorage:
             # Normalize folder path
             folder_normalized = folder.strip('/')
             full_path = self.root + folder_normalized + '/' if folder_normalized else self.root
+
+            # Azure Blob Storage find() doesn't work well with trailing slashes
+            if self.cloud_type == 'azure' and full_path.endswith('/'):
+                full_path = full_path.rstrip('/')
 
             # Clear filesystem cache before operation for SeaweedFS
             if self.cloud_type == 'seaweedfs':
@@ -433,6 +580,7 @@ class CloudStorage:
             logger.info(f"Found {len(file_names)} files: {file_names[:5]}{'...' if len(file_names) > 5 else ''}")
             return file_names, []  # Details not available recursively
         except Exception as e:
+            traceback.print_exc()
             logger.error(f"list_files_in_folder error: {e}")
             return [], []
 
@@ -505,14 +653,47 @@ class CloudStorage:
             raise
 
     @retry_method
+    def is_file_modified(self, cloud_path, local_path):
+        """Check if a cloud storage file has been modified compared to the local file using fsspec.
+
+        Args:
+            cloud_path (str): Path to the file in cloud storage (relative to bucket root)
+            local_path (str): Path to the local file
+
+        Returns:
+            bool: True if the cloud file is newer than the local file, False otherwise
+        """
+        try:
+            # Get local file modification time
+            if not os.path.exists(local_path):
+                logger.warning(f"Local file {local_path} does not exist")
+                return True  # Consider it modified if local file doesn't exist
+
+            current_last_modified = os.path.getmtime(local_path)
+            if not cloud_path.startswith(self.root):
+                cloud_path = self.root + cloud_path.strip('/')
+
+            # Get cloud file info using fsspec
+            logger.info(f"Checking Cloud path: {cloud_path}")
+            file_info = self.fs.info(cloud_path)
+            last_modified = file_info.get('LastModified', datetime.now()).timestamp()
+            if 'LastModified' not in file_info:
+                logger.warning(f"Could not get last modified time for cloud file {cloud_path}, "
+                               f"defaulting to current time")
+            return last_modified > current_last_modified
+        except Exception as e:
+            logger.error(f"Error checking file modification for {cloud_path}: {e}")
+            return False
+
+    @retry_method
     def download_folder(self, cloud_folder, local_destination,
-                        maintain_src_folder_structure=False, progress_tracker=None):
+                        maintain_src_folder_structure=False, progress_tracker=None, extensions=[],
+                        exclude_filenames=None):
         """Download a folder from cloud storage to local destination with progress tracking."""
         from nvidia_tao_core.microservices.handlers.cloud_handlers.progress_tracker import ProgressTracker
         from nvidia_tao_core.microservices.handlers.cloud_handlers.progress_tracker_utils import (
             send_progress_status_callback
         )
-
         # Normalize path to avoid double slashes
         cloud_folder_normalized = cloud_folder.strip('/')
         full_path = self.root + cloud_folder_normalized + '/' if cloud_folder_normalized else self.root
@@ -542,7 +723,9 @@ class CloudStorage:
 
             # Use fsspec for all cloud providers (unified approach)
             if maintain_src_folder_structure:
-                if os.path.exists(local_destination):
+                if not os.path.exists(local_destination):
+                    self.fs.download(full_path, local_destination, recursive=True)
+                else:
                     logger.info(f"Folder {local_destination} already exists, skipping download")
                     return
 
@@ -550,7 +733,8 @@ class CloudStorage:
                 if file_count > 10 or total_size_mb > 100:
                     self._download_folder_with_progress(
                         file_paths, full_path, local_destination, progress_tracker,
-                        maintain_src_folder_structure=True, cloud_folder_normalized=cloud_folder_normalized
+                        maintain_src_folder_structure=True, cloud_folder_normalized=cloud_folder_normalized,
+                        extensions=extensions, exclude_filenames=exclude_filenames
                     )
                 else:
                     # Download maintaining the source folder structure (small folders)
@@ -565,7 +749,8 @@ class CloudStorage:
                 os.makedirs(local_destination, exist_ok=True)
                 self._download_folder_with_progress(
                     file_paths, full_path, local_destination, progress_tracker,
-                    maintain_src_folder_structure=False
+                    maintain_src_folder_structure=False, extensions=extensions,
+                    exclude_filenames=exclude_filenames
                 )
 
             if create_own_tracker:
@@ -580,11 +765,15 @@ class CloudStorage:
             raise
 
     def _download_folder_with_progress(self, file_paths, full_path, local_destination, progress_tracker,
-                                       maintain_src_folder_structure=False, cloud_folder_normalized=""):
+                                       maintain_src_folder_structure=False, cloud_folder_normalized="", extensions=[],
+                                       exclude_filenames=None):
         """Download folder contents with detailed progress tracking."""
         try:
             for file_path in file_paths:
                 try:
+                    if exclude_filenames and os.path.basename(file_path) in exclude_filenames:
+                        logger.info("Skipping excluded file during folder download: %s", file_path)
+                        continue
                     if maintain_src_folder_structure:
                         # Maintain original folder structure
                         relative_path = file_path[len(self.root + cloud_folder_normalized + '/'):]
@@ -593,6 +782,17 @@ class CloudStorage:
                         # Flatten structure
                         relative_path = file_path[len(full_path):]
                         local_file_path = os.path.join(local_destination, relative_path)
+                        if extensions and not any(file_path.endswith(ext) for ext in extensions):
+                            continue
+                        if self.is_file_modified(file_path, local_file_path):
+                            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+                            self.fs.download(file_path, local_file_path)
+                            logger.info(f"Downloaded {file_path} to {local_file_path}")
+                        else:
+                            logger.info(
+                                f"File {local_file_path} in folder {local_destination} "
+                                f"already exists, skipping download"
+                            )
 
                     # Skip if file already exists
                     if os.path.exists(local_file_path):
@@ -1039,26 +1239,38 @@ class CloudStorage:
                         )
 
                 except Exception as file_err:
-                    logger.warning(f"Could not move file {file_path}: {file_err}")
-
-            if moved_files > 0:
-                if job_id:
-                    report_health_beat(job_id, f"Cleaning up source directory after moving {moved_files} files")
-
-                try:
-                    self.fs.rm(full_source, recursive=True)
-                except Exception:
-                    logger.warning("Could not remove source directory after file moves")
-
-                logger.info(f"Successfully moved {moved_files} files using file-by-file approach")
-
-                if job_id:
-                    report_health_beat(
-                        job_id,
-                        f"Completed folder move: {moved_files} files moved to {destination_path}"
+                    logger.error(
+                        "Could not move file %s (will raise after loop if any file failed): %s",
+                        file_path, file_err, exc_info=True
                     )
-            else:
+
+            if moved_files == 0:
                 raise Exception("No files could be moved using any method")
+
+            if moved_files < len(files_only):
+                failed_count = len(files_only) - moved_files
+                msg = (
+                    f"Only {moved_files}/{len(files_only)} files were moved; {failed_count} file(s) failed. "
+                    "Source folder was not removed so no data was lost. Retry may succeed (e.g. after timeout)."
+                )
+                logger.error(msg)
+                raise Exception(msg)
+
+            if job_id:
+                report_health_beat(job_id, f"Cleaning up source directory after moving {moved_files} files")
+
+            try:
+                self.fs.rm(full_source, recursive=True)
+            except Exception:
+                logger.warning("Could not remove source directory after file moves")
+
+            logger.info(f"Successfully moved {moved_files} files using file-by-file approach")
+
+            if job_id:
+                report_health_beat(
+                    job_id,
+                    f"Completed folder move: {moved_files} files moved to {destination_path}"
+                )
         except Exception as e:
             logger.error(f"move_folder error: {e}")
             raise

@@ -19,10 +19,9 @@ TAO_NETWORKS = set([
     "mask_grounding_dino", "ml_recog", "ocdnet", "ocrnet", "optical_inspection", "pointpillars",
     "pose_classification", "re_identification", "centerpose", "visual_changenet_classify",
     "visual_changenet_segment", "deformable_detr",
-    "depth_net_mono", "depth_net_stereo", "dino", "rtdetr", "segformer",  # PYT CV MODELS
+    "depth_net_mono", "depth_net_stereo", "dino", "nvpanoptix3d", "rtdetr", "segformer",  # PYT CV MODELS
     "annotations", "analytics", "augmentation", "auto_label", "image"  # Data_Service tasks.
 ])
-MAXINE_NETWORKS = set(["maxine_eye_contact"])  # Maxine networks
 VLM_NETWORKS = set(["vlm"])  # VLM networks
 
 _OD_NETWORKS = set(["deformable_detr", "dino", "grounding_dino", "rtdetr"])
@@ -42,10 +41,10 @@ _DATA_SERVICES_ACTIONS = set([
     "annotation_format_convert", "auto_label", "augment", "analyze",
     "validate_images", "validate_annotations"
 ])
-_DATA_GENERATE_ACTIONS = set(["dataset_convert_gaze", "augment", "validate_images"])
+_DATA_GENERATE_ACTIONS = set(["augment", "validate_images"])
 
 NO_SPEC_ACTIONS_MODEL = (
-    "dataset_convert_gaze", "evaluate", "retrain", "export", "gen_trt_engine", "inference"
+    "evaluate", "retrain", "export", "gen_trt_engine", "inference"
 )  # Actions with **optional** specs
 NO_PTM_MODELS = set([])  # These networks don't have a pretrained model that can be downloaded from ngc model registry
 _ITER_MODELS = set([])  # These networks operate on iterations instead of epochs
@@ -57,7 +56,7 @@ BACKBONE_AND_FULL_MODEL_PTM_SUPPORTING_NETWORKS = set([
     "dino", "grounding_dino", "mask_grounding_dino", "classification_pyt"
 ])
 
-AUTOML_DISABLED_NETWORKS = ["mal", "maxine_eye_contact"]  # These networks can't support AutoML
+AUTOML_DISABLED_NETWORKS = ["mal", "nvpanoptix3d"]  # These networks can't support AutoML
 TENSORBOARD_DISABLED_NETWORKS = [
     'classification_pyt',
 ]  # These networks currently don't produce tfevents logs as they are third party models
@@ -111,8 +110,8 @@ NETWORK_CONTAINER_MAPPING = {"action_recognition": "TAO_PYTORCH",
                              "segformer": "TAO_PYTORCH",
                              "visual_changenet_classify": "TAO_PYTORCH",
                              "visual_changenet_segment": "TAO_PYTORCH",
-                             "maxine_eye_contact": "MAXINE_DLDK",
                              "mae": "TAO_PYTORCH",
+                             "cosmos-rl": "COSMOS_RL",
                              "vila": "VILA"}
 
 CV_ACTION_RULES = {

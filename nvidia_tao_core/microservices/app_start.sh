@@ -18,4 +18,6 @@ if [ -n "$DOCKER_HOST" ]; then
 fi
 service nginx start
 export _PYTHON_LIB_PATH=$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+# Set HOME to /tmp to avoid permission issues with leptonai cache access
+export HOME=/tmp
 uwsgi --ini $_PYTHON_LIB_PATH/nvidia_tao_core/microservices/uwsgi.ini

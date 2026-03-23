@@ -170,6 +170,17 @@ class GDINODatasetConfig:
         ),
         display_name="infer data sources",
     )
+    quant_calibration_data_sources: Optional[Dict[str, str]] = DICT_FIELD(
+        hashMap=None,
+        default_value={"image_dir": "", "json_file": ""},
+        description=(
+            "The data source for quantization calibration:\n"
+            "* image_dir : The directory that contains the quantization calibration images\n"
+            "* json_file(optional) : The path of the JSON file, which uses quantization calibration-"
+            "annotation COCO format"
+        ),
+        display_name="quantization calibration data sources",
+    )
     batch_size: int = INT_FIELD(
         value=4,
         default_value=4,

@@ -16,6 +16,7 @@
 
 import json
 import os
+import pathlib
 import pytest
 
 from nvidia_tao_core.microservices.constants import TAO_NETWORKS
@@ -24,16 +25,27 @@ from nvidia_tao_core.microservices.utils.core_utils import get_microservices_net
 from nvidia_tao_core.scripts.generate_schema import generate_schema
 
 EXCLUDED_KEYWORDS = [
-    'maxine', 'vlm', 'segmentation',
+    'vlm', 'segmentation',
     'image_classification', 'character_recognition', 'object_detection'
 ]
+
+# Get networks that have config modules (directories in nvidia_tao_core/config/)
+CONFIG_MODULE_DIR = pathlib.Path(__file__).parent.parent.parent / "config"
+networks_with_config_modules = set()
+if CONFIG_MODULE_DIR.exists():
+    for item in CONFIG_MODULE_DIR.iterdir():
+        if item.is_dir() and not item.name.startswith(('_', '.')):
+            networks_with_config_modules.add(item.name)
+
 config_networks = [
     network for network in _get_network_architectures()
-    if not any(keyword in network for keyword in EXCLUDED_KEYWORDS)
+    if not any(keyword in network for keyword in EXCLUDED_KEYWORDS) and
+    network in networks_with_config_modules
 ]
 constant_networks = [
     network for network in TAO_NETWORKS
-    if not any(keyword in network for keyword in EXCLUDED_KEYWORDS)
+    if not any(keyword in network for keyword in EXCLUDED_KEYWORDS) and
+    network in networks_with_config_modules
 ]
 
 

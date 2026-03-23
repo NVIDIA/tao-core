@@ -70,12 +70,14 @@ class BaseQuantizationConfig:
 
     dtype: str = STR_FIELD(  # type: ignore
         "",
+        default_value="",
         description="Data type to use for quantization (e.g., 'int8', 'fp8_e4m3fn', 'fp8_e5m2')",
         display_name="Quantization data type",
         required="yes",
     )
     observer_or_fake_quant: str = STR_FIELD(  # type: ignore
         "",
+        default_value="",
         description="Name of the observer (PTQ) or fake quant (QAT) to use for collecting statistics",
         display_name="Observer or fake quant",
     )
@@ -226,6 +228,7 @@ class LayerQuantizationConfig:
 
     module_name: str = STR_FIELD(  # type: ignore
         "",
+        default_value="",
         description="Name or pattern specifying the module(s) to quantize",
         display_name="Module name",
         required="yes",
@@ -385,18 +388,21 @@ class ModelQuantizationConfig:
 
     backend: Optional[str] = STR_FIELD(  # type: ignore
         "torchao",
+        default_value="torchao",
         valid_options="modelopt.pytorch,torchao,modelopt.onnx",
         description="The quantization backend to use",
         display_name="Quantization backend",
     )
     mode: Optional[str] = STR_FIELD(
         "weight_only_ptq",
+        default_value="weight_only_ptq",
         valid_options="static_ptq,weight_only_ptq",
         description="The quantization mode to use",
         display_name="Quantization mode",
     )
     algorithm: Optional[str] = STR_FIELD(  # type: ignore
         "minmax",
+        default_value="minmax",
         valid_options="minmax,max,entropy,awq_clip,awq_lite,awq_full,rtn_dq",
         description=(
             "Calibration/optimization algorithm. Used by ModelOpt backends "
@@ -419,12 +425,14 @@ class ModelQuantizationConfig:
     )
     model_path: Optional[str] = STR_FIELD(
         "",
+        default_value="",
         display_name="Model path",
         description="Path to the model to be quantized. For ONNX backend, path to ONNX file.",
         required="yes",
     )
     results_dir: Optional[str] = STR_FIELD(
         "",
+        default_value="",
         display_name="Results directory",
         description="Path to where all the assets generated from a task are stored.",
         required="yes",
@@ -436,6 +444,7 @@ class ModelQuantizationConfig:
     )
     device: str = STR_FIELD(
         "cuda",
+        default_value="cuda",
         regex=r"^(cuda|cpu|trt|cuda:[0-9]+)$",
         description=(
             "Device to use for calibration. Accepts 'cuda' (uses default GPU), 'cpu', "
@@ -445,4 +454,16 @@ class ModelQuantizationConfig:
             "execution provider."
         ),
         display_name="Calibration device",
+    )
+
+
+@dataclass
+class QuantCalibrationDataset:
+    """Quantization calibration dataset config."""
+
+    images_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        display_name="images directory",
+        description="Path to images directory for quantization calibration",
     )

@@ -28,6 +28,7 @@ import logging
 from nvidia_tao_core.microservices.constants import CV_ACTION_CHAINED_ONLY, CV_ACTION_RULES
 from .encrypt_utils import NVVaultEncryption
 from .mongo_utils import MongoHandler
+from nvidia_tao_core.microservices.enum_constants import Backend
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -39,7 +40,7 @@ logging.basicConfig(
 logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
-BACKEND = os.getenv("BACKEND", "local-k8s")
+BACKEND = Backend(os.getenv("BACKEND", "local-k8s"))
 tao_root = os.environ.get("TAO_ROOT", "/tmp/shared/orgs/")
 base_exp_uuid = "00000000-0000-0000-0000-000000000000"
 
@@ -67,21 +68,67 @@ def validate_automl_settings(automl_settings):
         return f"validation input automl_settings must be a dict, instead is {type(automl_settings)}"
     automl_enabled = automl_settings.get("automl_enabled", False)
     if automl_enabled:
-        if automl_settings.get("automl_algorithm", "") in ("hyperband", "h"):
-            r = automl_settings.get("automl_R", 27)
-            nu = automl_settings.get("automl_nu", 3)
-            epoch_multiplier = automl_settings.get("epoch_multiplier", 1)
-            if r <= 1 or nu <= 1:
-                return "automl_R, automl_nu must be greater than 1"
-            if nu > r:
-                return "automl_nu must be less than or equal to automl_R"
+        algorithm = automl_settings.get("automl_algorithm", "")
+        # Extract algorithm-specific parameters from nested structure
+        algo_params = automl_settings.get("algorithm_specific_params", {})
+
+        # Hyperband-like algorithms: Hyperband, BOHB, ASHA, DEHB, HyperBandES
+        if algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes"):
+            max_epochs = algo_params.get("automl_max_epochs", 27)
+            reduction_factor = algo_params.get("automl_reduction_factor", 3)
+            epoch_multiplier = algo_params.get("epoch_multiplier", 1)
+            if max_epochs <= 1 or reduction_factor <= 1:
+                return "automl_max_epochs, automl_reduction_factor must be greater than 1"
+            if reduction_factor > max_epochs:
+                return "automl_reduction_factor must be less than or equal to automl_max_epochs"
             if epoch_multiplier <= 0:
                 return "epoch_multiplier must be greater than 0"
-        elif automl_settings.get("automl_algorithm", "") in ("bayesian", "b"):
-            if automl_settings.get("automl_max_recommendations", 20) <= 0:
+
+            # ASHA-specific validation
+            if algorithm == "asha":
+                max_concurrent = algo_params.get("automl_max_concurrent", 4)
+                if max_concurrent < 1:
+                    return "automl_max_concurrent must be at least 1"
+
+            # DEHB-specific validation
+            if algorithm == "dehb":
+                mutation_factor = algo_params.get("automl_mutation_factor", 0.5)
+                crossover_prob = algo_params.get("automl_crossover_prob", 0.5)
+                if not (0.0 <= mutation_factor <= 2.0):
+                    return "automl_mutation_factor must be between 0.0 and 2.0"
+                if not (0.0 <= crossover_prob <= 1.0):
+                    return "automl_crossover_prob must be between 0.0 and 1.0"
+
+            # HyperBandES-specific validation
+            if algorithm in ("hyperband_es", "hes"):
+                early_stop_threshold = algo_params.get("automl_early_stop_threshold", 0.1)
+                if not (0.0 <= early_stop_threshold <= 1.0):
+                    return "automl_early_stop_threshold must be between 0.0 and 1.0"
+
+        # Bayesian-like algorithms: Bayesian, BFBO
+        elif algorithm in ("bayesian", "b", "bfbo"):
+            max_recommendations = algo_params.get("automl_max_recommendations", 20)
+            if max_recommendations <= 0:
                 return "automl_max_recommendations must be greater than 0"
+
+        # PBT algorithm
+        elif algorithm == "pbt":
+            population_size = algo_params.get("automl_population_size", 10)
+            max_generations = algo_params.get("automl_max_generations", 20)
+            eval_interval = algo_params.get("automl_eval_interval", 10)
+            perturbation_factor = algo_params.get("automl_perturbation_factor", 1.2)
+
+            if population_size < 1:
+                return "automl_population_size must be at least 1"
+            if max_generations < 1:
+                return "automl_max_generations must be at least 1"
+            if eval_interval < 1:
+                return "automl_eval_interval must be at least 1"
+            if not (1.0 <= perturbation_factor <= 10.0):
+                return "automl_perturbation_factor must be between 1.0 and 10.0"
+
         else:
-            return "automl_algorithm must be 'hyperband' or 'bayesian'"
+            return "automl_algorithm must be one of: bayesian, hyperband, bohb, bfbo, asha, pbt, dehb, hyperband_es"
     return None
 
 
@@ -189,6 +236,12 @@ def get_handler_job_metadata(job_id):
         mongo_jobs = MongoHandler("tao", "jobs")
         job_query = {'id': job_id}
         metadata = mongo_jobs.find_one(job_query)
+        if not metadata:
+            logger.debug(
+                "Job %s not found in MongoDB (tao.jobs). If you changed API URL or restarted containers, "
+                "ensure this API server uses the same MongoDB as when the job was created.",
+                job_id
+            )
     return metadata
 
 
@@ -238,9 +291,13 @@ def update_base_experiment_metadata(base_experiment_id, base_experiment_metadata
     mongo_jobs.upsert({'id': base_experiment_id}, base_experiment_metadata_update)
 
 
-def get_handler_metadata(handler_id, kind):
+def get_handler_metadata(handler_id, kind=None):
     """Return metadata info present in DB"""
     if not kind:
+        for kind_type in ["experiments", "datasets", "workspaces"]:
+            metadata = get_handler_metadata(handler_id, kind_type)
+            if metadata:
+                return metadata
         return {}
     if kind[-1] != 's':
         kind += 's'
@@ -392,10 +449,51 @@ def update_job_message(handler_id, job_id, kind, message, automl_expt_job_id=Non
 
         # Handle both string message and dict with multiple fields
         if isinstance(message, dict):
-            # Update all fields from the dict
-            for key in ['date', 'time', 'status', 'message']:
-                if key in message:
-                    metadata["job_details"][update_job_id]["detailed_status"][key] = message[key]
+            # Check if we should update based on timestamp (only update if newer)
+            current_detailed_status = metadata["job_details"][update_job_id]["detailed_status"]
+
+            # Get timestamps for comparison
+            # If timestamp field exists, use it; otherwise construct from date+time
+            def get_timestamp_from_status(status_dict):
+                if 'timestamp' in status_dict:
+                    return status_dict['timestamp']
+                if 'date' in status_dict and 'time' in status_dict:
+                    # Construct ISO timestamp from date and time
+                    # Format: "MM/DD/YYYY" and "HH:MM:SS"
+                    try:
+                        date_str = status_dict['date']
+                        time_str = status_dict['time']
+                        dt = datetime.strptime(f"{date_str} {time_str}", "%m/%d/%Y %H:%M:%S")
+                        return dt.isoformat()
+                    except Exception:
+                        return None
+                return None
+
+            new_timestamp = get_timestamp_from_status(message)
+            current_timestamp = get_timestamp_from_status(current_detailed_status)
+
+            # Determine if we should update
+            should_update = True
+            if current_timestamp and new_timestamp:
+                try:
+                    from dateutil import parser
+                    new_ts = parser.parse(new_timestamp) if isinstance(new_timestamp, str) else new_timestamp
+                    current_ts = (
+                        parser.parse(current_timestamp)
+                        if isinstance(current_timestamp, str)
+                        else current_timestamp
+                    )
+                    # Only update if new status is newer or equal (to handle concurrent updates)
+                    should_update = new_ts >= current_ts
+                except Exception:
+                    # If timestamp parsing fails, allow the update
+                    should_update = True
+
+            if should_update:
+                # Update all fields from the dict
+                for key in ['date', 'time', 'status', 'message', 'timestamp']:
+                    if key in message:
+                        metadata["job_details"][update_job_id]["detailed_status"][key] = message[key]
         else:
             # Backwards compatibility: just update message if it's a string
             metadata["job_details"][update_job_id]["detailed_status"]["message"] = message
@@ -459,18 +557,38 @@ def save_automl_current_rec(brain_job_id, current_rec):
 
 
 def get_automl_best_rec_info(brain_job_id):
-    """Get automl best recommendation info"""
+    """Get automl best recommendation info.
+
+    Returns:
+        best_rec_number: recommendation index (e.g. 0).
+        best_rec_id: experiment job id whose results contain the best model.
+        best_model_results_job_id: job id whose results folder contains the best model
+            (brain_job_id if move succeeded, best_rec_id if move failed). Defaults to
+            brain_job_id when not set for backward compatibility.
+    """
     mongo_jobs = MongoHandler("tao", "automl_jobs")
     job_query = {'id': brain_job_id}
     automl_info = mongo_jobs.find_one(job_query)
-    return automl_info.get("best_rec_number", "-1"), automl_info.get("best_rec_id", "-1")
+    if not automl_info:
+        return "-1", "-1", brain_job_id
+    best_rec_number = automl_info.get("best_rec_number", "-1")
+    best_rec_id = automl_info.get("best_rec_id", "-1")
+    best_model_results_job_id = automl_info.get("best_model_results_job_id") or brain_job_id
+    return best_rec_number, best_rec_id, best_model_results_job_id
 
 
-def save_automl_best_rec_info(brain_job_id, best_rec_number, best_rec_job_id):
-    """Save automl best recommendation info"""
+def save_automl_best_rec_info(brain_job_id, best_rec_number, best_rec_job_id, best_model_results_job_id=None):
+    """Save automl best recommendation info.
+
+    When move_folder of best experiment to brain folder fails, pass best_model_results_job_id=best_rec_job_id
+    so downstream (e.g. evaluate, export) resolve parent model from the experiment folder.
+    """
     mongo_jobs = MongoHandler("tao", "automl_jobs")
     job_query = {'id': brain_job_id}
-    mongo_jobs.upsert(job_query, {"best_rec_number": str(best_rec_number), "best_rec_id": str(best_rec_job_id)})
+    payload = {"best_rec_number": str(best_rec_number), "best_rec_id": str(best_rec_job_id)}
+    if best_model_results_job_id is not None:
+        payload["best_model_results_job_id"] = str(best_model_results_job_id)
+    mongo_jobs.upsert(job_query, payload)
 
 
 def get_automl_custom_param_ranges(experiment_id):
@@ -797,15 +915,13 @@ def check_write_access(user_id, org_name, handler_id, base_experiment=False, kin
     return False
 
 
-def get_public_experiments(maxine=False):
+def get_public_experiments():
     """Get public experiments (base experiments/pretrained models)"""
     # Make sure to check if it exists
     public_experiments_metadata = []
     mongo_jobs = MongoHandler("tao", "jobs")
     base_experiments = mongo_jobs.find({'public': True})
     for base_experiment_metadata in base_experiments:
-        if not maxine and base_experiment_metadata.get("network_arch", "").startswith("maxine"):
-            continue
         public_experiments_metadata.append(base_experiment_metadata)
     return list(public_experiments_metadata)
 
@@ -859,7 +975,11 @@ def decrypt_handler_metadata(workspace_metadata):
 
 
 def get_workspace_string_identifier(workspace_id, workspace_cache):
-    """For the given workspace ID, constuct a unique string which can identify this workspace"""
+    """For the given workspace ID, constuct a unique string which can identify this workspace
+
+    For SLURM, uses slurm://base_results_dir/ format which gets converted to actual paths later.
+    For cloud workspaces, uses protocol://bucket/ format.
+    """
     if workspace_id in workspace_cache:
         workspace_metadata = workspace_cache[workspace_id]
     else:
@@ -869,8 +989,20 @@ def get_workspace_string_identifier(workspace_id, workspace_cache):
     workspace_identifier = ""
     if workspace_metadata:
         cloud_type = workspace_metadata.get('cloud_type')
-        bucket_name = workspace_metadata.get('cloud_specific_details', {}).get('cloud_bucket_name')
-        workspace_identifier = f"{cloud_type}://{bucket_name}/"
+
+        # For SLURM, use base_results_dir as the "bucket" to maintain consistency
+        if cloud_type == 'slurm':
+            base_results_dir = workspace_metadata.get('cloud_specific_details', {}).get('base_results_dir', '')
+            # Use the base directory (without /results suffix) as identifier
+            bucket_name = base_results_dir.rstrip('/results').rstrip('/')
+            if not bucket_name:
+                # Fallback if no base_results_dir specified
+                slurm_user = workspace_metadata.get('cloud_specific_details', {}).get('slurm_user', 'unknown')
+                bucket_name = f"/lustre/fsw/portfolios/edgeai/users/{slurm_user}"
+            workspace_identifier = f"{cloud_type}://{bucket_name}/"
+        else:
+            bucket_name = workspace_metadata.get('cloud_specific_details', {}).get('cloud_bucket_name')
+            workspace_identifier = f"{cloud_type}://{bucket_name}/"
     return workspace_identifier
 
 

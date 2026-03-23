@@ -3,6 +3,7 @@
         "dataset_type": "visual_changenet_classify",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -14,12 +15,14 @@
         "accepted_ds_intents": [
             "training",
             "evaluation",
-            "testing"
+            "testing",
+            "calibration"
         ],
         "image": "TAO_PYTORCH",
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -70,6 +73,33 @@
                 "source": "eval_dataset",
                 "multiple_sources": false,
                 "path": "dataset.csv"
+            }
+        },
+        "quantize": {
+            "dataset.classify.train_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            },
+            "dataset.classify.train_dataset.csv_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "dataset.csv"
+            },
+            "dataset.classify.validation_dataset.images_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            },
+            "dataset.classify.validation_dataset.csv_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "dataset.csv"
+            },
+            "dataset.classify.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
             }
         },
         "evaluate": {
@@ -124,6 +154,12 @@
             "model.backbone.pretrained_backbone_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "task": "classify",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "task": "classify",
@@ -173,6 +209,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

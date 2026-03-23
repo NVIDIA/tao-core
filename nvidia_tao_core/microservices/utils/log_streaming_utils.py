@@ -22,6 +22,8 @@ retrieval more reliable and real-time.
 import os
 import logging
 from typing import Optional, Generator
+from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import BACKEND, get_handler_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -329,241 +331,38 @@ def stream_k8s_pod_logs(job_id: str, namespace: Optional[str] = None,
         return None
 
 
-def get_docker_container_logs(container_name: str, tail_lines: Optional[int] = None) -> Optional[str]:
-    """Get logs directly from Docker container using Docker Python client.
-
-    Args:
-        container_name (str): The container name (usually same as job_id)
-        tail_lines (int, optional): Number of lines to tail. If None, gets all logs
-
-    Returns:
-        str: The log content, or None if logs cannot be retrieved
-    """
-    logger.debug(
-        f"[DOCKER_LOGS] Starting get_docker_container_logs for "
-        f"container={container_name}, tail_lines={tail_lines}"
-    )
-    try:
-        import docker
-        from docker.errors import NotFound, APIError
-
-        logger.debug(f"[DOCKER_LOGS] Initializing Docker client for container={container_name}")
-        try:
-            client = docker.from_env()
-            logger.debug("[DOCKER_LOGS] Docker client initialized successfully")
-        except Exception as e:
-            logger.error(f"[DOCKER_LOGS] Failed to initialize Docker client: {type(e).__name__}: {e}")
-            logger.debug("[DOCKER_LOGS] Docker client initialization failed", exc_info=True)
-            return None
-
-        try:
-            logger.debug(f"[DOCKER_LOGS] Getting container: {container_name}")
-            container = client.containers.get(container_name)
-            container_status = container.status
-            logger.info(f"[DOCKER_LOGS] Found container: {container_name} (status={container_status})")
-            logger.debug(
-                f"[DOCKER_LOGS] Container details: id={container.id[:12]}, "
-                f"image={container.image.tags}, status={container_status}"
-            )
-
-            log_kwargs = {
-                'stdout': True,
-                'stderr': True,
-                'timestamps': False,
-            }
-
-            if tail_lines is not None:
-                log_kwargs['tail'] = tail_lines
-                logger.debug(f"[DOCKER_LOGS] Using tail_lines={tail_lines}")
-
-            logger.debug(f"[DOCKER_LOGS] Calling container.logs with kwargs: {log_kwargs}")
-            logs = container.logs(**log_kwargs)
-
-            # Docker returns bytes, decode to string
-            if isinstance(logs, bytes):
-                log_size_kb = len(logs) / 1024
-                logger.debug(f"[DOCKER_LOGS] Decoding {log_size_kb:.1f} KB of log data")
-                logs = logs.decode('utf-8', errors='replace')
-
-            log_line_count = len(logs.splitlines())
-            log_size_kb = len(logs) / 1024
-            logger.info(
-                f"[DOCKER_LOGS] Successfully retrieved {log_line_count} lines "
-                f"({log_size_kb:.1f} KB) from container {container_name}"
-            )
-            return logs
-
-        except NotFound as e:
-            logger.error(f"[DOCKER_LOGS] Container not found: {container_name}")
-            logger.debug(f"[DOCKER_LOGS] NotFound details: {e}")
-            return None
-        except APIError as e:
-            logger.error(f"[DOCKER_LOGS] Docker API error retrieving logs from {container_name}: {e}")
-            logger.debug(
-                f"[DOCKER_LOGS] APIError details: "
-                f"status_code={e.status_code if hasattr(e, 'status_code') else 'N/A'}"
-            )
-            return None
-
-    except ImportError as e:
-        logger.error(f"[DOCKER_LOGS] Docker Python client not installed: {e}. Install with: pip install docker")
-        return None
-    except Exception as e:
-        logger.error(
-            f"[DOCKER_LOGS] Unexpected error getting Docker container logs for "
-            f"{container_name}: {type(e).__name__}: {e}"
-        )
-        logger.debug("[DOCKER_LOGS] Full traceback:", exc_info=True)
-        return None
-
-
-def stream_docker_container_logs(container_name: str, follow: bool = True) -> Optional[Generator[str, None, None]]:
-    """Stream logs from Docker container in real-time.
-
-    Args:
-        container_name (str): The container name (usually same as job_id)
-        follow (bool): Whether to follow the log stream (tail -f behavior)
-
-    Yields:
-        str: Log lines as they are produced
-    """
-    try:
-        import docker
-        from docker.errors import NotFound, APIError
-
-        try:
-            client = docker.from_env()
-        except Exception as e:
-            logger.error(f"Failed to initialize Docker client: {e}")
-            return None
-
-        try:
-            container = client.containers.get(container_name)
-
-            log_stream = container.logs(
-                stdout=True,
-                stderr=True,
-                stream=True,
-                follow=follow,
-                timestamps=False
-            )
-
-            for log_chunk in log_stream:
-                # Docker returns bytes, decode to string
-                if isinstance(log_chunk, bytes):
-                    log_chunk = log_chunk.decode('utf-8', errors='replace')
-                yield log_chunk
-            return None
-
-        except NotFound:
-            logger.error(f"Container not found: {container_name}")
-            return None
-        except APIError as e:
-            logger.error(f"Docker API error streaming logs from {container_name}: {e}")
-            return None
-
-    except ImportError:
-        logger.error("Docker Python client not installed")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error streaming Docker container logs: {e}")
-        return None
-
-
 def get_job_logs_from_backend(
-    job_id: str, backend: Optional[str] = None,
-    namespace: Optional[str] = None, tail_lines: Optional[int] = None
+    job_id: str, tail_lines: Optional[int] = None
 ) -> Optional[str]:
-    """Get logs from the appropriate backend (Kubernetes or Docker).
+    """Get logs from the appropriate backend (Kubernetes, Docker, SLURM, or Lepton).
 
     This is a unified interface that automatically determines the backend
-    and retrieves logs accordingly. For other backends (like NVCF), returns None
-    so the caller can fallback to the traditional method.
+    and retrieves logs accordingly.
 
     Args:
         job_id (str): The job ID
-        backend (str, optional): Backend type ('local-k8s', 'local-docker', etc.)
-                                If None, reads from BACKEND env var
-        namespace (str, optional): Kubernetes namespace (only used for k8s backend)
         tail_lines (int, optional): Number of lines to tail
 
     Returns:
         str: The log content, or None if logs cannot be retrieved or backend not supported
     """
-    if backend is None:
-        backend = os.getenv("BACKEND", "local-k8s")
-        logger.debug(f"[LOG_BACKEND] Backend not provided, using env var: {backend}")
-    else:
-        logger.debug(f"[LOG_BACKEND] Using provided backend: {backend}")
+    handler_metadata = get_handler_metadata(job_id)
+    workspace_id = handler_metadata.get("workspace", "")
+    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+    handler = ExecutionHandler.create_handler(workspace_metadata=workspace_metadata, backend=BACKEND, job_id=job_id)
+    if not handler:
+        logger.error(f"Unable to determine appropriate handler for backend '{BACKEND}' and job_id '{job_id}'")
+        return None
+    logs = handler.get_job_logs(job_id, tail_lines)
+
+    if not logs:
+        logger.info(
+            f"[LOG_BACKEND] Backend {handler.backend_type} not supported for direct log streaming, "
+            f"will use fallback method"
+        )
+        return None
 
     logger.info(
-        f"[LOG_BACKEND] Attempting to get logs for job_id={job_id} from backend={backend}, "
-        f"namespace={namespace}, tail_lines={tail_lines}"
+        f"[LOG_BACKEND] Successfully retrieved logs for job_id={job_id} from backend={handler.backend_type}"
     )
-
-    if backend == "local-k8s":
-        logger.debug(f"[LOG_BACKEND] Calling get_k8s_pod_logs for job_id={job_id}")
-        logs = get_k8s_pod_logs(job_id, namespace, tail_lines)
-        if logs:
-            logger.info(
-                f"[LOG_BACKEND] Successfully retrieved {len(logs)} bytes from Kubernetes "
-                f"for job_id={job_id}"
-            )
-        else:
-            logger.warning(f"[LOG_BACKEND] Failed to retrieve logs from Kubernetes for job_id={job_id}")
-        return logs
-    if backend == "local-docker":
-        logger.debug(f"[LOG_BACKEND] Calling get_docker_container_logs for job_id={job_id}")
-        logs = get_docker_container_logs(job_id, tail_lines)
-        if logs:
-            logger.info(
-                f"[LOG_BACKEND] Successfully retrieved {len(logs)} bytes from Docker "
-                f"for job_id={job_id}"
-            )
-        else:
-            logger.warning(f"[LOG_BACKEND] Failed to retrieve logs from Docker for job_id={job_id}")
-        return logs
-    logger.info(
-        f"[LOG_BACKEND] Backend {backend} not supported for direct log streaming, "
-        f"will use fallback method"
-    )
-    return None
-
-
-def stream_job_logs_from_backend(
-    job_id: str, backend: Optional[str] = None,
-    namespace: Optional[str] = None, follow: bool = True
-) -> Optional[Generator[str, None, None]]:
-    """Stream logs from the appropriate backend (Kubernetes or Docker).
-
-    This is a unified interface for streaming logs in real-time.
-
-    Args:
-        job_id (str): The job ID
-        backend (str, optional): Backend type ('local-k8s', 'local-docker', etc.)
-                                If None, reads from BACKEND env var
-        namespace (str, optional): Kubernetes namespace (only used for k8s backend)
-        follow (bool): Whether to follow the log stream
-
-    Yields:
-        str: Log lines as they are produced
-    """
-    if backend is None:
-        backend = os.getenv("BACKEND", "local-k8s")
-
-    logger.info(f"Attempting to stream logs for job_id={job_id} from backend={backend}")
-
-    if backend == "local-k8s":
-        stream = stream_k8s_pod_logs(job_id, namespace, follow)
-        if stream is not None:
-            for line in stream:
-                yield line
-        return None
-    if backend == "local-docker":
-        stream = stream_docker_container_logs(job_id, follow)
-        if stream is not None:
-            for line in stream:
-                yield line
-        return None
-    logger.info(f"Backend {backend} not supported for direct log streaming")
-    return None
+    return logs

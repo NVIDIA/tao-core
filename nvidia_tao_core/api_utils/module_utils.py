@@ -23,7 +23,6 @@ entrypoint_paths = {
     "nvidia_tao_deploy": "nvidia_tao_deploy.cv.common.entrypoint.entrypoint_hydra",
     "nvidia_tao_tf2": "nvidia_tao_tf2.common.entrypoint.entrypoint",
     "nvidia_tao_ds": "nvidia_tao_ds.core.entrypoint.entrypoint",
-    "maxine_eye_contact": "maxine_eye_contact.entrypoint.maxine_eye_contact"
 }
 
 entry_points = [

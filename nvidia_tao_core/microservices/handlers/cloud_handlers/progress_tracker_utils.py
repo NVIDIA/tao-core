@@ -81,11 +81,18 @@ def get_folder_stats(folder_path):
 def send_progress_status_callback(message):
     """Send progress status callback using HTTP (job pods don't have MongoDB access).
 
+    For cloud-based jobs: sends HTTP callback to server
+    For SLURM jobs: writes to status.json so microservices can pick it up
     Also notifies inference microservice progress bridge for real-time progress updates.
 
     Args:
         message (str): Progress message to send
     """
+    # Skip callbacks when DEBUG_ENABLED is set (for local debugging)
+    if os.getenv("DEBUG_ENABLED", "").lower() == "true":
+        logger.info("DEBUG_ENABLED=True: Skipping progress status callback. Message: %s", message)
+        return
+
     try:
         # Notify inference microservice progress bridge (if registered)
         try:
@@ -111,6 +118,38 @@ def send_progress_status_callback(message):
 
             # Send via HTTP callback (server will save to MongoDB)
             status_callback(callback_data)
+        else:
+            # For non-cloud-based (SLURM), write to status.json
+            from nvidia_tao_core.loggers.logging import StatusLogger, Status, Verbosity
+
+            job_id = os.getenv('TAO_API_JOB_ID')
+            if not job_id:
+                logger.debug("TAO_API_JOB_ID not set, skipping status.json write")
+                return
+
+            # Use TAO_API_RESULTS_DIR for SLURM compatibility, fallback to /results
+            results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+            results_dir = os.path.join(results_base, job_id)
+            status_file = os.path.join(results_dir, "status.json")
+            logger.info(f"Writing progress status to {status_file}")
+
+            # Check if we're the master process (only master should write)
+            is_master = int(os.environ.get("NODE_RANK", 0)) == 0
+
+            if is_master:
+                # Create status logger and write progress message
+                status_logger = StatusLogger(
+                    filename=status_file,
+                    is_master=True,
+                    verbosity=Verbosity.INFO,
+                    append=True
+                )
+                status_logger.write(
+                    data={},
+                    status_level=Status.RUNNING,
+                    verbosity_level=Verbosity.INFO,
+                    message=message
+                )
 
     except Exception as e:
         # Don't let callback failures break the main operation

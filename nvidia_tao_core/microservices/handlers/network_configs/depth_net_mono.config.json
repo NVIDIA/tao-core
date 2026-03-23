@@ -1,13 +1,14 @@
 {
     "api_params": {
         "dataset_type":"depth_net_mono",
-        "actions": ["train","evaluate","export","inference","gen_trt_engine"],
+        "actions": ["train","quantize","evaluate","export","inference","gen_trt_engine"],
         "formats":["ThreeDVLM","FSD","NvCLIP","IssacStereo","Crestereo","Middlebury","NYUDV2","NYUDV2Relative","BaseRelativeMonoDataset","BaseMetricMonoDataset"],
         "accepted_ds_intents": ["training"],
         "image":"TAO_PYTORCH",
         "spec_backend":"yaml",
         "actions_pipe":{
             "train":"train",
+            "quantize":"train",
             "evaluate":"evaluate",
             "export":"export_with_spec",
             "inference":"inference",
@@ -62,6 +63,33 @@
                     }
             }
         },
+        "quantize": {
+            "dataset.train_dataset.data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "data_file": {
+                        "path": "annotations.txt"
+                    },
+                    "dataset_name": "dataset_format"
+                }
+            },
+            "dataset.val_dataset.data_sources": {
+                "source": "eval_dataset",
+                "multiple_sources": true,
+                "mapping": {
+                    "data_file": {
+                        "path": "annotations.txt"
+                    },
+                    "dataset_name": "dataset_format"
+                }
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz"
+            }
+        },
         "evaluate": {
             "dataset.test_dataset.data_sources": {
                 "source": "eval_dataset",
@@ -99,6 +127,16 @@
                 "path": "{dataset_path}/images.tar.gz"
             }
         ],
+        "quantize": [
+            {
+                "source": "train_datasets",
+                "path": "{dataset_path}/images.tar.gz"
+            },
+            {
+                "source": "eval_dataset",
+                "path": "{dataset_path}/images.tar.gz"
+            }
+        ],
         "evaluate": [
             {
                 "source": "eval_dataset",
@@ -120,6 +158,11 @@
             "train.pretrained_model_path": "ptm_if_no_resume_model",
             "model.mono_backbone.pretrained_path": "{'link': 'https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth', 'destination_path': '/ptm/depth_net/mono_backbone/dinov2_vitl14_pretrain.pth'}",
             "train.resume_training_checkpoint_path": "resume_model"
+        },
+        "quantize":{
+            "results_dir":"output_dir",
+            "dataset.dataset_name": "MonoDataset",
+            "quantize.model_path":"parent_model"
         },
         "evaluate":{
             "results_dir":"output_dir",
@@ -160,5 +203,12 @@
     "metrics": {
         "available_metrics": ["train_loss","val/loss", "val/d1", "val/d2", "val/d3", "val/abs_rel"],
         "monitoring_metric": "val/loss"
+    },
+    "cloud_upload": {
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
+        }
     }
 }

@@ -500,8 +500,8 @@ class ExportExpConfig:
         display_name="ONNX file"
     )
     results_dir: Optional[str] = STR_FIELD(
-        value="/results",
-        default_value="/results",
+        value="",
+        default_value="",
         description="Results directory",
         display_name="Results directory"
     )
@@ -663,8 +663,8 @@ class ExperimentConfig:
     gen_trt_engine: GenTrtEngineExpConfig = DATACLASS_FIELD(GenTrtEngineExpConfig())
     export: ExportExpConfig = DATACLASS_FIELD(ExportExpConfig())
     results_dir: Optional[str] = STR_FIELD(
-        value="/results",
-        default_value="/results",
+        value="",
+        default_value="",
         description="Results directory",
         display_name="Results directory"
     )

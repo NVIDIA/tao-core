@@ -15,32 +15,31 @@
 """Spec handler module for managing specification schemas"""
 import os
 import logging
+import traceback
 
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     check_read_access,
     get_base_experiment_metadata,
     get_handler_job_metadata,
+    get_handler_metadata,
     get_job_specs,
     is_request_automl
 )
 from nvidia_tao_core.microservices.utils.handler_utils import Code
-from nvidia_tao_core.microservices.utils.executor_utils import get_available_local_k8s_gpus
-from nvidia_tao_core.microservices.utils.nvcf_utils import get_available_nvcf_instances
 from nvidia_tao_core.microservices.utils.specs_utils import csv_to_json_schema
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import BACKEND
 from nvidia_tao_core.microservices.utils.core_utils import (
     merge_nested_dicts,
     override_dicts,
     get_microservices_network_and_action
 )
 from nvidia_tao_core.scripts.generate_schema import generate_schema, validate_and_clean_merged_spec
+from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
 
 from ..utils.basic_utils import resolve_metadata
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Identify if workflow is on NGC
-BACKEND = os.getenv("BACKEND", "local-k8s")
 
 
 class SpecHandler:
@@ -200,23 +199,6 @@ class SpecHandler:
             json_schema["automl_default_parameters"] = (
                 metadata.get("automl_settings", {}).get("automl_hyperparameters", "[]")
             )
-        # elif BACKEND == "NVCF":
-        #     json_schema = {}
-        #     deployment_string = os.getenv(f'FUNCTION_{NETWORK_CONTAINER_MAPPING[microservices_network]}')
-        #     if action == "gen_trt_engine":
-        #         deployment_string = os.getenv('FUNCTION_TAO_DEPLOY')
-        #     nvcf_response = nvcf_handler.invoke_function(
-        #         deployment_string=deployment_string,
-        #         network=microservices_network,
-        #         action=microservices_action,
-        #         microservice_action="get_schema"
-        #     )
-        #     if nvcf_response.status_code != 200:
-        #         if nvcf_response.status_code == 202:
-        #             return Code(404, {}, "Schema from NVCF couldn't be obtained in 60 seconds, Retry again")
-        #         return Code(nvcf_response.status_code, {}, str(nvcf_response.json()))
-        #     json_schema = nvcf_response.json().get("response")
-
         return Code(200, json_schema, "Schema retrieved")
 
     @staticmethod
@@ -249,11 +231,14 @@ class SpecHandler:
             if not base_experiment_spec:
                 return Code(404, {}, "Base specs not present.")
 
+        # Map network name through actions_mapping (e.g. visual_changenet_segment -> visual_changenet)
+        mapped_network, mapped_action = get_microservices_network_and_action(base_experiment_network, action)
+
         # Read csv from utils/spec_utils/specs/<network_name>/action.csv
         # Convert to json schema
         json_schema = {}
         try:
-            json_schema = generate_schema(base_experiment_network, action)
+            json_schema = generate_schema(mapped_network, mapped_action)
         except Exception as e:
             logger.error("Exception thrown in get_base_experiment_spec_schema is %s", str(e))
             logger.error("Unable to fetch schema from tao_core")
@@ -322,6 +307,7 @@ class SpecHandler:
         try:
             json_schema = generate_schema(microservices_network, microservices_action)
         except Exception as e:
+            logger.error(traceback.format_exc())
             logger.error("Exception thrown in get_spec_schema_without_handler_id is %s", str(e))
             logger.error("Unable to fetch schema from tao_core")
 
@@ -341,13 +327,13 @@ class SpecHandler:
                     f"{network} - {action}__{dataset_format}.csv"
                 )
                 if not os.path.exists(CSV_PATH):
-                    Code(404, {}, "Default specs do not exist for action")
+                    return Code(404, {}, "Default specs do not exist for action")
 
             json_schema = csv_to_json_schema.convert(CSV_PATH)
         return Code(200, json_schema, "Schema retrieved")
 
     @staticmethod
-    def get_gpu_types(user_id, org_name):
+    def get_gpu_types(user_id, org_name, workspace_id=None):
         """Retrieves available GPU types for the given user and organization.
 
         This method checks the backend for available GPU resources based on the
@@ -363,18 +349,20 @@ class SpecHandler:
                   - 200: A list of available GPUs.
                   - 404: If GPUs cannot be retrieved for the specified backend.
         """
-        if BACKEND == "NVCF":
-            available_nvcf_instances = get_available_nvcf_instances(user_id, org_name)
-            if available_nvcf_instances:
-                return Code(200, available_nvcf_instances, "Retrieved available GPU info")
-            return Code(404, [], f"NVCF GPU's are not available for {org_name}")
-        if BACKEND == "local-k8s":
-            available_gpu_types = get_available_local_k8s_gpus()
-            if available_gpu_types:
-                return Code(200, available_gpu_types, "Retrieved available GPU info")
-            return Code(
-                404, [],
-                "Requested GPU's are not available in the current deployment. "
-                "Check if all nodes has accelerator labels"
+        workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+        try:
+            handler = ExecutionHandler.create_handler(
+                workspace_metadata=workspace_metadata,
+                backend=BACKEND,
             )
+            if handler:
+                available_instances = handler.get_available_instances()
+                if available_instances:
+                    return Code(200, available_instances, "Retrieved available GPU info")
+            else:
+                logger.error(f"Unable to determine appropriate handler for backend '{BACKEND}' and workspace_metadata")
+        except Exception as e:
+            logger.error("Exception thrown in get_gpu_types is %s", str(e))
+            logger.error("Unable to get GPU types for the deployed backend")
+            logger.error(traceback.format_exc())
         return Code(404, [], f"GPU types can't be retrieved for deployed Backend {BACKEND}")

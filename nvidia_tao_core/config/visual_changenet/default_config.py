@@ -37,6 +37,11 @@ from nvidia_tao_core.config.common.common_config import (
     CalibrationConfig
 )
 
+from nvidia_tao_core.config.common.quantization import (
+    ModelQuantizationConfig,
+    QuantCalibrationDataset,
+)
+
 
 @dataclass
 class CNOptimConfig:
@@ -66,6 +71,8 @@ class CNOptimConfig:
     momentum: float = FLOAT_FIELD(
         value=0.9,
         default_value=0.9,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="momentum - AdamW",
         description="The momentum for the AdamW optimizer.",
@@ -74,6 +81,8 @@ class CNOptimConfig:
     weight_decay: float = FLOAT_FIELD(
         value=0.01,
         default_value=0.01,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="weight decay",
         description="The weight decay coefficient.",
@@ -268,6 +277,8 @@ class RandomColor:
     brightness: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
+        valid_min=0.0,
+        valid_max=2.0,
         math_cond="> 0.0",
         description="Random Color Brightness",
         automl_enabled="TRUE"
@@ -275,6 +286,8 @@ class RandomColor:
     contrast: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
+        valid_min=0.0,
+        valid_max=2.0,
         math_cond="> 0.0",
         description="Random Color Contrast",
         automl_enabled="TRUE"
@@ -282,6 +295,8 @@ class RandomColor:
     saturation: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
+        valid_min=0.0,
+        valid_max=2.0,
         math_cond="> 0.0",
         description="Random Color Saturation",
         automl_enabled="TRUE"
@@ -289,6 +304,8 @@ class RandomColor:
     hue: float = FLOAT_FIELD(
         value=0.3,
         default_value=0.3,
+        valid_min=0.0,
+        valid_max=0.5,
         math_cond="> 0.0",
         description="Random Color Hue",
         automl_enabled="TRUE"
@@ -476,6 +493,10 @@ class CNDatasetClassifyConfig:
         valid_max="inf",
         description="Number of golden samples for each input"
     )
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for the quantization calibration dataset.",
+    )
 
 
 @dataclass
@@ -549,6 +570,10 @@ class CNDatasetSegmentConfig:
     predict_split: str = STR_FIELD(value="test", default_value="test", description="Predict split folder name")
     label_suffix: str = STR_FIELD(value=".png", default_value=".png", description="Suffix of images")
     color_map: Optional[Dict[str, List[int]]] = DICT_FIELD(None, description="Class label index to RGB color mapping")
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for the quantization calibration dataset.",
+    )
 
 
 @dataclass
@@ -628,13 +653,13 @@ class CNTrainExpConfig(TrainConfig):
         display_name="precision"
     )
     sync_batchnorm: bool = BOOL_FIELD(
-        value=True,
-        default_value=True,
+        value=False,
+        default_value=False,
         description="Synchronize batch normalization across devices"
     )
     use_distributed_sampler: bool = BOOL_FIELD(
-        value=True,
-        default_value=True,
+        value=False,
+        default_value=False,
         description="Use distributed sampler for multi-GPU training"
     )
 
@@ -754,6 +779,10 @@ class ExperimentConfig(CommonExperimentConfig):
     inference: CNInferenceExpConfig = DATACLASS_FIELD(CNInferenceExpConfig())
     export: ExportConfig = DATACLASS_FIELD(ExportExpConfig())
     gen_trt_engine: CNGenTrtEngineExpConfig = DATACLASS_FIELD(CNGenTrtEngineExpConfig())
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters to run model quantization for a Visual ChangeNet experiment.",
+    )
     task: Optional[str] = STR_FIELD(
         value="segment",
         default_value="segment",

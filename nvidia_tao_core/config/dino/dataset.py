@@ -241,6 +241,15 @@ class DINODatasetConfig:
                     * classmap : The path of the .txt file that contains class names""",
         display_name="infer data sources",
     )
+    quant_calibration_data_sources: Optional[Dict[str, str]] = DICT_FIELD(
+        hashMap=None,
+        default_value={"image_dir": "", "json_file": ""},
+        description="""The data source for quantization calibration:
+                    * image_dir : The directory that contains the quantization calibration images
+                    * json_file(optional) : The path of the JSON file, which uses quantization calibration-\
+                        annotation COCO format""",
+        display_name="quantization calibration data sources",
+    )
     batch_size: int = INT_FIELD(
         value=4,
         default_value=4,

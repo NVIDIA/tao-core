@@ -23,7 +23,8 @@ from nvidia_tao_core.microservices.utils.automl_utils import (
     fix_input_dimension,
     fix_power_of_factor,
     get_valid_options,
-    get_option_weights
+    get_option_weights,
+    get_valid_range
 )
 from nvidia_tao_core.microservices.automl import network_utils
 from nvidia_tao_core.microservices.utils.network_utils import network_constants
@@ -35,6 +36,28 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def is_nan_value(val):
+    """Check if value is NaN, handling different types safely.
+
+    For lists/tuples, checks if ANY element is NaN.
+
+    Args:
+        val: Value to check (can be float, int, str, list, tuple, etc.)
+
+    Returns:
+        bool: True if value is NaN (or contains NaN for lists), False otherwise
+    """
+    if isinstance(val, (list, tuple)):
+        # Check each element in the list/tuple
+        return any(is_nan_value(v) for v in val)
+    if isinstance(val, str):
+        return False
+    try:
+        return math.isnan(val)
+    except (TypeError, ValueError):
+        return False
 
 
 class AutoMLAlgorithmBase:
@@ -193,13 +216,110 @@ class AutoMLAlgorithmBase:
 
         # Apply custom overrides if provided
         if self.custom_ranges and parameter_name in self.custom_ranges:
-            for override_key, override_value in self.custom_ranges[parameter_name].items():
+            custom_range = self.custom_ranges[parameter_name]
+            logger.debug(
+                f"[AUTOML-BASE] Applying custom range for {parameter_name}: {custom_range}"
+            )
+            for override_key, override_value in custom_range.items():
                 if override_value is not None:
                     parameter_config[override_key] = override_value
+                    if override_key == "disable_list":
+                        logger.info(
+                            f"[AUTOML-BASE] Applied disable_list={override_value} to {parameter_name}"
+                        )
 
         # Get potentially overridden values
         math_cond = parameter_config.get("math_cond", None)
         parent_param = parameter_config.get("parent_param", None)
+
+        if data_type == "float":
+            v_min = parameter_config.get("valid_min", "")
+            v_max = parameter_config.get("valid_max", "")
+
+            # If no valid range, generate diverse values around default
+            if v_min == "" or v_max == "":
+                if default_value is not None and default_value != "":
+                    default_val = float(default_value)
+                    # Generate values in diverse range around default
+                    if default_val > 0:
+                        v_min = default_val / 10.0
+                        v_max = default_val * 10.0
+                    elif default_val < 0:
+                        v_min = default_val * 10.0
+                        v_max = default_val / 10.0
+                    else:  # default is 0
+                        v_min = -1.0
+                        v_max = 1.0
+                    random_float = np.random.uniform(v_min, v_max)
+                    logger.info(
+                        f"Generated random float for {parameter_name} (no range): "
+                        f"{random_float} around default {default_val}"
+                    )
+                    return random_float
+                return np.random.uniform(0.0, 1.0)
+
+            if is_nan_value(v_min) or is_nan_value(v_max):
+                # NaN ranges, use default-based range
+                if default_value is not None:
+                    default_val = float(default_value)
+                    if default_val > 0:
+                        return np.random.uniform(default_val / 10.0, default_val * 10.0)
+                    return np.random.uniform(0.0, 1.0)
+                return np.random.uniform(0.0, 1.0)
+
+            # Handle list-based ranges (e.g., per-model-part learning rates)
+            # Generate a base value and let network-specific handler convert to list
+            if isinstance(v_min, list) or isinstance(v_max, list):
+                # Use first element of list for base range
+                if isinstance(v_min, list) and isinstance(v_max, list):
+                    base_min = float(v_min[0]) if v_min else 0.0
+                    base_max = float(v_max[0]) if v_max else 1.0
+                elif isinstance(v_min, list):
+                    base_min = float(v_min[0]) if v_min else 0.0
+                    base_max = float(v_max) if v_max not in (None, '', "") else base_min * 10
+                else:
+                    base_min = float(v_min) if v_min not in (None, '', "") else 0.0
+                    base_max = float(v_max[0]) if v_max else 1.0
+
+                # Generate base value using log-uniform sampling (better for LR)
+                if base_min > 0 and base_max > 0:
+                    log_min = np.log10(base_min)
+                    log_max = np.log10(base_max)
+                    base_value = float(10 ** np.random.uniform(log_min, log_max))
+                else:
+                    base_value = float(np.random.uniform(base_min, base_max))
+
+                # Check for disable_list option - if True, skip network-specific logic
+                # and return pure float value for optimization
+                disable_list = parameter_config.get("disable_list", False)
+                if disable_list:
+                    logger.info(
+                        f"disable_list=True for {parameter_name}: "
+                        f"returning pure float {base_value} (skipping network-specific logic)"
+                    )
+                    return base_value
+
+                # Let network-specific handler convert to list format
+                return network_utils.apply_network_specific_param_logic(
+                    network=self.network,
+                    data_type=data_type,
+                    parameter_name=parameter_name,
+                    value=base_value,
+                    v_max=v_max,
+                    default_train_spec=self.default_train_spec,
+                    parent_params=self.parent_params
+                )
+
+            # Existing handling for defined ranges
+            v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
+            random_float = np.random.uniform(v_min, v_max)
+
+            if not (type(parent_param) is float and math.isnan(parent_param)):
+                if ((isinstance(parent_param, str) and parent_param != "nan" and parent_param == "TRUE") or
+                        (isinstance(parent_param, bool) and parent_param)):
+                    self.parent_params[parameter_name] = random_float
+
+            return random_float
 
         if data_type in ("int", "integer"):
             if parameter_name == "augmentation_config.preprocessing.output_image_height":
@@ -235,9 +355,29 @@ class AutoMLAlgorithmBase:
             v_min = parameter_config.get("valid_min", "")
             v_max = parameter_config.get("valid_max", "")
             if v_min == "" or v_max == "":
-                return int(default_value)
-            if (type(v_min) is not str and math.isnan(v_min)) or (type(v_max) is not str and math.isnan(v_max)):
-                return int(default_value)
+                # Generate diverse values around default
+                if default_value is not None and default_value != "":
+                    default_val = int(default_value)
+                    # Generate values in range [max(1, default/2), default*2] for diversity
+                    if default_val > 0:
+                        v_min = max(1, default_val // 2)
+                        v_max = default_val * 2
+                    else:
+                        v_min = 1
+                        v_max = 100
+                    random_int = np.random.randint(v_min, v_max + 1)
+                    logger.info(
+                        f"Generated random int for {parameter_name} (no range): "
+                        f"{random_int} around default {default_val}"
+                    )
+                    return random_int
+                return np.random.randint(1, 100)
+            if is_nan_value(v_min) or is_nan_value(v_max):
+                # NaN ranges, use default-based range
+                if default_value is not None:
+                    default_val = int(default_value)
+                    return np.random.randint(max(1, default_val // 2), default_val * 2 + 1)
+                return np.random.randint(1, 100)
 
             v_min = int(v_min)
             if (type(v_max) is not str and math.isinf(v_max)) or v_max == "inf":
@@ -516,5 +656,76 @@ class AutoMLAlgorithmBase:
                 value=None,
                 parent_params=self.parent_params
             )
+
+        if data_type == "float":
+            # Handle float parameters
+            v_min = parameter_config.get("valid_min", "")
+            v_max = parameter_config.get("valid_max", "")
+
+            # If no valid range, generate values around default
+            if v_min == "" or v_max == "":
+                if default_value is not None and default_value != "":
+                    default_val = float(default_value)
+                    # Generate values in range [default/10, default*10] for diversity
+                    if default_val > 0:
+                        v_min = default_val / 10.0
+                        v_max = default_val * 10.0
+                    elif default_val < 0:
+                        v_min = default_val * 10.0
+                        v_max = default_val / 10.0
+                    else:  # default is 0
+                        v_min = -1.0
+                        v_max = 1.0
+                    random_float = np.random.uniform(v_min, v_max)
+                    logger.info(
+                        f"Generated random float for {parameter_name} (no range): "
+                        f"{random_float} around default {default_val}"
+                    )
+                    return random_float
+                # No default either, use reasonable range
+                return np.random.uniform(0.0, 1.0)
+
+            # Convert to float
+            if v_min == "-inf":
+                v_min = float('-inf')
+            elif v_min != "":
+                v_min = float(v_min)
+            else:
+                v_min = 0.0
+
+            if v_max == "inf":
+                v_max = float('inf')
+            elif v_max != "":
+                v_max = float(v_max)
+            else:
+                v_max = 1.0
+
+            # Handle infinite bounds by using default or reasonable values
+            if v_min == float('-inf'):
+                v_min = 0.0
+            if v_max == float('inf'):
+                # Use default as max, or a reasonable value
+                if default_value is not None and default_value != "":
+                    v_max = float(default_value) * 10  # 10x default as upper bound
+                else:
+                    v_max = 1.0
+
+            # Generate random float in range
+            random_float = np.random.uniform(v_min, v_max)
+            logger.info(f"Generated random float for {parameter_name}: {random_float} in range [{v_min}, {v_max}]")
+            return random_float
+
+        if data_type == "string":
+            # Handle string parameters with valid_options
+            valid_options = parameter_config.get("valid_options", "")
+            if valid_options and valid_options != "":
+                if isinstance(valid_options, str):
+                    options = [opt.strip() for opt in valid_options.split(',')]
+                else:
+                    options = valid_options
+                if options:
+                    return np.random.choice(options)
+            # No valid options, return default
+            return default_value if default_value is not None else ""
 
         return default_value

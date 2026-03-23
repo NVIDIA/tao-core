@@ -53,8 +53,8 @@ class BEVFusionDataConvertExpConfig:
         description="A path to the root directory of the given dataset."
     )
     results_dir: str = STR_FIELD(
-        value="/data/",
-        default_value="/data",
+        value="",
+        default_value="",
         display_name="results directory",
         description="A directory to save data convert output."
     )

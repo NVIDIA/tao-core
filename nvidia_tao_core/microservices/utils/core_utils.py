@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 NUM_OF_RETRY = 5
 base_exp_uuid = "00000000-0000-0000-0000-000000000000"
-NVCF_SECRET_FILE = "/var/secrets/secrets.json"
 
 
 def sha256_checksum(file_path):
@@ -214,7 +213,9 @@ def get_monitoring_metric(network):
         network (str): Name of the network
 
     Returns:
-        str: The monitoring metric for the network
+        str or list: The monitoring metric(s) for the network.
+            - If config has a single string, returns that string.
+            - If config has a list, returns the list (first available will be used).
         None: If network not found or has no monitoring metric defined
     """
     _dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -229,6 +230,53 @@ def get_monitoring_metric(network):
         logger.warning(f"Error reading config file for network {network}: {e}")
 
     return None
+
+
+def find_first_available_metric(metric_config, available_metrics):
+    """Find the first available metric from a metric configuration.
+
+    Args:
+        metric_config: Either a string (single metric) or list of metrics (priority order)
+        available_metrics: Set or list of metrics that are actually available in the data
+
+    Returns:
+        str: The first metric from metric_config that exists in available_metrics
+        None: If no matching metric found
+    """
+    if metric_config is None:
+        return None
+
+    # Handle single string metric
+    if isinstance(metric_config, str):
+        return metric_config if metric_config in available_metrics else None
+
+    # Handle list of metrics - return first one that exists
+    if isinstance(metric_config, list):
+        for metric in metric_config:
+            if metric in available_metrics:
+                return metric
+        # If none found but list is non-empty, return first as fallback
+        return metric_config[0] if metric_config else None
+
+    return None
+
+
+def normalize_metric_config(metric_config):
+    """Normalize metric config to always return a list for consistent handling.
+
+    Args:
+        metric_config: Either a string or list of metrics
+
+    Returns:
+        list: List of metric names
+    """
+    if metric_config is None:
+        return []
+    if isinstance(metric_config, str):
+        return [metric_config]
+    if isinstance(metric_config, list):
+        return metric_config
+    return []
 
 
 def find_closest_number(x, arr):
@@ -292,34 +340,33 @@ def merge_nested_dicts(dict1, dict2):
     return merged_dict
 
 
-def get_admin_key(legacy_key=False):
-    """Get admin api key from k8s secret or NVCF secret"""
+def _get_key_from_secrets_file():
+    """Try to read NGC API key from the mounted secrets.json file."""
+    secrets_path = os.getenv("VAULT_SECRET_FILE", "/var/secrets/secrets.json")
     try:
-        # TODO: Use a better way to get the secret for various deployments
+        if os.path.isfile(secrets_path):
+            with open(secrets_path, "r", encoding="utf-8") as f:
+                secrets = json.load(f)
+            key = secrets.get("ngc_api_key", "")
+            if key:
+                logger.info("Obtained NGC API key from %s", secrets_path)
+                return key
+    except Exception as e:
+        logger.warning("Failed to read NGC key from %s: %s", secrets_path, e)
+    return ""
+
+
+def get_admin_key(legacy_key=False):
+    """Get admin api key from k8s secret, secrets file, or environment."""
+    try:
         try:
-            # Secret is in file in case of NVCF deployment
-            if os.path.exists(NVCF_SECRET_FILE):
-                with open(NVCF_SECRET_FILE, "r", encoding="utf-8") as secret_file:
-                    secrets = json.load(secret_file)
-                if secrets:
-                    if legacy_key and "ptm_api_key" in secrets:
-                        logger.debug(f"Returning ptm_api_key: {secrets['ptm_api_key']}")
-                        return secrets["ptm_api_key"]
-                    if "ngc_api_key" in secrets:
-                        logger.debug(f"Returning ngc_api_key: {secrets['ngc_api_key']}")
-                        return secrets["ngc_api_key"]
-                logger.error("Failed to obtain ngc_api_key from NVCF secret")
-                return ""
             if os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
-                # DEV_MODE, get api key from env. It's used to avoid creating a secret in local dev env
-                # same env variable is also used in runtests.sh and build.sh
                 key = os.environ.get('NGC_KEY')
                 if key:
                     return key
                 config.load_kube_config()
             else:
                 config.load_incluster_config()
-            # Secret is in k8s in case of NGC deployment
                 secret = client.CoreV1Api().read_namespaced_secret("adminclustersecret", "default")
         except client.exceptions.ApiException as e:
             if e.status == 404:
@@ -327,10 +374,10 @@ def get_admin_key(legacy_key=False):
                 logger.info("Falling back to bcpclustersecret")
                 secret = get_bcp_key()
                 if not secret:
-                    return ""
+                    return _get_key_from_secrets_file()
                 return secret
             logger.error("Failed to obtain secret from k8s: %s", e)
-            return ""
+            return _get_key_from_secrets_file()
 
         encoded_key = base64.b64decode(next(iter(secret.data.values())))
         key = json.loads(encoded_key)["auths"]["nvcr.io"]["password"]
@@ -338,7 +385,7 @@ def get_admin_key(legacy_key=False):
         return key
     except Exception as e:
         logger.error("Failed to obtain api key from k8s: %s", e)
-        return ""
+        return _get_key_from_secrets_file()
 
 
 def get_bcp_key():

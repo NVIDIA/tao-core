@@ -1,0 +1,337 @@
+{
+    "api_params": {
+        "dataset_type":"nvpanoptix3d",
+        "actions": [
+            "train",
+            "evaluate",
+            "export",
+            "inference"
+        ],
+        "formats":["front3d", "matterport"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"TAO_PYTORCH",
+        "spec_backend":"yaml",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+  
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "train": [
+                ".*\\.pth$"
+            ]
+        }
+    },
+  
+    "data_sources": {
+        "train": {
+            "dataset.name": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": "front3d",
+                    "mapping": {
+                        "front3d": "front3d",
+                        "matterport": "matterport",
+                        "*": "front3d"
+                    }
+                }
+            },
+            "dataset.downsample_factor": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": 1,
+                    "mapping": {
+                        "matterport": 2,
+                        "*": 1
+                    }
+                }
+            },
+            "dataset.iso_value": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": 1.0,
+                    "mapping": {
+                        "matterport": 2.0,
+                        "*": 1.0
+                    }
+                }
+            },
+            "dataset.frustum_mask_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "meta/frustum_mask.npz"
+            },
+            "dataset.label_map": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "meta/colormap.json"
+            },
+            "dataset.contiguous_id": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "value": true
+            },
+            "dataset.train.json_path": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "meta/train.json"
+            },
+            "dataset.train.base_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": ""
+            },
+            "dataset.val.json_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "meta/val.json"
+            },
+            "dataset.val.base_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": ""
+            },
+            "dataset.test.json_path": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "meta/test.json"
+            },
+            "dataset.test.base_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": ""
+            }
+        },
+        "evaluate": {
+            "dataset.name": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": "front3d",
+                    "mapping": {
+                        "front3d": "front3d",
+                        "matterport": "matterport",
+                        "*": "front3d"
+                    }
+                }
+            },
+            "dataset.downsample_factor": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": 1,
+                    "mapping": {
+                        "matterport": 2,
+                        "*": 1
+                    }
+                }
+            },
+            "dataset.iso_value": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": 1.0,
+                    "mapping": {
+                        "matterport": 2.0,
+                        "*": 1.0
+                    }
+                }
+            },
+            "dataset.frustum_mask_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "meta/frustum_mask.npz"
+            },
+            "dataset.label_map": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "meta/colormap.json"
+            },
+            "dataset.contiguous_id": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "value": true
+            },
+            "dataset.val.json_path": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "meta/val.json"
+            },
+            "dataset.val.base_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": ""
+            },
+            "dataset.test.json_path": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "meta/test.json"
+            },
+            "dataset.test.base_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": ""
+            }
+        },
+        "inference": {
+            "dataset.name": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": "front3d",
+                    "mapping": {
+                        "front3d": "front3d",
+                        "matterport": "matterport",
+                        "*": "front3d"
+                    }
+                }
+            },
+            "dataset.downsample_factor": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": 1,
+                    "mapping": {
+                        "matterport": 2,
+                        "*": 1
+                    }
+                }
+            },
+            "dataset.iso_value": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "value_from_metadata": {
+                    "key": "format",
+                    "default": 1.0,
+                    "mapping": {
+                        "matterport": 2.0,
+                        "*": 1.0
+                    }
+                }
+            },
+            "dataset.frustum_mask_path": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "meta/frustum_mask.npz"
+            },
+            "dataset.label_map": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "meta/colormap.json"
+            },
+            "dataset.contiguous_id": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "value": true
+            },
+            "inference.images_dir": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            }
+        }
+    },
+  
+    "spec_params":{
+        "train": {
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "train.checkpoint_2d": "parent_model_or_ptm",
+            "train.checkpoint_3d": "ptm"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model",
+            "encryption_key":"key"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model",
+            "encryption_key":"key"
+        },
+        "export":{
+            "results_dir":"output_dir",
+            "export.checkpoint":"parent_model",
+            "export.onnx_file_2d":"create_onnx_file_2d",
+            "export.onnx_file_3d":"create_onnx_file_3d",
+            "encryption_key":"key"
+        }
+    },
+  
+    "automl_spec_params":{
+        "results_dir":"automl_output_dir",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_2d":"automl_assign_ptm",
+        "train.checkpoint_3d":"automl_assign_ptm",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "encryption_key":"key"
+    },
+  
+    "metrics": {
+        "available_metrics": [
+            "train_dpq_-1.0_epoch",
+            "train_dpq_th_-1.0_epoch",
+            "train_dpq_st_-1.0_epoch",
+            "train_dpq_0.5_epoch",
+            "train_dpq_th_0.5_epoch",
+            "train_dpq_st_0.5_epoch",
+            "train_dpq_0.25_epoch",
+            "train_dpq_th_0.25_epoch",
+            "train_dpq_st_0.25_epoch",
+            "train_dpq_0.1_epoch",
+            "train_dpq_th_0.1_epoch",
+            "train_dpq_st_0.1_epoch",
+            "train_dpq_averages_epoch",
+            "train_dpq_th_averages_epoch",
+            "train_dpq_st_averages_epoch",
+            "val_dpq_-1.0_epoch",
+            "val_dpq_th_-1.0_epoch",
+            "val_dpq_st_-1.0_epoch",
+            "val_dpq_0.5_epoch",
+            "val_dpq_th_0.5_epoch",
+            "val_dpq_st_0.5_epoch",
+            "val_dpq_0.25_epoch",
+            "val_dpq_th_0.25_epoch",
+            "val_dpq_st_0.25_epoch",
+            "val_dpq_0.1_epoch",
+            "val_dpq_th_0.1_epoch",
+            "val_dpq_st_0.1_epoch",
+            "val_dpq_averages_epoch",
+            "val_dpq_th_averages_epoch",
+            "val_dpq_st_averages_epoch",
+            "PRQ",
+            "RSQ",
+            "RRQ"
+        ],
+        "monitoring_metric": "kpi",
+        "dynamic_metric_patterns": [
+            "^(train|val|test)_(dpq|dpq_th|dpq_st)_(?:-?\\d+(?:\\.\\d+)?|averages)_(?:epoch|step)$",
+            "^(train|val|test)_loss(_epoch)?$",
+            "^(PRQ|RSQ|RRQ)$",
+            "^(geo|occ|panop)$",
+            "^best_.*$"
+        ]
+    }
+  }
+  

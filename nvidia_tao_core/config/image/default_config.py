@@ -43,4 +43,4 @@ class ExperimentConfig:
     in_place: Optional[bool] = BOOL_FIELD(
         True, default_value=False, description="If correction needs to be done inplace"
     )
-    results_dir: str = STR_FIELD(value="/results", default_value="/results")
+    results_dir: str = STR_FIELD(value="", default_value="")

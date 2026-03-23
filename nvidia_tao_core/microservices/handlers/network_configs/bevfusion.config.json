@@ -186,6 +186,9 @@
 
     "metrics": {
         "available_metrics": ["AP11"],
-        "monitoring_metric": "AP11"
+        "monitoring_metric": "AP11",
+        "dynamic_metric_patterns": [
+            "^TAO3D/.*_(3D|BEV|2D)_AP(11|40)_.*$"
+        ]
     }
 }

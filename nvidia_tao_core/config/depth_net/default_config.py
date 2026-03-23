@@ -30,6 +30,7 @@ from nvidia_tao_core.config.common.common_config import (
     InferenceConfig,
     ExportConfig
 )
+from nvidia_tao_core.config.common.quantization import ModelQuantizationConfig
 from nvidia_tao_core.config.depth_net.dataset import DepthNetDatasetConfig
 from nvidia_tao_core.config.depth_net.model import DepthNetModelConfig
 from nvidia_tao_core.config.depth_net.train import DepthNetTrainExpConfig
@@ -136,6 +137,10 @@ class ExperimentConfig(CommonExperimentConfig):
     gen_trt_engine: DepthNetGenTrtEngineExpConfig = DATACLASS_FIELD(
         DepthNetGenTrtEngineExpConfig(),
         description="Configurable parameters to construct the TensorRT engine builder for a DepthNet experiment.",
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters for model quantization.",
     )
 
     def __post_init__(self):

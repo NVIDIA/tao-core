@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 from nvidia_tao_core.microservices.constants import (
     MISSING_EPOCH_FORMAT_NETWORKS
 )
-from nvidia_tao_core.microservices.utils.nvcf_utils import get_available_nvcf_instances
 from nvidia_tao_core.microservices.handlers.automl_handler import AutoMLHandler
 from nvidia_tao_core.microservices.utils.automl_utils import apply_automl_custom_param_ranges
 from nvidia_tao_core.microservices.utils.log_streaming_utils import get_job_logs_from_backend
@@ -46,6 +45,7 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     is_request_automl,
     update_job_status,
     save_dnn_status,
+    get_dnn_status,
     save_job_specs,
     resolve_metadata,
     resolve_existence
@@ -54,21 +54,19 @@ from nvidia_tao_core.microservices.utils.handler_utils import (
     Code,
     download_log_from_cloud,
     get_files_from_cloud,
-    get_num_gpus_from_spec,
     send_microservice_request
-)
-from nvidia_tao_core.microservices.utils.job_utils.executor import (
-    JobExecutor,
-    StatefulSetExecutor
 )
 from nvidia_tao_core.microservices.utils.job_utils.workflow_driver import create_job_context, on_delete_job, on_new_job
 from nvidia_tao_core.microservices.utils.automl_job_utils import on_delete_automl_job
 from nvidia_tao_core.microservices.utils.core_utils import (
     check_and_convert
 )
+from nvidia_tao_core.microservices.utils.deduplication_utils import find_duplicate_job
 
 if os.getenv("BACKEND"):
     from .mongo_handler import MongoHandler
+else:
+    MongoHandler = None  # type: ignore
 
 from ..utils.basic_utils import (
     get_job,
@@ -78,9 +76,6 @@ from ..utils.basic_utils import (
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Identify if workflow is on NGC
-BACKEND = os.getenv("BACKEND", "local-k8s")
 
 
 class JobHandler:
@@ -97,13 +92,14 @@ class JobHandler:
         name=None,
         description=None,
         num_gpu=-1,
-        platform_id=None,
+        backend_details=None,
         job_id=None,
         from_ui=False,
         retain_checkpoints_for_resume=False,
         early_stop_epoch=None,
         timeout_minutes=60,
-        automl_settings=None
+        automl_settings=None,
+        force_create=False
     ):
         """Runs a job based on the specified parameters.
 
@@ -122,20 +118,50 @@ class JobHandler:
             name (str, optional): The job's name.
             description (str, optional): The job's description.
             num_gpu (int, optional): The number of GPUs to allocate.
-            platform_id (str, optional): The platform ID for job execution.
+            backend_details (dict, optional): Backend-specific execution details
+                (partition, cluster_name, platform_id, etc.).
             job_id (str, optional): The ID of the job to be created (auto-generated if not provided).
             from_ui (bool, optional): Indicates whether the job call is from the UI.
             retain_checkpoints_for_resume (bool, optional): Whether to retain .pth checkpoints for training resume.
             early_stop_epoch (int, optional): The epoch number to early stop training.
             timeout_minutes (int, optional): The job-specific timeout in minutes. Defaults to 60 minutes.
+            force_create (bool, optional): If False, return existing job with same params. Defaults to False.
 
         Returns:
             Code: A response code object containing the status and job ID or error details:
-                  - 200: Job successfully queued.
+                  - 200: Job successfully queued or duplicate found.
                   - 400: If job execution was unsuccessful.
                   - 404: If dataset/experiment/action not found or access is denied.
         """
+        # Extract platform_id from backend_details (stored but not used in this function)
+        if backend_details and backend_details.get('backend_type') == "lepton":
+            _ = backend_details.get('platform_id')
+
         handler_metadata = resolve_metadata(kind, handler_id)
+        if not handler_metadata:
+            return Code(404, [], f"{handler_id} {kind} doesn't exist")
+
+        user_id = handler_metadata.get("user_id")
+
+        # Check for duplicate job unless force_create is True
+        if not force_create:
+            job_params = {
+                "kind": kind,
+                "handler_id": handler_id,
+                "action": action,
+                "specs": specs,
+                "parent_job_id": parent_job_id,
+                "base_experiment_ids": handler_metadata.get("base_experiment_ids", []),
+                "network_arch": handler_metadata.get("network_arch", ""),
+                "automl_settings": automl_settings  # Include AutoML settings for proper deduplication
+            }
+            duplicate_job_id = find_duplicate_job(user_id, org_name, job_params)
+            if duplicate_job_id:
+                logger.info(
+                    "Returning existing job %s for %s %s with matching params",
+                    duplicate_job_id, kind, handler_id
+                )
+                return Code(200, duplicate_job_id, "Job with same parameters already exists")
         if not handler_metadata:
             return Code(404, [], f"{handler_id} {kind} doesn't exist")
 
@@ -175,61 +201,6 @@ class JobHandler:
                 if not parent_handler_id:
                     return Code(404, [], f"Unable to identify {parent_kind} id for parent job {parent_job_id}")
 
-        if BACKEND == "NVCF":
-            available_nvcf_instances = get_available_nvcf_instances(user_id, org_name)
-            if not available_nvcf_instances:
-                platform_id = "052fc221-ffaa-5c15-8d22-b663e7339349"
-            else:
-                if not platform_id:
-                    def get_powers_of_2(start: int):
-                        power = 1
-                        powers = []
-                        while power <= 8:
-                            if power >= start:
-                                powers.append(power)
-                            power *= 2
-                        return powers
-
-                    num_gpu = 1
-                    if specs:
-                        num_gpu = get_num_gpus_from_spec(specs, action, network=network_arch, default=1)
-                    gpu_based_subset = {}
-                    valid_gpu_counts = get_powers_of_2(num_gpu)
-                    for nvcf_instance_id, nvcf_instance_info in available_nvcf_instances.items():
-                        cluster = available_nvcf_instances[nvcf_instance_id].get('cluster', '')
-                        instance_type = available_nvcf_instances[nvcf_instance_id].get('instance_type', '')
-                        if cluster == 'GFN':
-                            instance_type = instance_type.replace("2x", "1x").replace("4x", "2x")
-                        for valid_gpu_count in valid_gpu_counts:
-                            if f"{valid_gpu_count}x" in instance_type:
-                                gpu_based_subset[nvcf_instance_id] = nvcf_instance_info
-
-                    if gpu_based_subset:
-                        sorted_platform_ids = sorted(
-                            gpu_based_subset,
-                            key=lambda x: gpu_based_subset[x]['current_available'],
-                            reverse=True
-                        )
-                    else:
-                        sorted_platform_ids = sorted(
-                            available_nvcf_instances,
-                            key=lambda x: available_nvcf_instances[x]['current_available'],
-                            reverse=True
-                        )
-                    platform_id = sorted_platform_ids[0]
-                if platform_id not in available_nvcf_instances:
-                    return Code(
-                        404, [],
-                        f"Requested NVCF resource {platform_id} not available. "
-                        f"Valid platform_id options are {str(available_nvcf_instances.keys())}"
-                    )
-                if available_nvcf_instances[platform_id]["current_available"] == 0:
-                    return Code(
-                        404, [],
-                        f"Requested NVCF resource {platform_id} maxed out. Choose other platform_id options, "
-                        f"valid options are: {str(available_nvcf_instances.keys())}"
-                    )
-
         try:
             job_id = job_id or str(uuid.uuid4())
             if specs:
@@ -267,9 +238,9 @@ class JobHandler:
                     job_id,
                     handler_metadata,
                     name=name,
-                    platform_id=platform_id,
+                    backend_details=backend_details,
                     retain_checkpoints_for_resume=retain_checkpoints_for_resume,
-                    timeout_minutes=timeout_minutes
+                    timeout_minutes=timeout_minutes,
                 )
                 msg = "AutoML "
             else:
@@ -287,10 +258,10 @@ class JobHandler:
                     name=name,
                     description=description,
                     num_gpu=num_gpu,
-                    platform_id=platform_id,
+                    backend_details=backend_details,
                     retain_checkpoints_for_resume=retain_checkpoints_for_resume,
                     early_stop_epoch=early_stop_epoch,
-                    timeout_minutes=timeout_minutes
+                    timeout_minutes=timeout_minutes,
                 )
                 on_new_job(job_context)
             if specs:
@@ -299,7 +270,24 @@ class JobHandler:
         except Exception as e:
             logger.error("Exception thrown in job_run is %s", str(e))
             logger.error(traceback.format_exc())
-            return Code(500, [], "Exception in job_run fn")
+            try:
+                handler_kind = "experiments" if kind == "experiment" else kind + "s"
+                update_job_status(handler_id, job_id, status="Error", kind=handler_kind)
+                from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
+                    write_job_metadata
+                )
+                err_metadata = get_handler_job_metadata(job_id)
+                if err_metadata:
+                    err_metadata["status"] = "Error"
+                    err_metadata.setdefault("job_details", {})[job_id] = {
+                        "detailed_status": {
+                            "message": f"Job creation failed: {e}"
+                        }
+                    }
+                    write_job_metadata(job_id, err_metadata)
+            except Exception as status_err:
+                logger.error("Failed to update job %s status to Error: %s", job_id, status_err)
+            return Code(500, [], f"Job creation failed: {e}")
 
     @staticmethod
     def job_retry(org_name, handler_id, kind, job_id, from_ui=False):
@@ -330,9 +318,9 @@ class JobHandler:
         specs = job_metadata.get('specs')
         name = job_metadata.get('name', "Job") + " Retry"
         description = job_metadata.get('description')
-        platform_id = job_metadata.get('platform_id')
+        backend_details = job_metadata.get('backend_details')
         job_response = JobHandler.job_run(org_name, handler_id, parent_job_id, action, kind, specs, name, description,
-                                          platform_id=platform_id, from_ui=from_ui)
+                                          backend_details=backend_details, from_ui=from_ui)
         return job_response
 
     @staticmethod
@@ -518,7 +506,7 @@ class JobHandler:
             metric_name = automl_controller_data[0].get("metric")
 
             # Add best experiment id to automl_brain_info
-            best_rec_number, _ = get_automl_best_rec_info(job_id)
+            best_rec_number, _, _ = get_automl_best_rec_info(job_id)
             if best_rec_number and best_rec_number != "-1":
                 # Check if best experiment id is already in the list (added by controller)
                 has_best_exp_id = any(item.get("metric") == "Best experiment id" for item in automl_brain_info)
@@ -634,6 +622,9 @@ class JobHandler:
             logger.debug(f"[CANCEL] Job not found in handler's job list: job_id={job_id}, handler_id={handler_id}")
             return Code(404, [], f"Job to cancel not found in the {kind}.")
 
+        workspace_id = handler_metadata.get("workspace")
+        workspace_metadata = get_handler_metadata(workspace_id, kind="workspaces")
+
         user_id = handler_metadata.get("user_id")
         if not check_write_access(user_id, org_name, handler_id, kind=kind + "s"):
             logger.debug(f"[CANCEL] Write access denied: user_id={user_id}, handler_id={handler_id}")
@@ -689,8 +680,8 @@ class JobHandler:
             update_job_status(handler_id, job_id, status="Canceling", kind=kind + "s")
             logger.debug(f"[CANCEL] Deleting job from workflow queue: job_id={job_id}")
             on_delete_job(job_id)
-            logger.debug(f"[CANCEL] Deleting statefulset: job_id={job_id}, use_ngc={use_ngc}")
-            StatefulSetExecutor().delete_statefulset(job_id, use_ngc=use_ngc)
+            from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+            ExecutionHandler.delete_with_handler(job_id)
             update_job_status(handler_id, job_id, status="Canceled", kind=kind + "s")
             logger.debug(f"[CANCEL] Pending job successfully canceled: job_id={job_id}")
             return Code(200, {"message": f"Pending job {job_id} cancelled"})
@@ -698,34 +689,45 @@ class JobHandler:
         if job_status == "Running":
             logger.debug(f"[CANCEL] Canceling running job: job_id={job_id}")
             try:
-                # Delete K8s job
+                # Delete job (K8s pod or Docker container)
                 update_job_status(handler_id, job_id, status="Canceling", kind=kind + "s")
                 logger.debug(f"[CANCEL] Job status updated to Canceling: job_id={job_id}")
                 logger.debug(f"[CANCEL] Deleting statefulset for running job: job_id={job_id}, use_ngc={use_ngc}")
-                StatefulSetExecutor().delete_statefulset(job_id, use_ngc=use_ngc)
+                from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+                ExecutionHandler.delete_with_handler(job_id)
                 logger.debug(f"[CANCEL] Waiting for K8s job termination: job_id={job_id}")
-                k8s_status = JobExecutor().get_job_status(
-                    org_name,
-                    handler_id,
-                    job_id,
-                    kind + "s",
-                    use_ngc=use_ngc,
-                    automl_exp_job=False
+                k8s_status = ExecutionHandler.get_job_status_with_handler(
+                    job_name=job_id,
+                    workspace_metadata=workspace_metadata,
+                    handler_id=handler_id,
+                    handler_kind=kind + "s",
+                    network="",
+                    action="",
+                    specs=None,
+                    docker_env_vars={},
+                    results_dir="",
+                    automl_exp_job=False,
+                    org_name=org_name
                 )
-                logger.debug(f"[CANCEL] Initial K8s status after delete: job_id={job_id}, k8s_status={k8s_status}")
+                logger.debug(f"[CANCEL] Initial status after delete: job_id={job_id}, status={k8s_status}")
                 while k8s_status in ("Done", "Error", "Running", "Pending"):
                     if k8s_status in ("Done", "Error"):
-                        logger.debug(f"[CANCEL] K8s job terminated: job_id={job_id}, final_status={k8s_status}")
+                        logger.debug(f"[CANCEL] Job terminated: job_id={job_id}, final_status={k8s_status}")
                         break
-                    k8s_status = JobExecutor().get_job_status(
-                        org_name,
-                        handler_id,
-                        job_id,
-                        kind + "s",
-                        use_ngc=use_ngc,
-                        automl_exp_job=False
+                    k8s_status = ExecutionHandler.get_job_status_with_handler(
+                        job_name=job_id,
+                        workspace_metadata=workspace_metadata,
+                        handler_id=handler_id,
+                        handler_kind=kind + "s",
+                        network="",
+                        action="",
+                        specs=None,
+                        docker_env_vars={},
+                        results_dir="",
+                        automl_exp_job=False,
+                        org_name=org_name
                     )
-                    logger.debug(f"[CANCEL] Polling K8s status: job_id={job_id}, k8s_status={k8s_status}")
+                    logger.debug(f"[CANCEL] Polling status: job_id={job_id}, status={k8s_status}")
                     time.sleep(5)
                 update_job_status(handler_id, job_id, status="Canceled", kind=kind + "s")
                 logger.debug(f"[CANCEL] Running job successfully canceled: job_id={job_id}")
@@ -769,6 +771,9 @@ class JobHandler:
         if not check_write_access(user_id, org_name, handler_id, kind=kind + "s"):
             logger.debug(f"[PAUSE] Write access denied: user_id={user_id}, handler_id={handler_id}")
             return Code(404, [], f"{kind} not found")
+
+        workspace_id = handler_metadata.get("workspace")
+        workspace_metadata = get_handler_metadata(workspace_id, kind="workspaces")
 
         job_metadata = get_handler_job_metadata(job_id)
         if not job_metadata:
@@ -829,8 +834,8 @@ class JobHandler:
             update_job_status(handler_id, job_id, status="Pausing", kind=kind + "s")
             logger.debug(f"[PAUSE] Deleting job from workflow queue: job_id={job_id}")
             on_delete_job(job_id)
-            logger.debug(f"[PAUSE] Deleting statefulset: job_id={job_id}, use_ngc={use_ngc}")
-            StatefulSetExecutor().delete_statefulset(job_id, use_ngc=use_ngc)
+            from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+            ExecutionHandler.delete_with_handler(job_id)
             update_job_status(handler_id, job_id, status="Paused", kind=kind + "s")
             logger.debug(f"[PAUSE] Pending job successfully paused: job_id={job_id}")
             return Code(200, {"message": f"Pending job {job_id} paused"})
@@ -881,32 +886,43 @@ class JobHandler:
                     logger.warning(f"[PAUSE] Graceful pause unavailable for job {job_id}, using abrupt pause")
 
                 # Abrupt pause (or fallback if graceful pause failed)
+                from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
                 logger.debug(f"[PAUSE] Performing abrupt pause: job_id={job_id}")
                 logger.debug(f"[PAUSE] Deleting statefulset for running job: job_id={job_id}, use_ngc={use_ngc}")
-                StatefulSetExecutor().delete_statefulset(job_id, use_ngc=use_ngc)
+                ExecutionHandler.delete_with_handler(job_id)
                 logger.debug(f"[PAUSE] Waiting for K8s job termination: job_id={job_id}")
-                k8s_status = JobExecutor().get_job_status(
-                    org_name,
-                    handler_id,
-                    job_id,
-                    kind + "s",
-                    use_ngc=use_ngc,
-                    automl_exp_job=False
+                k8s_status = ExecutionHandler.get_job_status_with_handler(
+                    job_name=job_id,
+                    workspace_metadata=workspace_metadata,
+                    handler_id=handler_id,
+                    handler_kind=kind + "s",
+                    network="",
+                    action="",
+                    specs=None,
+                    docker_env_vars={},
+                    results_dir="",
+                    automl_exp_job=False,
+                    org_name=org_name
                 )
-                logger.debug(f"[PAUSE] Initial K8s status after delete: job_id={job_id}, k8s_status={k8s_status}")
+                logger.debug(f"[PAUSE] Initial status after delete: job_id={job_id}, status={k8s_status}")
                 while k8s_status in ("Done", "Error", "Running", "Pending"):
                     if k8s_status in ("Done", "Error"):
-                        logger.debug(f"[PAUSE] K8s job terminated: job_id={job_id}, final_status={k8s_status}")
+                        logger.debug(f"[PAUSE] Job terminated: job_id={job_id}, final_status={k8s_status}")
                         break
-                    k8s_status = JobExecutor().get_job_status(
-                        org_name,
-                        handler_id,
-                        job_id,
-                        kind + "s",
-                        use_ngc=use_ngc,
-                        automl_exp_job=False
+                    k8s_status = ExecutionHandler.get_job_status_with_handler(
+                        job_name=job_id,
+                        workspace_metadata=workspace_metadata,
+                        handler_id=handler_id,
+                        handler_kind=kind + "s",
+                        network="",
+                        action="",
+                        specs=None,
+                        docker_env_vars={},
+                        results_dir="",
+                        automl_exp_job=False,
+                        org_name=org_name
                     )
-                    logger.debug(f"[PAUSE] Polling K8s status: job_id={job_id}, k8s_status={k8s_status}")
+                    logger.debug(f"[PAUSE] Polling status: job_id={job_id}, status={k8s_status}")
                     time.sleep(5)
                 update_job_status(handler_id, job_id, status="Paused", kind=kind + "s")
                 return Code(200, {"message": f"Running job {job_id} paused"})
@@ -1347,8 +1363,7 @@ class JobHandler:
         )
         # Determine log retrieval strategy based on job status and backend
         is_completed = job_status in ("Done", "Error", "Canceled", "Paused")
-        is_streaming_backend = backend in ("local-k8s", "local-docker")
-        if is_completed and is_streaming_backend:
+        if is_completed:
             # For completed jobs with streaming backends:
             # 1. Try cloud storage first (log monitor uploads complete logs there)
             # 2. Fall back to cached file if cloud download fails
@@ -1371,17 +1386,12 @@ class JobHandler:
                     "[JOB_LOGS] No workspace assigned, cannot download from cloud. "
                     "Will use cached file if available."
                 )
-        elif not is_completed and is_streaming_backend:
+        elif not is_completed:
             # For running jobs with streaming backends:
             # Try to get real-time logs from backend (K8s/Docker), then fall back to cloud
             log_type = "brain job" if is_brain_job else f"job_id={lookup_job_id}"
             logger.info(f"[JOB_LOGS] Job running, attempting real-time logs from {backend} for {log_type}")
-            # Get namespace if K8s
-            namespace = None
-            if backend == "local-k8s":
-                namespace = os.getenv("NAMESPACE")
-                logger.debug(f"[JOB_LOGS] K8s namespace: {namespace}")
-            direct_logs = get_job_logs_from_backend(lookup_job_id, backend=backend, namespace=namespace)
+            direct_logs = get_job_logs_from_backend(lookup_job_id)
             if direct_logs:
                 log_desc = "brain job" if is_brain_job else "job"
                 log_size_kb = len(direct_logs) / 1024
@@ -1414,21 +1424,6 @@ class JobHandler:
                     logger.warning(f"[JOB_LOGS] Cloud download failed: {type(e).__name__}: {e}")
             else:
                 logger.warning("[JOB_LOGS] No workspace assigned, cannot download from cloud")
-        else:
-            # For non-streaming backends (NVCF, etc.), use cloud storage
-            logger.debug(
-                f"[JOB_LOGS] Backend {backend} does not support direct streaming, "
-                f"using cloud storage"
-            )
-            workspace_id = handler_metadata.get("workspace", "")
-            if workspace_id:
-                try:
-                    download_log_from_cloud(handler_metadata, lookup_job_id, log_file_path, automl_index)
-                except Exception as e:
-                    logger.warning(f"[JOB_LOGS] Cloud download failed: {type(e).__name__}: {e}")
-            else:
-                logger.warning("[JOB_LOGS] No workspace assigned, cannot download from cloud")
-
         # File not present - Use detailed message or job status
         if not os.path.exists(log_file_path):
             detailed_result_msg = (
@@ -1452,3 +1447,68 @@ class JobHandler:
                     return Code(200, "Generating new recommendation for AutoML experiment.")
             return Code(404, {}, "Logs for the job are not available yet.")
         return Code(200, get_job_logs_util(log_file_path))
+
+    @staticmethod
+    def get_job_events(org_name, handler_id, job_id, kind, automl_experiment_number="0"):
+        """Retrieves all status events for a specific job.
+
+        Args:
+            org_name (str): The name of the organization.
+            handler_id (str): The UUID corresponding to the experiment or dataset.
+            job_id (str): The UUID of the job for which events are being retrieved.
+            kind (str): The type of handler, either 'experiment' or 'dataset'.
+            automl_experiment_number (str, optional): The experiment number for AutoML jobs.
+
+        Returns:
+            Code: A response object indicating the result of the operation.
+                - 200 with the list of all status events.
+                - 404 if the job or handler is not found, or if events are not found for requested IDs.
+        """
+        handler_metadata = resolve_metadata(kind, handler_id)
+        if not handler_metadata:
+            return Code(404, {"error_desc": f"{kind} not found.", "error_code": 1}, f"{kind} not found.")
+
+        user_id = handler_metadata.get("user_id")
+        if not check_read_access(user_id, org_name, handler_id, kind=kind + "s"):
+            return Code(404, {"error_desc": f"{kind} not found.", "error_code": 1}, f"{kind} not found.")
+
+        job_metadata = get_handler_job_metadata(job_id)
+        if not job_metadata:
+            error_desc = (
+                "Job not found. If you changed config (API URL) or restarted containers, ensure the client "
+                "uses the same API server that created the job and that the server uses the same MongoDB."
+            )
+            return Code(404, {"error_desc": error_desc, "error_code": 1}, "Job not found.")
+
+        # Check if this is an AutoML job
+        automl_enabled = handler_metadata.get("automl_settings", {}).get("automl_enabled", False)
+        is_automl = automl_enabled and job_metadata.get("action", "") == "train"
+
+        # Validate AutoML experiment number if this is an AutoML job
+        if is_automl and automl_experiment_number != "0":
+            # Check if the requested AutoML experiment exists
+            controller_list = get_automl_controller_info(job_id)
+            valid_experiment_ids = [str(rec.get('id')) for rec in controller_list if rec.get('id') != ""]
+
+            # Special case: -1 is for brain job logs
+            if automl_experiment_number != "-1" and automl_experiment_number not in valid_experiment_ids:
+                valid_exp_list = ', '.join(valid_experiment_ids)
+                error_msg = (f"Events not found for the requested AutoML experiment number "
+                             f"'{automl_experiment_number}'. Valid experiment numbers: {valid_exp_list}")
+                logger.warning(f"AutoML experiment {automl_experiment_number} not found for job {job_id}")
+                return Code(404, {"error_desc": error_msg, "error_code": 1}, error_msg)
+
+        # Get all status events
+        status_events = get_dnn_status(job_id, automl=is_automl, experiment_number=automl_experiment_number)
+
+        if status_events is None or len(status_events) == 0:
+            if is_automl and automl_experiment_number != "0":
+                error_msg = (f"Events not found for the requested job ID '{job_id}' and AutoML experiment "
+                             f"number '{automl_experiment_number}'.")
+            else:
+                error_msg = f"Events not found for the requested job ID '{job_id}'."
+            logger.info(f"No events found for job {job_id}, automl_experiment_number={automl_experiment_number}")
+            return Code(404, {"error_desc": error_msg, "error_code": 1}, error_msg)
+
+        logger.info(f"Retrieved {len(status_events)} status events for job {job_id}")
+        return Code(200, status_events, "Job events retrieved successfully")

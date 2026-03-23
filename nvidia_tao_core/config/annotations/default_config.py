@@ -141,6 +141,6 @@ class ExperimentConfig:
     odvg: ODVGConfig = DATACLASS_FIELD(ODVGConfig())
     aicity: AICityConfig = DATACLASS_FIELD(AICityConfig())
     results_dir: Optional[str] = STR_FIELD(
-        value="/results", default_value="/results"
+        value="", default_value=""
     )
     verbose: bool = BOOL_FIELD(value=False)

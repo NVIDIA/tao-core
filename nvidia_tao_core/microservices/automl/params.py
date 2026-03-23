@@ -89,9 +89,53 @@ def generate_hyperparams_to_search(
     handler_root,
     override_automl_disabled_params=False
 ):
-    """Use train.csv spec of the network to choose the parameters of AutoML
+    """This function determines which hyperparameters should be included in the AutoML search space for a training job.
 
-    Returns: a list of dict for AutoML supported networks
+    It works by extracting the hyperparameters from the network's JSON schema (train spec), checking which are
+    currently present in the updated configuration, accounting for removed/deleted or conditionally-excluded parameters,
+    and then marking which parameters (from automl_hyperparameters) should be enabled for AutoML.
+
+    Note: The function handles network-specific logic (e.g., for 'cosmos-rl' excluding absent LoRA blocks)
+    and returns a tuple: (list of parameter dicts, list of parameter names).
+
+    Returns: (list of parameter dicts, list of parameter names) where parameter dicts are returned in a list format.
+
+    Note: Parameter names use dot notation to represent nested paths in the spec structure
+    (e.g., "train.optim.lr", "dataset.batch_size", "model.num_queries").
+
+    Example:
+        (
+            [
+                {
+                    'parameter': 'train.optim.lr',
+                    'value_type': 'float',
+                    'default_value': 0.001,
+                    'valid_min': 0.0001,
+                    'valid_max': 0.01,
+                    'valid_options': [0.0001, 0.001, 0.01],
+                    'option_weights': [1, 1, 1],
+                    'automl_enabled': True,
+                    'math_cond': '',
+                    'parent_param': '',
+                    'depends_on': ''
+                },
+                {
+                    'parameter': 'dataset.batch_size',
+                    'value_type': 'int',
+                    'default_value': 4,
+                    'valid_min': 1,
+                    'valid_max': 32,
+                    'automl_enabled': True,
+                    ...
+                },
+                # ... more param dicts ...
+            ],
+            ['train.optim.lr', 'dataset.batch_size', ...]
+        )
+
+    The returned parameter names are used as flat dictionary keys in recommendation specs,
+    not as nested paths. For example, rec.specs["train.optim.lr"] accesses the value directly,
+    not rec.specs["train"]["optim"]["lr"].
     """
     network_arch, _ = get_microservices_network_and_action(job_context.network, job_context.action)
     logger.info(f"Network arch: {network_arch}")
@@ -166,5 +210,5 @@ def generate_hyperparams_to_search(
             "depends_on"
         ]]
         logger.info(f"Automl params enabled: {automl_params['parameter'].values}")
-        return automl_params.to_dict('records'), automl_params["parameter"].values
+        return automl_params.to_dict('records'), list(automl_params["parameter"].values)
     return [{}], []

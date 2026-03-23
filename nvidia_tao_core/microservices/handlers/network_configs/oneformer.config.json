@@ -3,6 +3,7 @@
         "dataset_type": "segmentation",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -21,6 +22,7 @@
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -70,6 +72,59 @@
             },
             "dataset.test.images": {
                 "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            }
+        },
+        "quantize": {
+            "dataset.train.images": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.train.annotations": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.label_map": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "label_map.json"
+            },
+            "dataset.train.panoptic": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.val.annotations": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "annotations.json"
+            },
+            "dataset.val.panoptic": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images_panoptic.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.test.images": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "images.tar.gz",
+                "transform": "handle_tar_path"
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
                 "multiple_sources": false,
                 "path": "images.tar.gz",
                 "transform": "handle_tar_path"
@@ -193,6 +248,11 @@
             "train.pretrained_model": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "evaluate.checkpoint": "parent_model",
@@ -231,11 +291,19 @@
         "available_metrics": [
             "mIoU"
         ],
-        "monitoring_metric": "mIoU"
+        "monitoring_metric": "mIoU",
+        "dynamic_metric_patterns": [
+            "^IoU_.*$"
+        ]
     },
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

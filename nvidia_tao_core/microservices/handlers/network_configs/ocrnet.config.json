@@ -4,6 +4,7 @@
         "actions": [
             "dataset_convert",
             "train",
+            "quantize",
             "evaluate",
             "export",
             "prune",
@@ -16,13 +17,16 @@
         ],
         "accepted_ds_intents": [
             "training",
-            "evaluation"
+            "evaluation",
+            "testing",
+            "calibration"
         ],
         "image": "TAO_PYTORCH",
         "spec_backend": "yaml",
         "actions_pipe": {
             "dataset_convert": "pyt_odconvert",
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "prune": "prune_with_spec",
             "retrain": "retrain",
@@ -46,6 +50,14 @@
                         },
                         "evaluation": {
                             "path": "test.tar.gz",
+                            "type": "file"
+                        },
+                        "testing": {
+                            "path": "test.tar.gz",
+                            "type": "file"
+                        },
+                        "calibration": {
+                            "path": "train.tar.gz",
                             "type": "file"
                         }
                     }
@@ -92,6 +104,33 @@
                 "source": "eval_dataset",
                 "multiple_sources": false,
                 "path": "character_list"
+            }
+        },
+        "quantize": {
+            "dataset.train_dataset_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/dataset_convert/lmdb",
+                "transform": [
+                    "use_dataset_convert_job",
+                    "wrap_in_list"
+                ]
+            },
+            "dataset.val_dataset_dir": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "results/{dataset_convert_job_id}/dataset_convert/lmdb",
+                "transform": "use_dataset_convert_job"
+            },
+            "dataset.character_list_file": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "path": "character_list"
+            },
+            "dataset.quant_calibration_dataset.images_dir": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "path": "train.tar.gz"
             }
         },
         "evaluate": {
@@ -177,6 +216,11 @@
             "train.pretrained_model_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "evaluate.checkpoint": "parent_model",
@@ -233,6 +277,11 @@
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

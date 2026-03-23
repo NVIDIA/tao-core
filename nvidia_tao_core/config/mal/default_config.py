@@ -37,8 +37,8 @@ from nvidia_tao_core.config.common.common_config import (
 class MALInferenceExpConfig(InferenceConfig):
     """Inference configuration template."""
 
-    ann_path: str = STR_FIELD(value="/data/raw-data/annotations/instances_val2017.json")
-    img_dir: str = STR_FIELD(value="/data/raw-data/val2017/")
+    ann_path: str = STR_FIELD(value="")
+    img_dir: str = STR_FIELD(value="")
     label_dump_path: str = STR_FIELD(value="instances_val2017_mal.json")
     batch_size: int = INT_FIELD(value=3, default_value=3, valid_min=1, valid_max="inf")
     load_mask: bool = BOOL_FIELD(value=False)
@@ -61,18 +61,18 @@ class MALDatasetConfig:
 
     type: str = STR_FIELD(value='coco', default_value="coco", valid_options="coco", display_name="dataset type")
     train_ann_path: str = STR_FIELD(
-        value='/data/raw-data/annotations/instances_train2017.json',
+        value='',
         display_name="Annotation path of the training set"
     )
     train_img_dir: str = STR_FIELD(
-        value='/data/raw-data/train2017/',
+        value='',
         display_name="Image directory of the training set"
     )
     val_ann_path: str = STR_FIELD(
-        value='/data/raw-data/annotations/instances_val2017.json',
+        value='',
         display_name="Annotation path of the validation set"
     )
-    val_img_dir: str = STR_FIELD(value='/data/raw-data/val2017/', display_name="Image directory of the validation set")
+    val_img_dir: str = STR_FIELD(value='', display_name="Image directory of the validation set")
     min_obj_size: float = FLOAT_FIELD(value=2048, default_value=2048, display_name="minimum object size")
     max_obj_size: float = FLOAT_FIELD(value=1e10, default_value="1.00E+10", display_name="maximum object size")
     num_workers_per_gpu: int = INT_FIELD(value=2, default_value=2)

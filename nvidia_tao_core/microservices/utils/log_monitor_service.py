@@ -173,13 +173,10 @@ class LogMonitor:
                 try:
                     # Get logs from backend
                     logger.debug(
-                        f"[LOG_MONITOR] Calling get_job_logs_from_backend for job_id={job_id}, "
-                        f"backend={self.backend}, namespace={namespace}"
+                        f"[LOG_MONITOR] Calling get_job_logs_from_backend for job_id={job_id}"
                     )
                     logs = get_job_logs_from_backend(
-                        job_id,
-                        backend=self.backend,
-                        namespace=namespace
+                        job_id
                     )
 
                     if logs:

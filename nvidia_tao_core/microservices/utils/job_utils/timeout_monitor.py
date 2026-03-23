@@ -26,6 +26,7 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     internal_job_status_update,
     get_health_beat
 )
+from nvidia_tao_core.microservices.enum_constants import Backend
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -97,7 +98,7 @@ def check_pod_liveness(job_id):
 
         port = 8000
 
-        if BACKEND == "local-docker":
+        if BACKEND == Backend.LOCAL_DOCKER:
             # Docker Compose: use container name directly
             # Container name is the same as job_id
             liveness_url = f"http://{job_id}:{port}/api/v1/health/liveness"
@@ -316,6 +317,26 @@ def check_job_timeout(job_info):
             return is_timed_out
 
         # CASE 2: No status updates - check if pod is alive via liveness endpoint
+        # EXCEPT for SLURM and Lepton jobs which are batch jobs with no pods to check
+        cloud_type = job_info.get('cloud_type')
+
+        if cloud_type in ('slurm', 'lepton'):
+            # SLURM/Lepton batch jobs have no pods and no liveness checks
+            # We rely purely on job status and status.json updates
+            logger.info("=" * 80)
+            logger.info(f"{cloud_type.upper()} JOB TIMEOUT CHECK: {job_description}")
+            logger.info(f"  Job ID: {job_id}")
+            logger.info(f"  Cloud type: {cloud_type}")
+            logger.info("  Status: No status updates found yet")
+            logger.info(f"  ℹ {cloud_type.upper()} batch jobs have no pods/liveness checks")
+            logger.info("  ℹ Job might be queued, starting, or not writing status yet")
+            logger.info(f"  ℹ {cloud_type.upper()} job status will detect actual failures")
+            logger.info("  ✓ Skipping timeout - relying on status.json sync")
+            logger.info("=" * 80)
+            # Don't timeout SLURM/Lepton jobs without status updates - they might just be starting
+            # or in queue. The job status check will handle actual failures.
+            return False
+
         logger.info(
             f"No status updates found for {job_description}. "
             "Checking if pod is alive via liveness endpoint..."
@@ -522,9 +543,7 @@ def check_job_timeout(job_info):
 
 def terminate_timed_out_job(job_info):
     """Terminate a timed out job"""
-    from nvidia_tao_core.microservices.utils.job_utils.executor.statefulset_executor import StatefulSetExecutor
-    from nvidia_tao_core.microservices.utils.job_utils.executor.job_executor import JobExecutor
-
+    from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
     job_id = job_info.get('job_id')
     handler_id = job_info.get('handler_id')
     kind = job_info.get('kind', '')
@@ -571,8 +590,7 @@ def terminate_timed_out_job(job_info):
                     update_job_status(handler_id, job_id, status="Error", kind=kind)
 
             # Delete the K8s Job (not StatefulSet)
-            job_executor = JobExecutor()
-            job_executor.delete_job(job_id)
+            ExecutionHandler.delete_job_with_handler(job_id)
 
             logger.info(f"Deletion request sent for timed out AutoML brain job {job_id}")
             return True
@@ -612,8 +630,7 @@ def terminate_timed_out_job(job_info):
 
                     # Try to terminate the StatefulSet for this specific experiment
                     # The StatefulSet name for AutoML experiments typically includes the experiment number
-                    statefulset_executor = StatefulSetExecutor()
-                    success = statefulset_executor.delete_statefulset(job_id, use_ngc=True)
+                    success = ExecutionHandler.delete_with_handler(job_id)
 
                     if success:
                         logger.info(
@@ -644,8 +661,7 @@ def terminate_timed_out_job(job_info):
                 update_job_status(handler_id, job_id, status="Error", kind=kind)
 
         # Delete the StatefulSet (works for both orphaned and regular jobs)
-        statefulset_executor = StatefulSetExecutor()
-        success = statefulset_executor.delete_statefulset(job_id, use_ngc=True)
+        success = ExecutionHandler.delete_with_handler(job_id)
 
         if success:
             if is_orphaned:

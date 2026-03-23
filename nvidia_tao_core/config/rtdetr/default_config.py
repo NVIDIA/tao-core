@@ -220,6 +220,7 @@ class ExperimentConfig(CommonExperimentConfig):
     )
     quantize: ModelQuantizationConfig = DATACLASS_FIELD(
         ModelQuantizationConfig(),
+        default_value={},
         description="Configurable parameters to run model quantization for a RT-DETR experiment.",
     )
 

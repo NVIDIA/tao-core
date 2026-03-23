@@ -173,8 +173,8 @@ class ExperimentConfig:
     )
 
     results_dir: str = STR_FIELD(
-        value="/results",
-        default_value="/results",
+        value="",
+        default_value="",
         description="Result directory",
     )
 

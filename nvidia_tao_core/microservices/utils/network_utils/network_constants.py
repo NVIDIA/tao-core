@@ -75,7 +75,8 @@ image_size_mapper = {
 }
 
 node_mapper = {
-    "cosmos-rl": "policy.parallelism.dp_replicate_size"
+    # cosmos-rl nodes are computed dynamically via _get_cosmos_rl_num_nodes
+    # based on total GPUs (policy + rollout) / gpus_per_node
 }
 
 gpu_mapper = {

@@ -116,6 +116,9 @@ class MaskFormer:
         default_value=256,
         description="Dimension of the hidden units.",
         display_unit="hidden dim",
+        valid_min=64,
+        valid_max=1024,
+        math_cond="/ 8",
         automl_enabled="True",
         popular="yes",
     )
@@ -130,6 +133,7 @@ class MaskFormer:
         default_value=10,
         description="Numer of decoder layers in the transformer",
         valid_min=1,
+        valid_max=50,
         automl_enabled="TRUE",
         display_name="decoder layers",
     )

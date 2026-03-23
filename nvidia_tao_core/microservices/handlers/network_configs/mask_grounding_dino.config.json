@@ -3,6 +3,7 @@
         "dataset_type": "segmentation",
         "actions": [
             "train",
+            "quantize",
             "evaluate",
             "export",
             "inference",
@@ -22,6 +23,7 @@
         "spec_backend": "yaml",
         "actions_pipe": {
             "train": "train",
+            "quantize": "train",
             "evaluate": "evaluate",
             "export": "export_with_spec",
             "inference": "inference",
@@ -56,6 +58,53 @@
                     },
                     "json_file": {
                         "path": "annotations.json"
+                    }
+                }
+            }
+        },
+        "quantize": {
+            "dataset.train_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": true,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "handle_tar_path"
+                    },
+                    "json_file": {
+                        "path": "annotations_odvg.jsonl"
+                    },
+                    "label_map": {
+                        "path": "annotations_odvg_labelmap.json"
+                    }
+                }
+            },
+            "dataset.val_data_sources": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "handle_tar_path"
+                    },
+                    "json_file": {
+                        "path": "annotations.json"
+                    }
+                }
+            },
+            "dataset.quant_calibration_data_sources": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "mapping": {
+                    "image_dir": {
+                        "path": "images.tar.gz",
+                        "transform": "handle_tar_path"
+                    },
+                    "json_file": {
+                        "path": "annotations_odvg.jsonl"
+                    },
+                    "label_map": {
+                        "path": "annotations_odvg_labelmap.json"
                     }
                 }
             }
@@ -133,6 +182,11 @@
             "train.resume_training_checkpoint_path": "resume_model",
             "encryption_key": "key"
         },
+        "quantize": {
+            "results_dir": "output_dir",
+            "quantize.model_path": "parent_model",
+            "encryption_key": "key"
+        },
         "evaluate": {
             "results_dir": "output_dir",
             "evaluate.checkpoint": "parent_model",
@@ -169,13 +223,33 @@
     },
     "metrics": {
         "available_metrics": [
-            "bbox_val_mAP50"
+            "[bbox] val_P",
+            "[bbox] val_R",
+            "[bbox] val_mAP@50",
+            "[bbox] val_mAP@50-95",
+            "[bbox] val_mIoU",
+            "[segm] val_P",
+            "[segm] val_R",
+            "[segm] val_mAP@50",
+            "[segm] val_mAP@50-95",
+            "[segm] val_mIoU",
+            "val_mIoU",
+            "val_overall_IoU"
         ],
-        "monitoring_metric": "bbox_val_mAP50"
+        "monitoring_metric": "[bbox] val_mAP@50",
+        "dynamic_metric_patterns": [
+            "^\\[(bbox|segm)\\] (val|test)_(P|R|mAP@50|mAP@50-95|mIoU)$",
+            "^(val|test)_(dataset|mIoU|overall_IoU|mAP50|mAP|T_acc|N_acc)$"
+        ]
     },
     "cloud_upload": {
         "upload_strategy": {
             "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "quantize": [
+                ".*_named\\.onnx$"
+            ]
         }
     }
 }

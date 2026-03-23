@@ -55,6 +55,7 @@ from .stateless_handler_utils import (
     get_handler_job_metadata,
     get_job_specs,
     get_automl_brain_info,
+    get_automl_best_rec_info,
     get_automl_controller_info,
     get_dnn_status,
     write_job_metadata,
@@ -64,11 +65,10 @@ from .stateless_handler_utils import (
     experiment_update_handler_attributes,
     update_handler_with_jobs_info,
     get_workspace_string_identifier,
-    get_automl_experiment_job_id,
-    BACKEND
+    get_automl_experiment_job_id
 )
 from .ngc_utils import validate_ptm_download
-from .core_utils import create_folder_with_permissions, get_monitoring_metric
+from .core_utils import create_folder_with_permissions, get_monitoring_metric, normalize_metric_config
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -87,10 +87,11 @@ logger = logging.getLogger(__name__)
 class TAOResponse:
     """Helper class for API response"""
 
-    def __init__(self, code, data):
+    def __init__(self, code, data, message=""):
         """Initialize TAOResponse helper class"""
         self.code = code
         self.data = data
+        self.message = message
         self.attachment_key = None
 
 
@@ -100,23 +101,23 @@ def Code(code, data={}, msg="", use_data_as_response=False):
     Args:
         code (int): HTTP status code
         data (dict): Response data
-        msg (str): Error message
+        msg (str): Error message or informational message
         use_data_as_response (bool): If True, use data directly as response (like 200 responses)
                                    If False, format as standard error response
     """
     if code == 200:
-        return TAOResponse(code, data)
+        return TAOResponse(code, data, msg)
 
     if code in [400, 404]:
         if use_data_as_response:
             # Use data directly as response, just like 200 responses
-            return TAOResponse(code, data)
+            return TAOResponse(code, data, msg)
         # Standard error formatting
         error_data = {"error_desc": msg, "error_code": code}
-        return TAOResponse(code, error_data)
+        return TAOResponse(code, error_data, msg)
 
     error_data = {"error_desc": msg, "error_code": code}
-    return TAOResponse(404, error_data)
+    return TAOResponse(404, error_data, msg)
 
 
 class JobContext:
@@ -140,7 +141,7 @@ class JobContext:
         name=None,
         description=None,
         num_gpu=-1,
-        platform_id=None,
+        backend_details=None,
         retain_checkpoints_for_resume=False,
         early_stop_epoch=None,
         timeout_minutes=None
@@ -168,11 +169,14 @@ class JobContext:
         self.name = name
         self.description = description
         self.num_gpu = num_gpu
-        self.platform_id = platform_id
+        self.backend_details = backend_details
+        # Extract platform_id from backend_details for backward compatibility
+        self.platform_id = None
+        if backend_details and backend_details.get('backend_type') == "lepton":
+            self.platform_id = backend_details.get('platform_id')
         self.retain_checkpoints_for_resume = retain_checkpoints_for_resume
         self.early_stop_epoch = early_stop_epoch
         self.timeout_minutes = timeout_minutes
-
         self.write()
 
     def write(self):
@@ -195,7 +199,7 @@ class JobContext:
             "user_id": self.user_id,
             "org_name": self.org_name,
             "parent_id": self.parent_id,
-            "platform_id": self.platform_id,
+            "backend_details": self.backend_details,
             "network_arch": self.network,
             "action": self.action,
             "created_on": self.created_on,
@@ -207,7 +211,8 @@ class JobContext:
             "job_details": self.job_details,
             "retain_checkpoints_for_resume": self.retain_checkpoints_for_resume,
             "early_stop_epoch": self.early_stop_epoch,
-            "timeout_minutes": self.timeout_minutes}
+            "timeout_minutes": self.timeout_minutes,
+        }
         return _schema
 
 
@@ -493,9 +498,58 @@ class StatusParser:
         job_id="",
         rec_job_id="",
         previous_result_metadata=None,
-        automl_brain=False
+        automl_brain=False,
+        workspace_metadata=None,
+        cloud_results_dir=None
     ):
-        """Update results in status DB"""
+        """Update results in status DB
+
+        Args:
+            workspace_metadata: Optional workspace metadata for SLURM sync
+            cloud_results_dir: Optional remote results directory (e.g., Lustre path) for SLURM sync
+        """
+        # For SLURM jobs, sync status.json from Lustre to DB before reading
+        # This ensures StatusParser reads the latest status updates
+        if workspace_metadata and cloud_results_dir:
+            cloud_type = workspace_metadata.get('cloud_type', '')
+            if cloud_type in ["slurm", "lepton"]:
+                from nvidia_tao_core.microservices.handlers.execution_handlers.slurm_handler import (
+                    get_slurm_handler_from_workspace
+                )
+                from nvidia_tao_core.microservices.handlers.execution_handlers.lepton_handler import (
+                    get_lepton_handler_from_workspace
+                )
+                workspace_id = workspace_metadata.get('id')
+                if workspace_id:
+                    slurm_handler = get_slurm_handler_from_workspace(workspace_id) if cloud_type == "slurm" else None
+                    lepton_handler = get_lepton_handler_from_workspace(workspace_id) if cloud_type == "lepton" else None
+                    if slurm_handler or lepton_handler:
+                        try:
+                            # Determine which job_id to use for sync
+                            sync_job_id = rec_job_id if rec_job_id else job_id
+
+                            logger.debug(
+                                "StatusParser: Syncing cloud status for job_id=%s, automl=%s, exp=%s",
+                                sync_job_id, automl, experiment_number
+                            )
+                            if slurm_handler:
+                                slurm_handler.sync_status_to_database(
+                                    job_id=sync_job_id,
+                                    results_dir=cloud_results_dir,
+                                )
+                            if lepton_handler:
+                                lepton_handler.sync_status_to_database(
+                                    job_id=sync_job_id,
+                                    results_dir=cloud_results_dir,
+                                    workspace_metadata=workspace_metadata,
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "StatusParser: Failed to sync status for job %s: %s",
+                                sync_job_id, str(e)
+                            )
+                            # Continue - work with whatever is in DB
+
         # Read all the status lines in status DB till now
         good_statuses = []
         lines_to_process = get_dnn_status(job_id, automl=automl, experiment_number=experiment_number)[self.cur_line:]
@@ -567,6 +621,12 @@ class StatusParser:
         result: value from status_parser.update_results()
         returns: the metric requested in normalized float
         """
+        logger.debug(f"results: {results}")
+        logger.debug(
+            f"metric: {metric}, automl_algorithm: {automl_algorithm}, "
+            f"automl_brain_job_id: {automl_brain_job_id}, "
+            f"brain_epoch_number: {brain_epoch_number}"
+        )
         metric_value = 0.0
         try:
             for result_type in ("graphical", "kpi"):
@@ -575,19 +635,29 @@ class StatusParser:
                         criterion = get_monitoring_metric(self.network)
                     else:
                         criterion = metric
+
+                    # Normalize criterion to list for consistent handling
+                    criterion_list = normalize_metric_config(criterion)
                     reverse_sort = True
-                    logger.info("Metric: %s, Criterion: %s in read_metric", metric, criterion)
-                    if metric == "loss" or criterion in ("loss", "evaluation_cost") or "loss" in criterion:
+                    logger.info("Metric: %s, Criterion(s): %s in read_metric", metric, criterion_list)
+
+                    # Check if criterion contains loss-related metrics
+                    criterion_str = str(criterion_list[0]) if criterion_list else ""
+                    if metric == "loss" or criterion_str in ("loss", "evaluation_cost") or "loss" in criterion_str:
                         reverse_sort = False
 
-                    if log["metric"] == criterion:
+                    # Check if log metric matches any criterion in the list
+                    if log["metric"] in criterion_list:
                         if log["values"]:
+                            logger.debug(f"log['values']: {log['values']}")
                             values_to_search = self.trim_list(
                                 metric_list=log["values"].items(),
                                 automl_algorithm=automl_algorithm,
                                 brain_epoch_number=brain_epoch_number
                             )
-                            if automl_algorithm in ("hyperband", "h"):
+                            logger.debug(f"values_to_search: {values_to_search}")
+                            # Hyperband-like algorithms use bracket/sh_iter structure
+                            if automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes"):
                                 brain_dict = get_automl_brain_info(automl_brain_job_id)
                                 bracket_key = str(brain_dict.get("bracket", 0))
                                 ni_list = brain_dict.get("ni", [str(float('-inf'))])[bracket_key]
@@ -613,10 +683,14 @@ class StatusParser:
             # Something went wrong inside...
             logger.error(traceback.format_exc())
             logger.warning("Requested metric not found, defaulting to 0.0")
-            if (
-                (metric == "kpi" and get_monitoring_metric(self.network) in ("loss", "evaluation_cost ")) or
-                (metric in ("loss", "evaluation_cost "))
-            ):
+            monitoring_metric = get_monitoring_metric(self.network)
+            monitoring_metric_list = normalize_metric_config(monitoring_metric)
+            # Check if any of the monitoring metrics indicate a loss-type metric
+            is_loss_metric = (
+                metric in ("loss", "evaluation_cost") or
+                any(m in ("loss", "evaluation_cost") or "loss" in str(m) for m in monitoring_metric_list)
+            )
+            if is_loss_metric:
                 metric_value = 1e7
             else:
                 metric_value = 1e-7
@@ -693,7 +767,7 @@ def get_dataset_download_command(dataset_metadata):
             f"until wget --timeout=1 --tries=1 --retry-connrefused --no-verbose "
             f"--directory-prefix={temp_dir}/ {cloud_download_url}; do sleep 10; done"
         )
-    elif cloud_type in ("aws", "azure", "seaweedfs"):
+    elif cloud_type in ("aws", "azure", "seaweedfs", "lepton"):
         if cloud_file_path.startswith("/"):
             cloud_file_path = cloud_file_path[1:]
         logger.info("Downloading to %s", os.path.join(temp_dir, cloud_file_path))
@@ -901,6 +975,13 @@ def _check_gpu_conditions(field_name, field_value):
             )
 
 
+def is_remote_backend(backend_details):
+    """Check if the backend is a remote scheduler (SLURM or Lepton) from backend_details dict."""
+    if not backend_details or not isinstance(backend_details, dict):
+        return False
+    return backend_details.get('backend_type') in ('slurm', 'lepton')
+
+
 def get_nested_dict_value(data, key_path):
     """Get value from nested dictionary using dot notation key path.
 
@@ -926,26 +1007,124 @@ def get_nested_dict_value(data, key_path):
     return current
 
 
-def get_num_gpus_from_spec(spec, action, network=None, default=0):
-    """Validate the gpus requested"""
+def _get_cosmos_rl_total_gpus(spec):
+    """Calculate total GPUs needed for cosmos-rl based on training mode.
+
+    For SFT mode: policy_tp_size × policy_dp_shard_size
+    For GRPO/RL mode: policy GPUs + rollout GPUs
+
+    Args:
+        spec: The specification dictionary
+
+    Returns:
+        int: Total number of GPUs required, or None if calculation fails
+    """
+    try:
+        # Get training policy type (sft or grpo/rl)
+        train_policy_type = get_nested_dict_value(spec, "train.train_policy.type")
+        if train_policy_type:
+            train_policy_type = train_policy_type.lower()
+        else:
+            train_policy_type = "sft"  # Default to SFT
+
+        # Get policy parallelism parameters
+        policy_tp_size = get_nested_dict_value(spec, "policy.parallelism.tp_size") or 1
+        policy_dp_shard_size = get_nested_dict_value(spec, "policy.parallelism.dp_shard_size") or 1
+        policy_n_init_replicas = get_nested_dict_value(spec, "policy.parallelism.n_init_replicas") or 1
+
+        # Calculate policy GPUs
+        policy_gpus = policy_tp_size * policy_dp_shard_size * policy_n_init_replicas
+
+        # For GRPO/RL, also add rollout GPUs
+        if train_policy_type in ("grpo", "rl"):
+            rollout_tp_size = get_nested_dict_value(spec, "rollout.parallelism.tp_size") or 1
+            rollout_n_init_replicas = get_nested_dict_value(spec, "rollout.parallelism.n_init_replicas") or 1
+            rollout_gpus = rollout_tp_size * rollout_n_init_replicas
+
+            total_gpus = policy_gpus + rollout_gpus
+            logger.debug(
+                f"[COSMOS-RL] GRPO mode: policy_gpus={policy_gpus} "
+                f"(tp={policy_tp_size} × dp_shard={policy_dp_shard_size} × replicas={policy_n_init_replicas}), "
+                f"rollout_gpus={rollout_gpus} (tp={rollout_tp_size} × replicas={rollout_n_init_replicas}), "
+                f"total={total_gpus}"
+            )
+        else:
+            total_gpus = policy_gpus
+            logger.debug(
+                f"[COSMOS-RL] SFT mode: policy_gpus={policy_gpus} "
+                f"(tp={policy_tp_size} × dp_shard={policy_dp_shard_size} × replicas={policy_n_init_replicas})"
+            )
+
+        return total_gpus
+    except Exception as e:
+        logger.warning(f"[COSMOS-RL] Failed to calculate total GPUs: {e}")
+        return None
+
+
+def _get_cosmos_rl_num_nodes(spec, gpus_per_node=8):
+    """Calculate the number of SLURM nodes needed for cosmos-rl.
+
+    Computes total GPUs from the parallelism config and divides by
+    gpus_per_node to get the required number of nodes.
+
+    Args:
+        spec: The specification dictionary
+        gpus_per_node: Number of GPUs per node (default: 8)
+
+    Returns:
+        int: Number of nodes required, or None if calculation fails
+    """
+    total_gpus = _get_cosmos_rl_total_gpus(spec)
+    if total_gpus is None or total_gpus <= 0:
+        return None
+    num_nodes = math.ceil(total_gpus / gpus_per_node)
+    logger.debug(
+        f"[COSMOS-RL] num_nodes={num_nodes} "
+        f"(total_gpus={total_gpus} / gpus_per_node={gpus_per_node})"
+    )
+    return num_nodes
+
+
+def get_num_gpus_from_spec(spec, action, network=None, default=0, skip_gpu_conditions_check=False):
+    """Validate the gpus requested.
+
+    Args:
+        skip_gpu_conditions_check: If True, skip per-node GPU validation.
+            Set this for SLURM backends where total GPUs may exceed per-node
+            count because SLURM handles multi-node GPU scheduling itself.
+    """
     if not isinstance(spec, dict):
         return default
 
+    if action == "retrain":
+        action = "train"
+
     gpu_set_values = []
+
+    # Special handling for cosmos-rl to calculate total GPUs correctly.
+    # Only use training-specific calculation for train/retrain actions;
+    # evaluate/inference use the top-level num_gpus from specs.
+    if network == "cosmos-rl" and action not in ("evaluate", "inference"):
+        cosmos_rl_gpus = _get_cosmos_rl_total_gpus(spec)
+        if cosmos_rl_gpus is not None and cosmos_rl_gpus > 0:
+            if not skip_gpu_conditions_check:
+                _check_gpu_conditions("num_gpus", cosmos_rl_gpus)
+            gpu_set_values.append(cosmos_rl_gpus)
+            return cosmos_rl_gpus
 
     # First check for network-specific GPU parameter using gpu_mapper
     if network and network in gpu_mapper:
         gpu_param_path = gpu_mapper[network]
-        if gpu_param_path:  # Only check if there's a non-empty path defined
+        if gpu_param_path:
             network_gpu_value = get_nested_dict_value(spec, gpu_param_path)
             if network_gpu_value is not None and network_gpu_value != 0:
                 if isinstance(network_gpu_value, (int, float)):
-                    # Check GPU conditions for network-specific parameter
-                    _check_gpu_conditions("num_gpus", network_gpu_value)
+                    if not skip_gpu_conditions_check:
+                        _check_gpu_conditions("num_gpus", network_gpu_value)
                     gpu_set_values.append(int(network_gpu_value))
                 elif isinstance(network_gpu_value, list):
-                    # Check GPU conditions for network-specific parameter
-                    _check_gpu_conditions("gpu_ids", network_gpu_value)
+                    if not skip_gpu_conditions_check:
+                        _check_gpu_conditions("gpu_ids", network_gpu_value)
                     gpu_set_values.append(len(set(network_gpu_value)))
 
     # Fall back to original logic for standard GPU parameters
@@ -955,12 +1134,12 @@ def get_num_gpus_from_spec(spec, action, network=None, default=0):
         if gpu_param_name in spec.keys():
             field_name = gpu_param_name
             field_value = spec[gpu_param_name]
-            if field_value != 0:
+            if field_value != 0 and not skip_gpu_conditions_check:
                 _check_gpu_conditions(field_name, field_value)
         if action in spec and gpu_param_name in spec[action]:
             field_name = gpu_param_name
             field_value = spec[action][gpu_param_name]
-            if field_value != 0:
+            if field_value != 0 and not skip_gpu_conditions_check:
                 _check_gpu_conditions(field_name, field_value)
         if action in spec and "system" in spec[action]:
             gpu_set_values.append(int(spec[action]["system"].get(gpu_param_name, 0)))
@@ -989,6 +1168,10 @@ def get_num_nodes_from_spec(spec, action, network=None, default=1):
     """
     if not isinstance(spec, dict):
         return default
+
+    if action == "retrain":
+        action = "train"
+
     node_set_values = []
 
     # First check for network-specific node parameter using node_mapper
@@ -1048,13 +1231,10 @@ def validate_num_gpu(num_gpu=None, action: str = ""):
         return 0, f"Requested number of GPUs ({num_gpu}) is invalid negative number."
 
     # Get maximum available number of GPUs
-    if BACKEND == "NVCF":
-        max_num_gpu = 8
-    else:
-        num_gpu_per_node = os.getenv("NUM_GPU_PER_NODE")
-        if num_gpu_per_node is None:
-            return 0, "NUM_GPU_PER_NODE is not set in the environment. Assuming no GPU is available!"
-        max_num_gpu = int(num_gpu_per_node)
+    num_gpu_per_node = os.getenv("NUM_GPU_PER_NODE")
+    if num_gpu_per_node is None:
+        return 0, "NUM_GPU_PER_NODE is not set in the environment. Assuming no GPU is available!"
+    max_num_gpu = int(num_gpu_per_node)
 
     # Use all maximum number of GPUs if num_gpu is -1
     if num_gpu == -1:
@@ -1124,20 +1304,43 @@ def add_workspace_to_cloud_metadata(workspace_metadata, cloud_metadata):
     cloud_type = workspace_metadata.get('cloud_type', '')
 
     # AWS, AZURE
-    bucket_name = workspace_metadata.get('cloud_specific_details', {}).get('cloud_bucket_name', '')
-    access_key = workspace_metadata.get('cloud_specific_details', {}).get('access_key', '')
-    secret_key = workspace_metadata.get('cloud_specific_details', {}).get('secret_key', '')
-    cloud_region = workspace_metadata.get('cloud_specific_details', {}).get('cloud_region', '')
-    endpoint_url = workspace_metadata.get('cloud_specific_details', {}).get('endpoint_url', '')
+    cloud_specific_details = workspace_metadata.get('cloud_specific_details', {})
+    bucket_name = cloud_specific_details.get('cloud_bucket_name', '')
+    access_key = cloud_specific_details.get('access_key', '')
+    account_name = cloud_specific_details.get('account_name', '')
+    secret_key = cloud_specific_details.get('secret_key', '')
+    if not secret_key and account_name and access_key:
+        secret_key = access_key
+    cloud_region = cloud_specific_details.get('cloud_region', '')
+    endpoint_url = cloud_specific_details.get('endpoint_url', '')
     cloud_type = workspace_metadata.get("cloud_type")
+    lepton_workspace_id = cloud_specific_details.get('lepton_workspace_id')
+    lepton_auth_token = cloud_specific_details.get('lepton_auth_token')
+    slurm_user = cloud_specific_details.get('slurm_user')
+    slurm_hostname = cloud_specific_details.get('slurm_hostname')
+    base_results_dir = cloud_specific_details.get('base_results_dir')
+    if lepton_workspace_id and lepton_auth_token:
+        cloud_metadata["lepton_workspace_id"] = lepton_workspace_id
+        cloud_metadata["lepton_auth_token"] = lepton_auth_token
+    if slurm_user and slurm_hostname:
+        cloud_metadata["slurm_user"] = slurm_user
+        # slurm_hostname is a list of strings for multi-host failover
+        cloud_metadata["slurm_hostname"] = slurm_hostname
+        if base_results_dir:
+            cloud_metadata["base_results_dir"] = base_results_dir
+        else:
+            cloud_metadata["base_results_dir"] = f"/lustre/fsw/portfolios/edgeai/users/{slurm_user}"
+
     if cloud_type not in cloud_metadata:
         cloud_metadata[cloud_type] = {}
     cloud_metadata[cloud_type][bucket_name] = {
         "cloud_region": cloud_region,
         "access_key": access_key,
+        "account_name": account_name,
         "secret_key": secret_key,
         "endpoint_url": endpoint_url,
     }
+    logger.info(f"Generated cloud metadata: {cloud_metadata}")
 
 
 def get_cloud_metadata(workspace_ids, cloud_metadata):
@@ -1168,13 +1371,74 @@ def get_statefulset_service_name(job_id):
 
 
 def send_microservice_request(
+        base_url,
+        api_endpoint,
+        network,
+        action,
+        cloud_metadata={},
+        specs={},
+        job_id="",
+        docker_env_vars={},
+        cloud_based=True,
+        statefulset_replicas=1
+):
+    """Send a request to an endpoint"""
+    if not docker_env_vars.get("TAO_API_SERVER"):
+        docker_env_vars["TAO_API_SERVER"] = "https://nvidia.com"
+    if not docker_env_vars.get("TAO_LOGGING_SERVER_URL"):
+        docker_env_vars["TAO_LOGGING_SERVER_URL"] = "https://nvidia.com"
+
+    if action == "retrain":
+        action = "train"
+
+    if cloud_based:
+        docker_env_vars["CLOUD_BASED"] = "True"
+    else:
+        docker_env_vars["CLOUD_BASED"] = "False"  # Disable status callback
+
+    request_metadata = {
+        "neural_network_name": network,
+        "action_name": action,
+        "specs": specs,
+        "cloud_metadata": cloud_metadata,
+        "docker_env_vars": docker_env_vars,
+    }
+
+    if job_id:
+        request_metadata["job_id"] = job_id
+        request_metadata["docker_env_vars"]["JOB_ID"] = job_id
+
+    endpoint = f"{base_url}/api/v1/internal/container_job"
+
+    if api_endpoint == "get_job_status":
+        endpoint = f"{base_url}/api/v1/internal/container_job:status"
+        request_metadata = {"results_dir": specs.get("results_dir", "")}
+    elif api_endpoint == "post_action" and statefulset_replicas > 1:
+        request_metadata["statefulset_replicas"] = statefulset_replicas
+    # Send request
+    if os.getenv("DEBUG_MODE", "false").lower() == "true":
+        logger.info(f"Sending request to {endpoint} with request_metadata {request_metadata}")
+    else:
+        logger.info(f"Sending request to {endpoint}")
+    try:
+        if api_endpoint == "get_job_status":
+            response = requests.get(endpoint, params=request_metadata, timeout=120)
+        else:
+            data = json.dumps(request_metadata)
+            response = requests.post(endpoint, data=data, timeout=120)
+    except Exception as e:
+        logger.error("Exception caught during sending a microservice request %s", e)
+        raise e
+    return response
+
+
+def send_statefulset_request(
     api_endpoint,
     network,
     action,
     cloud_metadata={},
     specs={},
     job_id="",
-    nvcf_helm="",
     docker_env_vars={},
     statefulset_replica_index=0,
     statefulset_replicas=1,
@@ -1188,37 +1452,12 @@ def send_microservice_request(
         cloud_metadata (dict, optional): Cloud metadata. Defaults to {}.
         specs (dict, optional): Job specifications. Defaults to {}.
         job_id (str, optional): Job ID. Defaults to "".
-        nvcf_helm (str, optional): NVCF helm configuration. Defaults to "".
         docker_env_vars (dict, optional): Docker environment variables. Defaults to {}.
         statefulset_replicas (int, optional): StatefulSet replicas. Defaults to 1.
         statefulset_replica_index (int, optional): StatefulSet replica index. Defaults to 0.
     Returns:
         requests.Response: The response from the microservice pod
     """
-    # Set default URLs if not provided
-    if not docker_env_vars.get("TAO_API_SERVER"):
-        docker_env_vars["TAO_API_SERVER"] = "https://nvidia.com"
-    if not docker_env_vars.get("TAO_LOGGING_SERVER_URL"):
-        docker_env_vars["TAO_LOGGING_SERVER_URL"] = "https://nvidia.com"
-
-    # Normalize action name
-    if action == "retrain":
-        action = "train"
-
-    docker_env_vars["CLOUD_BASED"] = "True"
-    # Prepare request metadata
-    request_metadata = {
-        "neural_network_name": network,
-        "action_name": action,
-        "specs": specs,
-        "cloud_metadata": cloud_metadata,
-        "docker_env_vars": docker_env_vars,
-    }
-
-    if job_id:
-        request_metadata["job_id"] = job_id
-        request_metadata["docker_env_vars"]["JOB_ID"] = job_id
-
     # Construct base URL and endpoint using StatefulSet FQDN
     statefulset_name = get_statefulset_name(job_id)
     statefulset_service_name = get_statefulset_service_name(job_id)
@@ -1228,29 +1467,19 @@ def send_microservice_request(
         f"{statefulset_service_name}.{statefulset_namespace}."
         "svc.cluster.local:8000"
     )
-    endpoint = f"{base_url}/api/v1/internal/container_job"
-
-    # Modify endpoint and request_metadata for get_job_status
-    if api_endpoint == "get_job_status":
-        endpoint = f"{base_url}/api/v1/internal/container_job:status"
-        request_metadata = {"results_dir": specs.get("results_dir", "")}
-    elif api_endpoint == "pause_job":
-        endpoint = f"{base_url}/api/v1/internal/container_job:pause"
-        request_metadata = {"job_id": job_id}
-    elif api_endpoint == "post_action" and statefulset_replica_index == 0 and statefulset_replicas > 1:
-        request_metadata["statefulset_replicas"] = statefulset_replicas
-    # Send request
-    logger.debug("Sending request to %s", endpoint)
-    logger.debug("request_metadata = %s", request_metadata)
+    if statefulset_replica_index != 0:
+        statefulset_replicas = 0
     try:
-        if api_endpoint == "get_job_status":
-            response = requests.get(endpoint, params=request_metadata, timeout=120)
-        elif api_endpoint == "pause_job":
-            data = json.dumps(request_metadata)
-            response = requests.post(endpoint, data=data, timeout=120, headers={'Content-Type': 'application/json'})
-        else:
-            data = json.dumps(request_metadata)
-            response = requests.post(endpoint, data=data, timeout=120)
+        response = send_microservice_request(
+            base_url,
+            api_endpoint,
+            network,
+            action,
+            cloud_metadata,
+            specs,
+            job_id,
+            docker_env_vars,
+            statefulset_replicas)
     except Exception as e:
         logger.error("Exception caught during sending a microservice request %s", e)
         raise e
@@ -1291,6 +1520,8 @@ def latest_model(files, delimiters="_", epoch_number="000", extensions=[".tlt", 
     for file in files:
         _, file_extension = os.path.splitext(file)
         if file_extension not in extensions:
+            continue
+        if "_latest" in os.path.basename(file):
             continue
         model_name = file
         for extension in extensions:
@@ -1400,7 +1631,11 @@ def format_checkpoints_path(checkpoints):
     """Add formatting to the checkpoint name"""
     checkpoint_name = None
     if checkpoints:
-        checkpoint_name = f"/{checkpoints[0]}"
+        # Don't add leading slash if path already starts with one (e.g., absolute paths from SLURM)
+        if checkpoints[0].startswith('/'):
+            checkpoint_name = checkpoints[0]
+        else:
+            checkpoint_name = f"/{checkpoints[0]}"
     return checkpoint_name
 
 
@@ -1459,7 +1694,14 @@ def get_file_list_from_cloud_storage(workspace_metadata, res_root):
         if hasattr(cs_instance._fs, 'invalidate_cache'):
             cs_instance._fs.invalidate_cache()
 
-    folder_path = res_root[1:] if res_root.startswith('/') else res_root
+    # For SLURM, paths are already absolute Lustre paths - keep them as-is
+    # For other cloud types (AWS, Azure), strip leading '/' to convert to bucket keys
+    cloud_type = workspace_metadata.get('cloud_type', '')
+    if cloud_type == 'slurm':
+        folder_path = res_root  # Keep absolute path for SLURM
+    else:
+        folder_path = res_root[1:] if res_root.startswith('/') else res_root
+
     files, _ = cs_instance.list_files_in_folder(folder_path)
 
     return files
@@ -1594,10 +1836,40 @@ def get_files_from_cloud(handler_metadata, job_id, automl=False, automl_experime
         lookup_job_id = get_automl_experiment_job_id(job_id, automl_experiment_id)
         if not lookup_job_id:
             lookup_job_id = job_id
+    else:
+        # Parent may be an AutoML brain; best model may live in brain or in best experiment folder
+        best_rec_number, _, best_model_results_job_id = get_automl_best_rec_info(job_id)
+        if best_rec_number != "-1":
+            lookup_job_id = best_model_results_job_id
+            action = get_handler_job_metadata(lookup_job_id).get("action") or action
     logger.info("lookup_job_id: %s", lookup_job_id)
-    res_root = os.path.join("/results", str(lookup_job_id))
+
+    # Build results path - for SLURM, use full Lustre path
     workspace_id = handler_metadata.get("workspace")
     workspace_metadata = resolve_metadata("workspace", workspace_id)
+    cloud_type = workspace_metadata.get('cloud_type', '') if workspace_metadata else ''
+
+    if cloud_type == 'slurm':
+        # For SLURM, construct full Lustre path
+        base_results_dir = workspace_metadata.get('cloud_specific_details', {}).get('base_results_dir', '')
+        if not base_results_dir:
+            # Infer base_results_dir from slurm_user if not set in workspace
+            slurm_user = workspace_metadata.get('cloud_specific_details', {}).get('slurm_user', '')
+            if slurm_user:
+                base_results_dir = f"/lustre/fsw/portfolios/edgeai/users/{slurm_user}"
+
+        if base_results_dir:
+            # Append /results to base_results_dir to get full results path
+            res_root = os.path.join(base_results_dir, 'results', str(lookup_job_id))
+        else:
+            # Fallback to TAO_API_RESULTS_DIR
+            results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+            res_root = os.path.join(results_base, str(lookup_job_id))
+    else:
+        # Use TAO_API_RESULTS_DIR for local/cloud, fallback to /results
+        results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+        res_root = os.path.join(results_base, str(lookup_job_id))
+
     files = get_file_list_from_cloud_storage(workspace_metadata, res_root)
     return files, action, res_root, workspace_id
 
@@ -1610,6 +1882,7 @@ def resolve_checkpoint_root_and_search(handler_metadata, job_id, folder=False, r
     files, action, res_root, workspace_id = get_files_from_cloud(
         handler_metadata, job_id, automl=automl, automl_experiment_id=automl_experiment_id
     )
+    logger.info("files for job %s: %s", job_id, files)
     network = handler_metadata.get("network_arch", "")
 
     if action == "retrain":
@@ -1642,9 +1915,56 @@ def resolve_checkpoint_root_and_search(handler_metadata, job_id, folder=False, r
 
     if result_file:
         workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+        workspace_metadata = resolve_metadata("workspace", workspace_id)
+        cloud_type = workspace_metadata.get('cloud_type', '') if workspace_metadata else ''
+
         if folder:
             result_file = f"{os.path.dirname(result_file)}"
-        if workspace_identifier not in result_file:
+
+            # Check if both merged and safetensors folders exist, prefer merged
+            parent_dir = os.path.dirname(result_file)
+            logger.info("parent_dir: %s", parent_dir)
+            checkpoint_folder_name = os.path.basename(result_file)
+            logger.info("checkpoint_folder_name: %s", checkpoint_folder_name)
+
+            # If current folder is safetensors, check if merged folder exists
+            if checkpoint_folder_name == 'safetensors':
+                merged_folder = os.path.join(parent_dir, 'merged')
+                logger.info("merged_folder: %s", merged_folder)
+
+                # Check if merged folder exists by listing files
+                try:
+                    files_in_parent = get_file_list_from_cloud_storage(workspace_metadata, parent_dir)
+                    logger.info("files_in_parent: %s", files_in_parent)
+                    # Normalize paths for comparison - check if any file is under merged/
+                    merged_prefix = f"{parent_dir}/merged/"
+                    logger.info("merged_prefix: %s", merged_prefix)
+                    if not merged_prefix.startswith('/') and cloud_type != 'slurm':
+                        # For cloud storage, paths might not have leading slash
+                        merged_prefix = merged_prefix.lstrip('/')
+                    elif merged_prefix.startswith('//'):
+                        merged_prefix = merged_prefix[1:]
+
+                    merged_exists = any(
+                        f.startswith(merged_prefix) or f.startswith(merged_prefix.lstrip('/'))
+                        for f in files_in_parent
+                    )
+                    logger.info("merged_exists: %s", merged_exists)
+                    if merged_exists:
+                        logger.info(
+                            "Both merged and safetensors folders exist. Using merged folder: %s",
+                            merged_folder
+                        )
+                        result_file = merged_folder
+                except Exception as e:
+                    logger.warning(
+                        "Could not check for merged folder existence: %s. Using safetensors folder.",
+                        str(e)
+                    )
+
+        # For SLURM, if result_file already has absolute path, don't add workspace_identifier
+        # (it would cause path duplication since result_file already has full Lustre path)
+        if not (cloud_type == 'slurm' and result_file.startswith('/')) and workspace_identifier not in result_file:
             result_file = f"{workspace_identifier}{result_file}"
 
     return result_file

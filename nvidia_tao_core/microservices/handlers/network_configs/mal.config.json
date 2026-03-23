@@ -85,9 +85,14 @@
     },
     "metrics": {
         "available_metrics": [
-            "mIoU"
+            "mIoU",
+            "val_cluster_score"
         ],
-        "monitoring_metric": "mIoU"
+        "monitoring_metric": "mIoU",
+        "dynamic_metric_patterns": [
+            "^mIoU_(small|medium|large)$",
+            "^(AP|AP50|AP75|APs|APm|APl|ARmax1|ARmax10|ARmax100|ARs|ARm|ARl)_(bbox|segm)$"
+        ]
     },
     "cloud_upload": {
         "upload_strategy": {

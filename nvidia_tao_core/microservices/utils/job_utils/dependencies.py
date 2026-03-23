@@ -25,7 +25,7 @@
 import os
 import logging
 
-from nvidia_tao_core.microservices.utils.handler_utils import get_num_gpus_from_spec
+from nvidia_tao_core.microservices.utils.handler_utils import get_num_gpus_from_spec, is_remote_backend
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     get_handler_log_root,
     update_job_status,
@@ -36,7 +36,6 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     get_automl_controller_info
 )
 from nvidia_tao_core.microservices.utils.executor_utils import dependency_check
-
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
 tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
@@ -115,6 +114,17 @@ def dependency_check_dataset(job_context, dependency):
     handler_metadata = get_handler_metadata(handler_id, "experiments")
     if not handler_metadata:  # dataset job
         handler_metadata = get_handler_metadata(handler_id, "datasets")
+
+    # Check if using direct paths (new approach) - skip dependency check if so
+    # Direct paths don't need pull_complete status validation; user is responsible for path validity
+    train_dataset_uris = handler_metadata.get("train_dataset_uris")
+    eval_dataset_uri = handler_metadata.get("eval_dataset_uri")
+    inference_dataset_uri = handler_metadata.get("inference_dataset_uri")
+
+    if any([train_dataset_uris, eval_dataset_uri, inference_dataset_uri]):
+        logger.info(f"Using direct dataset paths - skipping dependency check for job {job_context.id}")
+        return True, ""
+
     valid_datset_structure = True
     train_datasets = handler_metadata.get("train_datasets", None)
     eval_dataset = handler_metadata.get("eval_dataset", None)
@@ -187,19 +197,20 @@ def dependency_check_gpu(job_context, dependency):
     """Check if GPU dependency is met"""
     logger.debug(f"[GPU_DEP_CHECK] Starting GPU dependency check for job {job_context.id}")
 
-    # If BACKEND is NVCF, then we don't need to check for GPU availability if it's not a local job
-    local_job = (job_context.specs and "cluster" in job_context.specs and job_context.specs["cluster"] == "local")
-    if os.getenv("BACKEND") == "NVCF" and not local_job:
-        return True, ""
+    skip_gpu_check = is_remote_backend(getattr(job_context, 'backend_details', None))
+    if skip_gpu_check:
+        logger.debug(
+            f"[GPU_DEP_CHECK] Job {job_context.id}: SLURM backend detected, "
+            f"skipping per-node GPU validation (SLURM handles multi-node scheduling)"
+        )
 
     try:
         num_gpu = get_num_gpus_from_spec(
-            job_context.specs, job_context.action, network=job_context.network, default=dependency.num
+            job_context.specs, job_context.action, network=job_context.network,
+            default=dependency.num, skip_gpu_conditions_check=skip_gpu_check
         )
         logger.debug(f"[GPU_DEP_CHECK] Job {job_context.id}: Determined needs {num_gpu} GPU(s) from spec")
     except ValueError as e:
-        # GPU validation failed (e.g., requested GPUs > available GPUs)
-        # Return False to fail the dependency check with the error message
         error_message = str(e)
         logger.error(f"[GPU_DEP_CHECK] Job {job_context.id}: GPU validation failed: {error_message}")
         return False, error_message
@@ -209,7 +220,11 @@ def dependency_check_gpu(job_context, dependency):
         f"requires {num_gpu} GPU(s), calling dependency_check()..."
     )
 
-    gpu_available, available_gpu_count = dependency_check(num_gpu=num_gpu, accelerator=dependency.name)
+    gpu_available, available_gpu_count = dependency_check(
+        num_gpu=num_gpu,
+        accelerator=dependency.name,
+        job_id=job_context.id
+    )
     message = ""
     if not gpu_available:
         if available_gpu_count >= 0:

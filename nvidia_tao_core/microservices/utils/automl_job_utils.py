@@ -23,7 +23,6 @@ from .stateless_handler_utils import (
     get_job_specs,
     get_job
 )
-# StatefulSetExecutor import moved to function level to avoid circular imports
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -87,7 +86,7 @@ def on_new_automl_job(automl_context, recommendation):
         'user_id': automl_context.user_id,
         'org_name': automl_context.org_name,
         'num_gpu': automl_context.num_gpu,
-        'platform_id': automl_context.platform_id,
+        'backend_details': automl_context.backend_details,
         'kind': "experiment",
         'id': experiment_job_id,  # Use experiment's unique job ID
         'parent_id': automl_brain_job_id,  # Reference to brain job
@@ -97,7 +96,7 @@ def on_new_automl_job(automl_context, recommendation):
         'handler_id': automl_context.handler_id,
         'created_on': automl_context.created_on,
         'last_modified': automl_context.last_modified,
-        'specs': get_job_specs(automl_brain_job_id),  # Specs are stored under brain job ID
+        'specs': get_job_specs(automl_context.id, automl=True, automl_experiment_id=str(recommendation_id)),
         'dependencies': deps,
         'retain_checkpoints_for_resume': automl_context.retain_checkpoints_for_resume,
         'early_stop_epoch': automl_context.early_stop_epoch,
@@ -115,7 +114,14 @@ def on_new_automl_job(automl_context, recommendation):
 
 
 def on_delete_automl_job(job_id):
-    """Dequeue the automl experiment job"""
+    """Dequeue the automl job
+
+    Args:
+        job_id: Can be either the brain's job ID or an experiment's job ID
+
+    Returns:
+        bool: True if successful, False if job not found
+    """
     # AutoML handler stop would handle this
     # job_id can be either brain job ID or experiment job ID
     # Brain jobs are NOT in the workflow queue, so we skip dequeuing for them
@@ -125,13 +131,13 @@ def on_delete_automl_job(job_id):
     # Brain jobs don't have user_id, num_gpu, network, handler_id, workflow_status
     if not job_metadata or 'user_id' not in job_metadata or 'handler_id' not in job_metadata:
         logger.debug(f"Skipping dequeue for job {job_id} - appears to be a brain job or missing required fields")
-        return
+        return False
 
     job_dict = {
         'user_id': job_metadata.get("user_id"),
         'org_name': job_metadata.get("org_name"),
         'num_gpu': job_metadata.get("num_gpu", 0),
-        'platform_id': job_metadata.get("platform_id"),
+        'backend_details': job_metadata.get("backend_details"),
         'kind': "experiment",
         'id': job_metadata.get("id"),  # Experiment job ID
         'parent_id': job_metadata.get("parent_id", None),  # Brain job ID
@@ -150,6 +156,7 @@ def on_delete_automl_job(job_id):
     from .job_utils.workflow import Workflow, Job
     job = Job(**job_dict)
     Workflow.dequeue(job)
+    return True
 
 
 def on_cancel_automl_job(job_id):
@@ -163,8 +170,21 @@ def on_cancel_automl_job(job_id):
         f"{'-' * 80}"
     )
 
-    from .job_utils.executor import StatefulSetExecutor
-    result = StatefulSetExecutor().delete_statefulset(job_id)
+    # Get workspace metadata to enable SLURM/Lepton job cancellation
+    from .stateless_handler_utils import get_handler_job_metadata, get_handler_metadata
+    job_metadata = get_handler_job_metadata(job_id)
+    workspace_metadata = {}
+    if job_metadata:
+        handler_id = job_metadata.get('parent_id')  # AutoML brain job ID
+        if handler_id:
+            handler_metadata = get_handler_metadata(handler_id, kind='experiments')
+            if handler_metadata:
+                workspace_id = handler_metadata.get('workspace')
+                if workspace_id:
+                    workspace_metadata = get_handler_metadata(workspace_id, kind='workspaces')
+
+    from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
+    result = ExecutionHandler.delete_with_handler(job_id, workspace_metadata=workspace_metadata)
 
     if result:
         logger.info(f"Successfully deleted StatefulSet for AutoML job {job_id}")

@@ -20,6 +20,8 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 from .stateless_handler_utils import get_toolkit_status
+from nvidia_tao_core.microservices.enum_constants import Backend
+from .stateless_handler_utils import BACKEND
 
 # Global constants
 release_name = os.getenv("RELEASE_NAME", 'tao-api')
@@ -37,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def get_namespace():
     """Returns the namespace of the environment"""
-    if os.getenv("BACKEND") == "local-docker":
+    if BACKEND == Backend.LOCAL_DOCKER:
         return "default"
     if os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
         name_space = os.getenv('NAMESPACE', default="default")
@@ -96,8 +98,13 @@ def get_owner_reference():
     return owner_reference
 
 
-def dependency_check(num_gpu=-1, accelerator=None):
+def dependency_check(num_gpu=-1, accelerator=None, job_id=None):
     """Checks for GPU dependency
+
+    Args:
+        num_gpu: Number of GPUs required
+        accelerator: Accelerator type
+        job_id: Job ID to check (for PBT/Hyperband resume with reused IDs)
 
     Returns:
         tuple: (is_available, gpu_count) where:
@@ -105,24 +112,76 @@ def dependency_check(num_gpu=-1, accelerator=None):
             - gpu_count (int): Maximum number of available GPUs on any single node
                               (-1 for non-local backends where count is unknown)
     """
-    from .stateless_handler_utils import BACKEND
+    # Check if this job is using a SLURM workspace
+    # SLURM manages its own GPU scheduling, so we don't check MongoDB GPU availability
+    if job_id:
+        try:
+            from .stateless_handler_utils import get_handler_job_metadata, get_handler_metadata
+            job_metadata = get_handler_job_metadata(job_id)
+            if job_metadata:
+                # Try to get workspace_id from job metadata
+                workspace_id = job_metadata.get("workspace_id") or job_metadata.get("platform_id")
+
+                # If not in job metadata, check handler/experiment metadata
+                if not workspace_id:
+                    handler_id = job_metadata.get("experiment_id") or job_metadata.get("handler_id")
+                    kind = job_metadata.get("kind", "experiment")
+                    if handler_id:
+                        handler_metadata = get_handler_metadata(handler_id, kind + "s")
+                        if handler_metadata:
+                            workspace_id = handler_metadata.get("workspace") or handler_metadata.get("platform_id")
+
+                if workspace_id:
+                    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+                    if workspace_metadata:
+                        # Check both top-level and nested cloud_type (for robustness)
+                        cloud_type = workspace_metadata.get("cloud_type")
+                        if not cloud_type:
+                            # Fallback: check inside cloud_specific_details
+                            cloud_type = workspace_metadata.get("cloud_specific_details", {}).get("cloud_type")
+
+                        if cloud_type == "slurm":
+                            logger.debug(
+                                f"[GPU_CHECK] Job {job_id} is using SLURM workspace, "
+                                f"skipping GPU availability check (SLURM manages its own scheduling)"
+                            )
+                            return True, -1
+        except Exception as e:
+            logger.debug(f"[GPU_CHECK] Could not check workspace cloud_type for job {job_id}: {e}")
 
     if os.getenv("BACKEND", "") not in ("local-k8s", "local-docker"):
         return True, -1
     if num_gpu == -1:
         num_gpu = int(os.getenv('NUM_GPU_PER_NODE', default='1'))
-    if BACKEND == "local-docker":
+    if BACKEND == Backend.LOCAL_DOCKER:
         from .job_utils.gpu_manager import gpu_manager
-        logger.debug(f"[GPU_CHECK] Checking GPU availability: requesting {num_gpu} GPU(s)")
+        logger.debug(
+            f"[GPU_CHECK] Checking GPU availability for job {job_id}: "
+            f"requesting {num_gpu} GPU(s)"
+        )
+
+        # Check if this job already has GPUs assigned (PBT/Hyperband resume)
+        gpus_already_assigned = []
+        if job_id:
+            from .mongo_utils import MongoHandler
+            mongo_handler = MongoHandler("tao", "gpus")
+            assigned_gpus = mongo_handler.find({"job_id": job_id, "status": "assigned"})
+            gpus_already_assigned = [gpu.get("id") for gpu in assigned_gpus if gpu.get("id") is not None]
+            if gpus_already_assigned:
+                logger.debug(
+                    f"[GPU_CHECK] Job {job_id} already has {len(gpus_already_assigned)} "
+                    f"GPU(s) assigned: {gpus_already_assigned} (PBT/Hyperband resume)"
+                )
 
         # Trigger lazy GC to get accurate availability
         reclaimed = gpu_manager._reclaim_stale_gpus()
         if reclaimed > 0:
             logger.debug(f"[GPU_CHECK] Lazy GC reclaimed {reclaimed} GPU(s) from stopped containers")
 
-        # Get available GPUs
+        # Get available GPUs + GPUs already assigned to this job
         available_gpus = gpu_manager.get_available_gpus()
-        gpu_count = len(available_gpus) if available_gpus else 0
+        total_available = list(available_gpus) + gpus_already_assigned
+        gpu_count = len(total_available) if total_available else 0
 
         # DEBUG: Log GPU table state
         from .mongo_utils import MongoHandler
@@ -246,8 +305,7 @@ def get_all_k8s_running_resources():
     Returns:
         dict: {'statefulsets': [...], 'jobs': [...]}
     """
-    backend = os.getenv("BACKEND", "local-k8s")
-    if backend == "local-docker":
+    if BACKEND == Backend.LOCAL_DOCKER:
         # For Docker Compose, we'll check containers separately
         return {'statefulsets': [], 'jobs': []}
 

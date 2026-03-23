@@ -52,28 +52,50 @@ class SimpleHandler:
             self.cloud_instance, _ = create_cs_instance(workspace_metadata)
 
     def check_for_file_existence(self, path, file_type="file", file_extension=""):
-        """Check for existence of file"""
+        """Check for existence of file or extracted folder (for tar files)"""
         if self.cloud_instance:
             # Use cloud_file_path for cloud operations, not local temp path
+            # For SLURM, keep absolute paths; for other clouds, strip leading /
+            base_path = self.cloud_file_path
+            if self.cloud_instance.cloud_type != "slurm":
+                base_path = base_path.strip("/")
+
             if path in [".", ""]:
-                cloud_path = self.cloud_file_path.strip("/")
+                cloud_path = base_path
             else:
-                cloud_path = f"{self.cloud_file_path.strip('/')}/{path}"
+                # Normalize the joining - remove trailing / from base, leading / from path
+                cloud_path = f"{base_path.rstrip('/')}/{path.lstrip('/')}"
 
             if file_type == "file":
-                return self.cloud_instance.is_file(cloud_path)
+                file_exists = self.cloud_instance.is_file(cloud_path)
+                # If tar file not found, check for extracted folder
+                if not file_exists and (cloud_path.endswith('.tar.gz') or cloud_path.endswith('.tar')):
+                    extracted_dir = cloud_path.replace('.tar.gz', '').replace('.tar', '')
+                    folder_exists = self.cloud_instance.is_folder(extracted_dir)
+                    if folder_exists:
+                        logger.debug(f"Tar file {cloud_path} not found, but extracted folder exists: {extracted_dir}")
+                        return True
+                return file_exists
             if file_type == "folder":
                 return self.cloud_instance.is_folder(cloud_path)
             if file_type == "regex":
                 # file_extension contains the full regex pattern, not just extension
                 if path in [".", ""]:
-                    pattern = f"{self.cloud_file_path.strip('/')}/{file_extension}"
+                    pattern = f"{base_path.rstrip('/')}/{file_extension}"
                 else:
                     pattern = f"{cloud_path}/{file_extension}"
                 return any(self.cloud_instance.glob_files(pattern))
         else:
             if file_type == "file":
-                return os.path.isfile(path)
+                file_exists = os.path.isfile(path)
+                # If tar file not found, check for extracted folder
+                if not file_exists and (path.endswith('.tar.gz') or path.endswith('.tar')):
+                    extracted_dir = path.replace('.tar.gz', '').replace('.tar', '')
+                    folder_exists = os.path.isdir(extracted_dir)
+                    if folder_exists:
+                        logger.debug(f"Tar file {path} not found, but extracted folder exists: {extracted_dir}")
+                        return True
+                return file_exists
             if file_type == "folder":
                 return os.path.isdir(path)
             if file_type == "regex":
@@ -128,21 +150,30 @@ def _get_actual_files_in_dataset(handler):
     files = []
     try:
         if handler.cloud_instance:
-            # For cloud storage, list files in the cloud_file_path
-            folder_path = handler.cloud_file_path.strip("/")
+            # For cloud storage (including SLURM via SSH), list files in the cloud_file_path
+            # For SLURM, keep absolute paths (starts with /); for other clouds, strip leading /
+            folder_path = handler.cloud_file_path
             if folder_path:
+                # For non-SLURM cloud types, strip leading slash as paths are relative to bucket
+                if handler.cloud_instance.cloud_type != "slurm":
+                    folder_path = folder_path.strip("/")
+
                 cloud_files, _ = handler.cloud_instance.list_files_in_folder(folder_path)
                 files = cloud_files
             else:
                 files = []
+            logger.debug(f"Listed {len(files)} files from {handler.cloud_instance.cloud_type} storage at {folder_path}")
         else:
-            # For local storage, use glob to find files
-            if os.path.exists(handler.root):
+            # For local storage only, use glob to find files
+            if handler.root and os.path.exists(handler.root):
                 files = [
                     os.path.relpath(f, handler.root)
                     for f in glob.glob(os.path.join(handler.root, "**", "*"), recursive=True)
                     if os.path.isfile(f)
                 ]
+                logger.debug(f"Listed {len(files)} files from local storage")
+            else:
+                logger.warning(f"Local root path does not exist: {handler.root}")
     except Exception as e:
         logger.warning("Could not list files in dataset: %s", str(e))
         files = []
@@ -255,10 +286,6 @@ def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata
             "format": handler.format,
             "requirements": format_reqs
         }
-
-        # Get actual files in dataset
-        actual_files = _get_actual_files_in_dataset(handler)
-        validation_result["actual_structure"] = actual_files
 
         # Validate each requirement and collect detailed errors
         validation_errors = []
@@ -403,6 +430,7 @@ def validate_dataset(org_name, handler_metadata, temp_dir="", workspace_metadata
         # Compile validation results
         validation_result["missing_files"] = missing_files
         if validation_errors:
+            validation_result["actual_structure"] = _get_actual_files_in_dataset(handler)
             validation_result["error_details"] = "; ".join(validation_errors)
             validation_result["success"] = False
             logger.error("Dataset validation failed: %s", validation_result["error_details"])

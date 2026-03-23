@@ -221,7 +221,7 @@ class StatusLogger(BaseLogger):
         self.append = append
         self.is_master = is_master
         if os.path.exists(self.log_path):
-            logger.info(f"Log file already exists at {self.log_path}".format)
+            logger.info(f"Log file already exists at {self.log_path}")
         if is_master:
             with open(self.log_path, "a" if append else "w", encoding="utf-8") as _:
                 pass

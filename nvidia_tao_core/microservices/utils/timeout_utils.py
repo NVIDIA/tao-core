@@ -18,12 +18,12 @@ import logging
 
 from .mongo_utils import MongoHandler
 from .stateless_handler_utils import (
+    BACKEND,
     get_handler_metadata,
     get_automl_controller_info,
     is_request_automl
 )
-
-BACKEND = os.getenv("BACKEND", "local-k8s")
+from nvidia_tao_core.microservices.enum_constants import Backend
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -193,10 +193,25 @@ def get_all_running_jobs():
         ):
             automl_brain = True
 
+        # Get workspace info to determine if this is a SLURM job
+        workspace_id = job.get('workspace')
+        workspace_metadata = None
+        cloud_type = None
+        if workspace_id:
+            try:
+                workspace_metadata = get_handler_metadata(workspace_id, 'workspaces')
+                cloud_type = workspace_metadata.get('cloud_type') if workspace_metadata else None
+            except Exception:
+                pass  # Ignore errors getting workspace metadata
+
+        # AutoML brain jobs store experiment_id instead of handler_id, and may omit kind.
+        resolved_handler_id = job.get('handler_id') or job.get('experiment_id')
+        resolved_kind = job.get('kind') or 'experiment'
+
         job_info = {
             'job_id': job_id,
-            'handler_id': job.get('handler_id'),
-            'kind': job.get('kind', ''),
+            'handler_id': resolved_handler_id,
+            'kind': resolved_kind,
             'status': job.get('status'),
             'user_id': job.get('user_id'),
             'org_name': job.get('org_name'),
@@ -207,7 +222,10 @@ def get_all_running_jobs():
             'is_automl_brain': automl_brain,
             'experiment_number': '0',
             'timeout_minutes': job.get('timeout_minutes'),
-            'source': 'db'
+            'source': 'db',
+            'workspace_id': workspace_id,
+            'workspace_metadata': workspace_metadata,
+            'cloud_type': cloud_type
         }
         running_jobs.append(job_info)
 
@@ -238,9 +256,9 @@ def get_all_running_jobs():
     except Exception as e:
         logger.debug(f"Error collecting AutoML experiment job IDs: {e}")
 
-    if BACKEND == "local-docker":
+    if BACKEND == Backend.LOCAL_DOCKER:
         # Import at function level to avoid circular imports
-        from ..handlers.docker_handler import get_all_docker_running_containers
+        from ..handlers.execution_handlers.docker_handler import get_all_docker_running_containers
         docker_containers = get_all_docker_running_containers()
         for container in docker_containers:
             job_id = container.get('job_id')
@@ -348,13 +366,27 @@ def get_all_running_automl_experiments():
             job_id = job.get('job_id')
             handler_id = job.get('handler_id')
 
-            if not job_id or not handler_id:
+            if not job_id:
                 continue
 
+            # AutoML brain jobs store experiment_id (not handler_id) and may omit kind.
+            # Fall back to reading experiment_id from the raw job document if handler_id is missing.
+            if not handler_id:
+                raw_job = MongoHandler("tao", "jobs").find_one({"id": job_id})
+                if raw_job:
+                    handler_id = raw_job.get("experiment_id") or raw_job.get("handler_id")
+                    if handler_id:
+                        job['handler_id'] = handler_id
+                    if not job.get('kind'):
+                        job['kind'] = raw_job.get("kind", "experiment")
+                if not handler_id:
+                    continue
+
             # Check if this is an AutoML job by looking at handler metadata
+            kind_key = job.get('kind', '') or 'experiment'
             try:
                 handler_metadata = get_handler_metadata(
-                    handler_id, job.get('kind', '') + 's'
+                    handler_id, kind_key + 's'
                 )
                 if (handler_metadata and
                         handler_metadata.get("automl_settings", {}).get("automl_enabled", False)):
@@ -399,6 +431,8 @@ def get_all_running_automl_experiments():
                                         'brain_job_id': job_id,
                                         'experiment_number': str(rec_id),
                                         'timeout_minutes': job.get('timeout_minutes'),
+                                        'workspace_metadata': job.get('workspace_metadata'),  # For SLURM detection
+                                        'cloud_type': job.get('cloud_type'),  # For SLURM detection
                                         'source': 'db'
                                     }
                                     running_automl_experiments.append(automl_exp_info)
@@ -413,9 +447,9 @@ def get_all_running_automl_experiments():
 
         # Now check K8s/Docker for orphaned AutoML experiment pods
         # These are pods that have completed (success/failure) in DB but are still running
-        if BACKEND == "local-docker":
+        if BACKEND == Backend.LOCAL_DOCKER:
             # Import at function level to avoid circular imports
-            from ..handlers.docker_handler import get_all_docker_running_containers
+            from ..handlers.execution_handlers.docker_handler import get_all_docker_running_containers
             docker_containers = get_all_docker_running_containers()
             for container in docker_containers:
                 container_job_id = container.get('job_id')

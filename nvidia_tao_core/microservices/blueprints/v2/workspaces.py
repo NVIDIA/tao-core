@@ -22,16 +22,17 @@ from nvidia_tao_core.microservices.decorators import disk_space_check
 from nvidia_tao_core.microservices.utils.auth_utils import authentication
 from nvidia_tao_core.microservices.utils.filter_utils import filtering, pagination
 from nvidia_tao_core.microservices.handlers.workspace_handler import WorkspaceHandler
-from nvidia_tao_core.microservices.handlers import MongoBackupHandler
+from nvidia_tao_core.microservices.handlers import MongoBackupHandler, SpecHandler
 from .schemas import (
     WorkspaceListRsp,
     WorkspaceRsp,
     ErrorRsp,
-    DatasetPathLst,
+    DatasetUriLst,
     MessageOnly,
     BulkOpsRsp,
     WorkspaceReq,
-    WorkspaceBackupReq
+    WorkspaceBackupReq,
+    GpuDetails
 )
 from nvidia_tao_core.microservices.utils.handler_utils import validate_uuid
 
@@ -100,7 +101,7 @@ def workspace_list(org_name):
         required: false
         schema:
           type: string
-          enum: ["monai", "unet", "custom" ]
+          enum: ["unet", "custom"]
       - name: type
         in: query
         description: Optional type filter
@@ -248,7 +249,7 @@ def workspace_retrieve_datasets(org_name, workspace_id):
           description: Returned list of dataset paths within Workspace
           content:
             application/json:
-              schema: DatasetPathLst
+              schema: DatasetUriLst
           headers:
             Access-Control-Allow-Origin:
               $ref: '#/components/headers/Access-Control-Allow-Origin'
@@ -287,7 +288,7 @@ def workspace_retrieve_datasets(org_name, workspace_id):
     # Get schema
     schema = None
     if response.code == 200:
-        schema = DatasetPathLst()
+        schema = DatasetUriLst()
     else:
         schema = ErrorRsp()
     # Load metadata in schema and return
@@ -542,9 +543,11 @@ def workspace_create(org_name):
               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     schema = WorkspaceReq()
+    logger.info(f"Request: {request.get_json(force=True)}")
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
-
+    logger.info(f"Request dict: {request_dict}")
     user_id = authentication.get_user_id(request.headers.get('Authorization', ''), org_name)
+    logger.info(f"User ID: {user_id}")
     # Get response
     response = WorkspaceHandler.create_workspace(user_id, org_name, request_dict)
     # Get schema
@@ -553,11 +556,32 @@ def workspace_create(org_name):
         schema = WorkspaceRsp()
     else:
         schema = ErrorRsp()
+    logger.info(f"Response code: {response.code}")
+    logger.info(f"Response: {response.data}")
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
+
+    # Determine appropriate status code:
+    # - 201 for newly created workspace
+    # - 200 for existing workspace returned due to deduplication
     if response.code == 200:
-        response.code = 201
-    return make_response(jsonify(schema_dict), response.code)
+        if "already exists" in response.message:
+            # Return 200 for existing workspace
+            http_status = 200
+            # Add informational message to response
+            schema_dict['_message'] = (
+                "A workspace with the same cloud configuration already exists. "
+                "Returning existing workspace. "
+                "To create a new workspace anyway, set 'force_create': true in the request body."
+            )
+            schema_dict['_duplicate'] = True
+        else:
+            # Return 201 for newly created workspace
+            http_status = 201
+    else:
+        http_status = response.code
+
+    return make_response(jsonify(schema_dict), http_status)
 
 
 @workspaces_bp_v2.route('/orgs/<org_name>/workspaces/<workspace_id>', methods=['PUT'])
@@ -892,3 +916,18 @@ def workspace_restore(org_name):
         schema = ErrorRsp()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
+
+
+@workspaces_bp_v2.route('/orgs/<org_name>/workspaces/<workspace_id>/gpu_types', methods=['GET'])
+@disk_space_check
+def get_workspace_gpu_types(org_name, workspace_id):
+    """Retrieve available GPU type."""
+    user_id = authentication.get_user_id(request.headers.get('Authorization', ''), org_name)
+    response = SpecHandler.get_gpu_types(user_id, org_name, workspace_id)
+    schema = GpuDetails()
+    if response.code == 200:
+        return make_response(jsonify(response.data), response.code)
+    schema = ErrorRsp()
+    # Load metadata in schema and return
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)

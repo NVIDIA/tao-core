@@ -29,6 +29,18 @@ from nvidia_tao_core.config.utils.types import (
 
 
 @dataclass
+class QuantCalibrationDataset:
+    """Quantization calibration dataset config."""
+
+    images_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to the directory containing calibration images.",
+        display_name="calibration images directory"
+    )
+
+
+@dataclass
 class Sparse4DTrainDatasetConfig:
     """Training dataset configuration for Sparse4D."""
 
@@ -391,4 +403,8 @@ class Omniverse3DDetTrackDatasetConfig:
         Sparse4DTestDatasetConfig(),
         description="Test dataset config",
         display_name="Test dataset config"
+    )
+    quant_calibration_dataset: QuantCalibrationDataset = DATACLASS_FIELD(
+        QuantCalibrationDataset(),
+        description="Configurable parameters for quantization calibration dataset.",
     )

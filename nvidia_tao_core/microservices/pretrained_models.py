@@ -33,6 +33,8 @@ import logging
 
 if os.getenv("AIRGAPPED_MODE", "False").lower() == "false":
     from nvidia_tao_core.microservices.utils.mongo_utils import MongoHandler
+else:
+    MongoHandler = None  # type: ignore
 from nvidia_tao_core.microservices.utils.ngc_utils import get_ngc_token_from_api_key
 from nvidia_tao_core.microservices.utils.core_utils import (
     read_network_config,
@@ -84,6 +86,7 @@ class BaseExperimentMetadata:
         use_csv: bool = False,
         use_both: bool = False,
         model_names: str = None,
+        csv_path: str = None,
     ):
         """Initialize Base Experiment Metadata class
 
@@ -96,12 +99,17 @@ class BaseExperimentMetadata:
             use_csv (bool, optional): Use predefined CSV file for models instead of NGC discovery. Defaults to False.
             use_both (bool, optional): Use both CSV file and NGC auto-discovery. Defaults to False.
             model_names (str, optional): Comma-separated list of model names/entrypoints to download. Defaults to None.
+            csv_path (str, optional): Path to CSV file. Defaults to pretrained_models.csv next to this module.
         """
         self.shared_folder_path = shared_folder_path
-        self.ngc_key = os.getenv("NGC_API_KEY") or ngc_key or get_admin_key()
+        self.ngc_key = (os.getenv("NGC_API_KEY") or os.getenv("NGC_KEY") or ngc_key or "").strip() or None
+        if self.ngc_key is None and not (use_csv and not use_both):
+            self.ngc_key = get_admin_key()
+        self.ngc_key = self.ngc_key or ""
         self.airgapped = os.getenv("AIRGAPPED_MODE", "False").lower() == "true"
         self.use_csv = use_csv
         self.use_both = use_both
+        self.csv_path = csv_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained_models.csv")
         self.model_names = model_names.split(",") if model_names else None
         self.org_team_list = self.prepare_org_team(org_teams)
         self.override = override
@@ -150,25 +158,34 @@ class BaseExperimentMetadata:
         """Return current version of Nvidia TAO.
 
         Priority:
-          1. $TAO_TOOLKIT_VERSION
-          2. local version.py (if distributed with the wheel)
-          3. hard-coded fallback
+          1. installed package metadata (reflects actual pip-installed version)
+          2. nvidia_tao_core.version.__version__ (source module, if available)
+          3. $TAO_TOOLKIT_VERSION (image env var, may be stale)
+          4. hard-coded fallback
         """
         if self._cached_tao_version:
             return self._cached_tao_version
+
+        try:
+            from importlib.metadata import version as pkg_version
+            self._cached_tao_version = pkg_version("nvidia-tao-core")
+            return self._cached_tao_version
+        except Exception:
+            pass
+
+        try:
+            from nvidia_tao_core.version import __version__ as src_version
+            self._cached_tao_version = src_version
+            return self._cached_tao_version
+        except Exception:
+            pass
 
         env_ver = os.getenv("TAO_TOOLKIT_VERSION")
         if env_ver:
             self._cached_tao_version = env_ver
             return env_ver
 
-        # Optional: Look for version.py next to this file to stay forward-compatible
-        try:
-            from importlib.metadata import version as pkg_version
-            self._cached_tao_version = pkg_version("nvidia-tao-core")
-        except Exception:
-            self._cached_tao_version = "6.0.0"
-
+        self._cached_tao_version = "6.0.0"
         return self._cached_tao_version
 
     def get_ngc_client(self, org: str, team: str, ngc_key: str):
@@ -188,18 +205,28 @@ class BaseExperimentMetadata:
                 self._ngc_clients_cache[client_key] = client
                 logger.info(f"Created and cached NGC client for org: {org}, team: {team}")
             except Exception as e:
-                if not ("Invalid org" in str(e) or "Invalid team" in str(e)):
+                if "Invalid org" in str(e) or "Invalid team" in str(e):
+                    logger.warning(
+                        f"Can't validate the passed NGC KEY for Org {org}, team {team}, "
+                        "going to try download without configuring credentials"
+                    )
+                    self._ngc_clients_cache[client_key] = client
+                elif ngc_key and ngc_key.startswith("nvapi"):
+                    # nvapi: try configure with api_key only so SDK derives org from key
+                    try:
+                        client.configure(api_key=ngc_key)
+                        self._ngc_clients_cache[client_key] = client
+                        logger.info("Created and cached NGC client for nvapi key (org/team from key)")
+                    except Exception as e2:
+                        logger.warning(
+                            "NGC client configure failed for nvapi key; attempting with unconfigured client: %s",
+                            e2,
+                        )
+                        self._ngc_clients_cache[client_key] = client
+                else:
                     logger.error(f"Can't configure the passed NGC KEY for Org {org}, team {team}")
-                    # Cache the failed authentication to avoid repeated attempts
                     self._ngc_clients_cache[client_key] = None
-                    logger.info(f"Cached failed authentication for org: {org}, team: {team}")
                     return None
-                logger.warning(
-                    f"Can't validate the passed NGC KEY for Org {org}, team {team}, "
-                    "going to try download without configuring credentials"
-                )
-                # Store unconfigured client for this case
-                self._ngc_clients_cache[client_key] = client
 
         return self._ngc_clients_cache[client_key]
 
@@ -300,20 +327,26 @@ class BaseExperimentMetadata:
 
     def get_ngc_token(self, org: str = "", team: str = ""):
         """Authenticate to NGC"""
-        # Get the NGC login token
+        # Get the NGC login token: PTM_API_KEY env, then --ngc-key, then secrets file (k8s/infra only)
         ngc_api_key = os.getenv("PTM_API_KEY")
         ngc_token = ""
+        if not ngc_api_key and self.ngc_key:
+            ngc_api_key = self.ngc_key
         if not ngc_api_key:
-            secrets_file = "/var/secrets/secrets.json"
-            with open(secrets_file, "r", encoding="utf-8") as f:
-                secrets = json.load(f)
-            ngc_api_key = secrets.get("ptm_api_key")
+            secrets_path = os.getenv("VAULT_SECRET_FILE", "/var/secrets/secrets.json")
+            if os.path.isfile(secrets_path):
+                with open(secrets_path, "r", encoding="utf-8") as f:
+                    secrets = json.load(f)
+                ngc_api_key = secrets.get("ptm_api_key") or secrets.get("ngc_api_key")
 
         if ngc_api_key:
+            # nvapi-* keys are used directly as Bearer; legacy keys are exchanged for a JWT
+            if ngc_api_key.startswith("nvapi"):
+                return ngc_api_key, ngc_api_key
             ngc_token = get_ngc_token_from_api_key(ngc_api_key, org, team)
             return ngc_api_key, ngc_token
-        if self.ngc_key.startswith("nvapi"):
-            return self.ngc_key, ngc_token
+        if self.ngc_key and self.ngc_key.startswith("nvapi"):
+            return self.ngc_key, self.ngc_key
         raise ValueError(
             'Credentials error: Invalid NGC_PERSONAL_KEY, NGC_API_KEYs are no longer valid, '
             'generate a personal key with Cloud Functions, NGC Catalog and Private registry services '
@@ -493,7 +526,7 @@ class BaseExperimentMetadata:
             is_backbone: Optional boolean (True/False/empty) indicating if model is a backbone
         """
         base_experiments: dict[str, dict] = {}
-        with open(f"{os.path.dirname(os.path.abspath(__file__))}/pretrained_models.csv", "r", encoding="utf-8") as f:
+        with open(self.csv_path, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             next(reader)  # skip header
             for row_num, row in enumerate(reader, 2):  # Start from 2 since we skip header
@@ -1201,13 +1234,18 @@ class BaseExperimentMetadata:
             with open(self.metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(self.metadata, f, indent=2, default=str)
             logger.info(f"Base experiments metadata written to JSON file: {self.metadata_file}")
-        elif not self.dry_run:
-            # Regular mode - write to MongoDB
-            mongo_jobs = MongoHandler("tao", "jobs")
-            for base_exp_id in self.metadata:
-                base_exp_metadata = self.metadata[base_exp_id]
-                mongo_jobs.upsert({'id': base_exp_id}, base_exp_metadata)
-            logger.info("Base experiments metadata written to jobs database")
+        elif not self.dry_run and not (self.use_csv and not self.use_both):
+            # Regular mode - write to MongoDB (skip when local CSV-only, no backend)
+            if MongoHandler is not None:
+                mongo_jobs = MongoHandler("tao", "jobs")
+                for base_exp_id in self.metadata:
+                    base_exp_metadata = self.metadata[base_exp_id]
+                    mongo_jobs.upsert({'id': base_exp_id}, base_exp_metadata)
+                logger.info("Base experiments metadata written to jobs database")
+            else:
+                logger.info("Skipping MongoDB write (no backend / local CSV-only mode)")
+        elif self.use_csv and not self.use_both:
+            logger.info("Skipping metadata write (local CSV-only mode, no MongoDB)")
         else:
             logger.info("Skipping metadata write in dry run mode!")
 
@@ -1225,13 +1263,14 @@ if __name__ == "__main__":
             "--org-teams",
             help="Organization and team names. Each pair of org/team separated by a comma."
         )
-        parser.add_argument("--ngc-key", help="NGC Key", default=get_admin_key())
+        parser.add_argument("--ngc-key", help="NGC Key (or set NGC_API_KEY/NGC_KEY env)", default=None)
         parser.add_argument("--dry-run", help="Dry run mode", default=False, action="store_true")
         parser.add_argument("--override", help="Override existing base experiments", action="store_true")
         parser.add_argument("--use-csv", help="Use predefined CSV file for model selection instead of NGC discovery",
                             default=False, action="store_true")
         parser.add_argument("--use-both", help="Use both CSV file and NGC auto-discovery for model selection",
                             default=False, action="store_true")
+        parser.add_argument("--csv-path", help="Path to CSV file (default: pretrained_models.csv next to this module)")
         parser.add_argument("--model-names",
                             help="Comma-separated list of model names/entrypoints to download "
                                  "(e.g., 'classification_pyt,dino')")
@@ -1245,6 +1284,7 @@ if __name__ == "__main__":
             args.dry_run,
             args.use_csv,
             args.use_both,
-            args.model_names
+            args.model_names,
+            args.csv_path,
         )
         bem.sync()

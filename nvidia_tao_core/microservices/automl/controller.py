@@ -24,14 +24,12 @@ from copy import deepcopy
 from datetime import timedelta
 
 from nvidia_tao_core.microservices.utils.automl_utils import Recommendation, ResumeRecommendation, JobStates
-from nvidia_tao_core.microservices.utils.core_utils import get_monitoring_metric
+from nvidia_tao_core.microservices.utils.core_utils import get_monitoring_metric, normalize_metric_config
 from nvidia_tao_core.microservices.constants import (
     _ITER_MODELS,
     NO_VAL_METRICS_DURING_TRAINING_NETWORKS,
     MISSING_EPOCH_FORMAT_NETWORKS
 )
-if os.getenv("BACKEND") == "NVCF":
-    from nvidia_tao_core.microservices.dgx_controller import overwrite_job_logs_from_bcp
 from nvidia_tao_core.microservices.utils.cloud_utils import create_cs_instance_with_decrypted_metadata
 from nvidia_tao_core.microservices.utils.handler_utils import (
     StatusParser,
@@ -40,6 +38,9 @@ from nvidia_tao_core.microservices.utils.handler_utils import (
     filter_files,
     format_epoch,
     get_network_config
+)
+from nvidia_tao_core.microservices.handlers.execution_handlers.slurm_handler import (
+    get_results_dir_for_workspace
 )
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     update_job_status,
@@ -67,7 +68,6 @@ from nvidia_tao_core.microservices.utils.automl_job_utils import (
     on_delete_automl_job,
     on_cancel_automl_job
 )
-
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
 tao_log_level = getattr(logging, TAO_LOG_LEVEL, logging.INFO)
@@ -98,11 +98,12 @@ class Controller:
         network,
         brain,
         automl_context,
-        max_recommendations,
+        automl_algorithm_settings,
         delete_intermediate_ckpt,
         metric,
         automl_algorithm,
-        decrypted_workspace_metadata
+        decrypted_workspace_metadata,
+        parameter_names=None
     ):
         """Initialize the Automl Controller class
 
@@ -111,17 +112,20 @@ class Controller:
             network: model name
             brain: Bayesian/Hyperband class object
             automl_context: job context with regards to automl
-            max_recommendations: max_recommendation parameter value (for Bayesian)
+            automl_algorithm_settings: automl algorithm settings
             delete_intermediate_ckpt: boolean value to delete/not-delete checkpoints which don't correspond to the
             best model
             metric: metric name which will be used to choose best models
             automl_algorithm: automl algorithm name
+            decrypted_workspace_metadata: decrypted workspace metadata
+            parameter_names: list of parameter names being varied by AutoML
         """
         self.brain = brain
 
         self.recommendations = []
         self.automl_context = automl_context
-        logger.info("automl_context.id: %s", self.automl_context.id)
+        logger.debug("automl_context.id: %s", self.automl_context.id)
+        logger.debug("automl_context: %s", self.automl_context)
 
         self.root = root
         self.network = network
@@ -129,22 +133,31 @@ class Controller:
         if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
             self.checkpoint_delimiter = "_"
         self.completed_recommendations = 0
-        self.max_recommendations = int(max_recommendations)
+        self.automl_algorithm_settings = automl_algorithm_settings
         self.delete_intermediate_ckpt = bool(delete_intermediate_ckpt.lower() == "true")
         self.automl_algorithm = automl_algorithm
         self.decrypted_workspace_metadata = decrypted_workspace_metadata
         self.metric = metric
-        if self.automl_algorithm in ("hyperband", "h") and self.network in NO_VAL_METRICS_DURING_TRAINING_NETWORKS:
+        hyperband_like_algos = ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes")
+        if self.automl_algorithm in hyperband_like_algos and self.network in NO_VAL_METRICS_DURING_TRAINING_NETWORKS:
             self.metric_key = "loss"
             self.metric = "loss"
         elif self.metric == "kpi":
-            self.metric_key = get_monitoring_metric(self.network)
+            # Get monitoring metric(s) - may be string or list
+            monitoring_metric = get_monitoring_metric(self.network)
+            # Normalize to list for consistent handling, use first as primary key
+            metric_list = normalize_metric_config(monitoring_metric)
+            self.metric_key = metric_list[0] if metric_list else monitoring_metric
+            # Store full list for matching against available metrics
+            self.metric_key_list = metric_list
         else:
             self.metric_key = self.metric
+            self.metric_key_list = [self.metric]
 
         self.brain.reverse_sort = True
         self.min_max = max
-        if self.metric == "loss" or self.metric_key in ("loss", "evaluation_cost") or "loss" in self.metric_key:
+        metric_key_str = str(self.metric_key) if self.metric_key else ""
+        if self.metric == "loss" or metric_key_str in ("loss", "evaluation_cost") or "loss" in metric_key_str:
             self.brain.reverse_sort = False
             self.min_max = min
 
@@ -158,6 +171,11 @@ class Controller:
 
         self.old_bracket = "0"
         self.hyperband_cancel_condition_seen = False
+
+        self.wandb_group_name = f"automl_{self.automl_context.id}"
+        self.parameter_names = list(parameter_names) if parameter_names else []
+        self.wandb_initialized = False
+        self.wandb_table = None
 
         self.eta = "Will be updated after completing one epoch"
         self.remaining_epochs_in_experiment = float("inf")
@@ -192,18 +210,195 @@ class Controller:
         if "TAO_CLIENT_TYPE" not in experiment_metadata["docker_env_vars"]:
             # Set to api since AutoML is triggered by API server
             experiment_metadata["docker_env_vars"]["TAO_CLIENT_TYPE"] = "api"
+        # Pass brain's log level to train jobs so logging is consistent (brain sets TAO_LOG_LEVEL when started)
+        brain_log_level = os.getenv("TAO_LOG_LEVEL", "INFO")
+        experiment_metadata["docker_env_vars"]["TAO_LOG_LEVEL"] = brain_log_level
 
         # Save updated metadata
         write_handler_metadata(self.automl_context.handler_id, experiment_metadata, "experiments")
         logger.info(
-            "Injected TAO_AUTOML_TRIGGERED=true for experiment %s",
-            self.automl_context.handler_id
+            "Injected TAO_AUTOML_TRIGGERED=true and TAO_LOG_LEVEL=%s (from brain) for experiment %s",
+            brain_log_level, self.automl_context.handler_id
         )
+
+    def _initialize_wandb_for_automl(self):
+        """Initialize WandB for AutoML tracking using API key from experiment metadata.
+
+        This method:
+        1. Retrieves WANDB_API_KEY from experiment metadata's docker_env_vars
+        2. Logs into WandB using the API key
+        3. Initializes a WandB run for the AutoML controller
+        4. Creates a table to track all AutoML experiments with their hyperparameters and results
+        5. Groups all child experiment runs under self.wandb_group_name for easy visualization
+
+        The WandB table contains:
+        - experiment_id: Sequential ID of the recommendation
+        - job_id: Unique job identifier
+        - status: Current status (pending/running/success/failure)
+        - metric_key: The optimization metric value (e.g., mAP, loss)
+        - best_epoch_number: The epoch number with the best metric
+        - All varying hyperparameters from automl_hyperparameters (parameter_names)
+        """
+        if self.wandb_initialized:
+            return
+
+        try:
+            # Get experiment metadata to access docker_env_vars
+            experiment_metadata = get_handler_metadata(self.automl_context.handler_id, "experiments")
+            docker_env_vars = experiment_metadata.get("docker_env_vars", {})
+            wandb_api_key = docker_env_vars.get("WANDB_API_KEY")
+
+            if not wandb_api_key:
+                logger.info("WANDB_API_KEY not found in experiment metadata, skipping WandB initialization")
+                return
+
+            # Check if wandb is logged in
+            try:
+                import wandb
+                wandb_logged_in = wandb.login(key=wandb_api_key)
+                if not wandb_logged_in:
+                    logger.warning("Failed to login to WandB, skipping table logging")
+                    return
+            except Exception as e:
+                logger.warning("WandB login failed: %s", str(e))
+                return
+
+            # Initialize wandb run for AutoML controller
+            specs = get_job_specs(self.automl_context.id)
+            wandb_config = specs.get("wandb", {})
+
+            config = {
+                "network": self.network,
+                "metric": self.metric,
+                "algorithm": self.automl_algorithm,
+            }
+            if self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes", "pbt"):
+                config["max_epochs"] = self.automl_algorithm_settings.automl_max_epochs
+                config["reduction_factor"] = self.automl_algorithm_settings.automl_reduction_factor
+                config["epoch_multiplier"] = self.automl_algorithm_settings.epoch_multiplier
+            elif self.automl_algorithm in ("bayesian", "b", "bfbo"):
+                config["max_recommendations"] = self.automl_algorithm_settings.automl_max_recommendations
+            else:
+                raise ValueError(f"AutoML Algorithm {self.automl_algorithm} is not valid")
+
+            wandb.init(
+                project=wandb_config.get("project", "TAO Toolkit"),
+                entity=wandb_config.get("entity"),
+                name="automl_brain",
+                group=self.wandb_group_name,
+                config=config,
+                dir=os.path.join(self.root, "wandb"),
+                reinit=True
+            )
+
+            self.wandb_initialized = True
+            logger.info("WandB initialized for AutoML controller with group: %s", self.wandb_group_name)
+
+            # Create the table
+            self._create_wandb_table()
+
+        except Exception as e:
+            logger.warning("Failed to initialize WandB for AutoML: %s", str(e))
+            self.wandb_initialized = False
+
+    def _create_wandb_table(self):
+        """Create WandB table with columns for hyperparameters and metrics."""
+        if not self.wandb_initialized:
+            return
+
+        try:
+            import wandb
+
+            # Define table columns: experiment_id, job_id, status, result, best_epoch_number,
+            # plus all varying hyperparameters
+            columns = ["experiment_id", "job_id", "status", self.metric_key, "best_epoch_number"]
+            columns.extend(self.parameter_names)
+
+            self.wandb_table = wandb.Table(columns=columns)
+            logger.info("Created WandB table with columns: %s", columns)
+
+        except Exception as e:
+            logger.warning("Failed to create WandB table: %s", str(e))
+            self.wandb_table = None
+
+    def _update_wandb_table(self):
+        """Update WandB table with current state of all recommendations."""
+        if not self.wandb_initialized or self.wandb_table is None:
+            return
+
+        try:
+            import wandb
+
+            # Recreate the table with all current recommendations
+            columns = ["experiment_id", "job_id", "status", self.metric_key, "best_epoch_number"]
+            columns.extend(self.parameter_names)
+            self.wandb_table = wandb.Table(columns=columns)
+
+            # Add all recommendations as rows
+            for rec in self.recommendations:
+                # Format result with higher precision to preserve decimal places in WandB display
+                # WandB defaults to 4 decimal places, so format as string with more precision
+                result_value = rec.result
+                if isinstance(result_value, float):
+                    # Format with 10 decimal places to preserve precision in WandB display
+                    # Preserve at least one decimal place to avoid removing all digits
+                    formatted = f"{result_value:.10f}".rstrip('0')
+                    if formatted.endswith('.'):
+                        formatted = formatted[:-1] + '.0'
+                    result_value = formatted
+
+                row_data = [
+                    rec.id,
+                    rec.job_id or "pending",
+                    rec.status,
+                    result_value,
+                    self.best_epoch_number.get(rec.id, "")
+                ]
+
+                # Add hyperparameter values (formatted, e.g., "train.optim.lr")
+                # Note: rec.specs is a flat dict with keys like "train.optim.lr", not nested
+                for param_name in self.parameter_names:
+                    value = rec.specs.get(param_name, "N/A")
+                    row_data.append(value)
+
+                self.wandb_table.add_data(*row_data)
+
+            # Log the updated table
+            wandb.log({"automl_experiments": self.wandb_table})
+            logger.debug("Updated WandB table with %d recommendations", len(self.recommendations))
+
+        except Exception as e:
+            logger.warning("Failed to update WandB table: %s", str(e))
 
     def _get_checkpoint_format(self):
         """Get checkpoint format from network config"""
         checkpoint_config = self._get_checkpoint_config()
         return checkpoint_config.get("format", "")
+
+    def _get_experiment_results_path(self, job_id):
+        """Get the results path for an experiment based on workspace type.
+
+        For SLURM workspaces, returns the actual Lustre path.
+        For non-SLURM workspaces, returns the local container path.
+
+        Args:
+            job_id: The job ID of the experiment
+
+        Returns:
+            str: The full path to the experiment results directory
+        """
+        cloud_type = ''
+        if self.decrypted_workspace_metadata:
+            cloud_type = self.decrypted_workspace_metadata.get('cloud_type', '')
+
+        if cloud_type == 'slurm':
+            return get_results_dir_for_workspace(
+                workspace_metadata=self.decrypted_workspace_metadata,
+                job_id=job_id
+            )
+
+        results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+        return os.path.join(results_base, job_id)
 
     def _select_best_epoch_folder(self, epoch_folder_files, all_files, specific_format=None):
         """Select the best epoch folder that contains the required checkpoint format
@@ -277,6 +472,16 @@ class Controller:
             # Report initial health beat
             report_health_beat(self.automl_context.id, "AutoML controller starting")
 
+            # Set WandB group in specs for trial linking so all trials in dashboard are grouped together
+            specs = get_job_specs(self.automl_context.id)
+            if "wandb" in specs and specs["wandb"]:
+                specs["wandb"]["group"] = self.wandb_group_name
+                save_job_specs(self.automl_context.id, specs)
+                logger.info("Updated WandB group in automl job specs: %s", self.wandb_group_name)
+
+            # Initialize WandB for AutoML controller
+            self._initialize_wandb_for_automl()
+
             update_job_message(
                 self.automl_context.handler_id,
                 self.automl_context.id,
@@ -286,9 +491,10 @@ class Controller:
             self._execute_loop()
             status = "Error"
             result_metadata = get_handler_job_metadata(self.automl_context.id)
+            best_model_path = self._get_experiment_results_path(self.automl_context.id)
             result_metadata["job_details"][self.automl_context.id] = {
                 "detailed_status": {
-                    "message": f"Checkpoint file doesn't exist in best model folder /results/{self.automl_context.id}",
+                    "message": f"Checkpoint file doesn't exist in best model folder {best_model_path}",
                     "status": "FAILURE"
                 }
             }
@@ -297,15 +503,95 @@ class Controller:
                 result_metadata["job_details"][self.automl_context.id] = {
                     "detailed_status": {
                         "message": (
-                            f"AutoML run is successful with best checkpoints under /results/{self.automl_context.id}"
+                            f"AutoML run is successful with best checkpoints under {best_model_path}"
                         ),
                         "status": "SUCCESS"
                     }
                 }
+            elif self.best_rec_id >= 0:
+                # Fallback: find_best_model failed to move (or match) but write_results
+                # identified the best successful experiment. Verify checkpoints exist and
+                # persist the mapping so downstream export/inference can resolve the path.
+                best_rec = next(
+                    (r for r in self.recommendations if r.id == self.best_rec_id),
+                    None
+                )
+                has_checkpoints = False
+                if best_rec is not None:
+                    expt_folder = self._get_experiment_results_path(best_rec.job_id)
+                    (find_trained_tlt, find_trained_hdf5, find_trained_pth, _,
+                     find_trained_safetensors) = self.get_checkpoint_paths_matching_epoch_number(
+                        expt_folder, self.best_rec_id
+                    )
+                    has_checkpoints = bool(
+                        find_trained_tlt or find_trained_hdf5 or find_trained_pth or find_trained_safetensors
+                    )
+                if has_checkpoints:
+                    save_automl_best_rec_info(
+                        self.automl_context.id, best_rec.id, best_rec.job_id,
+                        best_model_results_job_id=best_rec.job_id
+                    )
+                    best_specs = get_job_specs(
+                        best_rec.job_id, automl=True,
+                        automl_experiment_id=str(best_rec.id)
+                    )
+                    save_job_specs(
+                        self.automl_context.id, specs=best_specs,
+                        automl=True, automl_experiment_id="-1"
+                    )
+                    handler_metadata = get_handler_metadata(
+                        self.automl_context.handler_id, "experiments"
+                    )
+                    best_epoch = self.best_epoch_number.get(self.best_rec_id, 0)
+                    handler_metadata["checkpoint_epoch_number"][
+                        f"best_model_{self.automl_context.id}"
+                    ] = best_epoch
+                    handler_metadata["checkpoint_epoch_number"][
+                        f"latest_model_{self.automl_context.id}"
+                    ] = best_epoch
+                    write_handler_metadata(
+                        self.automl_context.handler_id, handler_metadata, "experiments"
+                    )
+                    logger.info(
+                        "Fallback: saved best_rec_info for experiment %s (job %s) "
+                        "with checkpoint_epoch=%s",
+                        best_rec.id, best_rec.job_id, best_epoch
+                    )
+                    status = "Done"
+                    result_metadata["job_details"][self.automl_context.id] = {
+                        "detailed_status": {
+                            "message": (
+                                "AutoML run completed; best model checkpoints remain in experiment "
+                                "folder (copy to brain folder failed). Export/inference will use them."
+                            ),
+                            "status": "SUCCESS"
+                        }
+                    }
+                else:
+                    no_ckpt_path = expt_folder if best_rec is not None else best_model_path
+                    result_metadata["job_details"][self.automl_context.id] = {
+                        "detailed_status": {
+                            "message": (
+                                f"No valid checkpoint files in best experiment folder {no_ckpt_path}; "
+                                "cannot use fallback."
+                            ),
+                            "status": "FAILURE"
+                        }
+                    }
 
             write_job_metadata(self.automl_context.id, result_metadata)
             update_job_status(self.automl_context.handler_id, self.automl_context.id, status=status, kind="experiments")
             self.cancel_recommendation_jobs()
+
+            # Final WandB table update
+            if self.wandb_initialized:
+                self._update_wandb_table()
+                try:
+                    import wandb
+                    wandb.finish()
+                    logger.info("Closed WandB run for AutoML controller")
+                except Exception as e:
+                    logger.warning("Failed to close WandB run: %s", str(e))
 
             # Clean up health beat on completion
             delete_health_beat(self.automl_context.id)
@@ -331,6 +617,14 @@ class Controller:
                 kind="experiments"
             )
 
+            # Clean up WandB on error
+            if self.wandb_initialized:
+                try:
+                    import wandb
+                    wandb.finish()
+                except Exception as e:
+                    logger.warning("Failed to close WandB run: %s", str(e))
+
             # Clean up health beat on error
             delete_health_beat(self.automl_context.id)
 
@@ -343,6 +637,12 @@ class Controller:
             rec.update_result(rec_dict["result"])
             rec.update_status(rec_dict["status"])
             rec.assign_job_id(rec_dict["job_id"])
+            # Restore PBT resume_from_job_id if present
+            if "resume_from_job_id" in rec_dict:
+                rec.resume_from_job_id = rec_dict["resume_from_job_id"]
+            # Restore early_stop_epoch if present (for PBT/Hyperband metric trimming)
+            if "early_stop_epoch" in rec_dict:
+                rec.early_stop_epoch = rec_dict["early_stop_epoch"]
             self.recommendations.append(rec)
 
     def save_state(self):
@@ -375,6 +675,19 @@ class Controller:
                     )
                     return
 
+            # Preserve backend_details from existing records (added by SLURM handler)
+            # The Recommendation class doesn't have backend_details, so we need to merge it
+            existing_by_id = {rec.get("id"): rec for rec in existing_recs}
+            for rec in recs_dict:
+                rec_id = rec.get("id")
+                if rec_id in existing_by_id:
+                    existing_rec = existing_by_id[rec_id]
+                    if "backend_details" in existing_rec and "backend_details" not in rec:
+                        rec["backend_details"] = existing_rec["backend_details"]
+                        logger.debug(
+                            f"[CONTROLLER-SAVE-STATE] Preserved backend_details for rec {rec_id}"
+                        )
+
         save_automl_controller_info(self.automl_context.id, recs_dict)
         logger.debug(
             f"[CONTROLLER-SAVE-STATE] Saved state to MongoDB: automl_job_id={self.automl_context.id}, "
@@ -387,11 +700,12 @@ class Controller:
         network,
         brain,
         automl_context,
-        max_recommendations,
+        automl_algorithm_settings,
         delete_intermediate_ckpt,
         metric,
         automl_algorithm,
-        decrypted_workspace_metadata
+        decrypted_workspace_metadata,
+        parameter_names=None
     ):
         """Loads a Controller object from pre-existing root"""
         logger.debug(
@@ -403,11 +717,12 @@ class Controller:
             network,
             brain,
             automl_context,
-            max_recommendations,
+            automl_algorithm_settings,
             delete_intermediate_ckpt,
             metric,
             automl_algorithm,
-            decrypted_workspace_metadata
+            decrypted_workspace_metadata,
+            parameter_names
         )
         ctrl.recommendations = []
         # Restore the recommendations
@@ -458,6 +773,11 @@ class Controller:
         # if ctrl.recommendations[temp_rec].status != JobStates.canceled:
         #     ctrl.recommendations[temp_rec].update_status(JobStates.success)
         ctrl.save_state()
+        if ctrl.recommendations[temp_rec].status == JobStates.canceled:
+            logger.info("Resuming stopped automl sub-experiment %s", temp_rec)
+            if ctrl.automl_algorithm in ("hyperband", "bohb", "asha", "dehb", "hyperband_es", "hes"):
+                ctrl.brain.track_id = temp_rec
+            ctrl.on_new_automl_job(ctrl.recommendations[temp_rec])
 
         if temp_rec is not None and temp_rec < len(ctrl.recommendations):
             rec_status = ctrl.recommendations[temp_rec].status
@@ -516,7 +836,8 @@ class Controller:
             # Report health beat on each iteration
             report_health_beat(
                 self.automl_context.id,
-                f"AutoML loop iteration (completed: {self.completed_recommendations}/{self.max_recommendations})"
+                f"AutoML loop iteration (completed: {self.completed_recommendations}/"
+                f"{self.automl_algorithm_settings.automl_max_recommendations})"
             )
 
             metadata = get_handler_job_metadata(self.automl_context.id)
@@ -526,22 +847,47 @@ class Controller:
                 return
             if automl_status:
                 self.completed_recommendations = len(automl_status)
-                if (
-                    self.completed_recommendations == self.max_recommendations and
-                    automl_status[self.max_recommendations - 1]['status'] in ('success', 'failure') and
-                    self.automl_algorithm in ("bayesian", "b")
-                ) or (
-                    self.automl_algorithm in ("hyperband", "h") and self.brain.done()
-                ):
+                logger.info(
+                    f"Controller loop: completed_recommendations={self.completed_recommendations}, "
+                    f"max_recommendations={self.automl_algorithm_settings.automl_max_recommendations}"
+                )
+
+                # Sequential algorithms: check max_recommendations
+                sequential_algos = ("bayesian", "b", "bfbo")
+                # Parallel algorithms with done() method
+                parallel_algos = ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes", "pbt")
+
+                # Check sequential condition
+                max_rec_idx = self.automl_algorithm_settings.automl_max_recommendations - 1
+                sequential_done = (
+                    self.completed_recommendations == self.automl_algorithm_settings.automl_max_recommendations and
+                    automl_status[max_rec_idx]['status'] in ('success', 'failure') and
+                    self.automl_algorithm in sequential_algos
+                )
+
+                # Check parallel condition
+                if self.automl_algorithm in parallel_algos:
+                    brain_done = self.brain.done()
+                    logger.info(
+                        f"Controller: checking termination for parallel algo '{self.automl_algorithm}': "
+                        f"brain.done()={brain_done}"
+                    )
+                    parallel_done = brain_done
+                else:
+                    parallel_done = False
+
+                logger.info(f"Controller: sequential_done={sequential_done}, parallel_done={parallel_done}")
+
+                if sequential_done or parallel_done:
                     # Find best model based on mAP
-                    logger.info("Finding best model")
+                    logger.info("Finding best model - TERMINATION TRIGGERED")
                     self.best_rec_id = self.find_best_model()
                     logger.info("best_model_copied result %s", self.best_model_copied)
 
                     if self.best_model_copied:
                         # Delete final extra checkpoints after finish training
                         for rec in self.recommendations:
-                            expt_root = os.path.join("/results", rec.job_id)
+                            expt_root = self._get_experiment_results_path(rec.job_id)
                             self.get_best_checkpoint_path(expt_root, rec)
                             if self.delete_intermediate_ckpt:
                                 self.delete_not_best_model_checkpoints(expt_root, rec, True)
@@ -572,22 +918,68 @@ class Controller:
 
         if a new job is requested, add it to self.recommendations and execute it (add it to workflow)
         if a resume is requested, add the relevant recommendation to the workflow
+        Supports parallel execution for algorithms like ASHA and PBT
         """
         report_health_beat(self.automl_context.id, "Running experiments")
 
-        if (self.automl_algorithm in ("bayesian", "b") and
-                len(self.recommendations) == self.max_recommendations):
+        # Sequential algorithms (Bayesian, BFBO) are limited by max_recommendations
+        sequential_algos = ("bayesian", "b", "bfbo")
+        max_recs = self.automl_algorithm_settings.automl_max_recommendations
+        if self.automl_algorithm in sequential_algos and len(self.recommendations) == max_recs:
             return
+
+        # Check current running jobs for capacity management
+        running_jobs = sum(
+            1 for rec in self.recommendations
+            if rec.status in [JobStates.pending, JobStates.started, JobStates.running]
+        )
+
+        # Get max concurrent limit based on algorithm
+        max_concurrent = getattr(self.brain, 'max_concurrent', None)
+        if max_concurrent is None:
+            max_concurrent = getattr(self.brain, 'population_size', 1)
+
+        # If we're at capacity, don't request more recommendations
+        if running_jobs >= max_concurrent:
+            logger.info(
+                f"Controller: at capacity (running: {running_jobs}/{max_concurrent}), "
+                f"not requesting new recommendations"
+            )
+            return
+
+        logger.info(
+            f"Controller: calling brain.generate_recommendations with history of "
+            f"{len(self.recommendations)} experiments"
+        )
+        for i, rec in enumerate(self.recommendations):
+            logger.info(
+                f"  recommendations[{i}]: id={rec.id}, job_id={rec.job_id}, "
+                f"status={rec.status}, result={rec.result}"
+            )
+
         history = deepcopy(self.recommendations)
         recommended_specs = self.brain.generate_recommendations(history)
-        assert len(recommended_specs) in [0, 1], "At most one recommendation"
+
+        # Support both single and multiple recommendations
+        if not isinstance(recommended_specs, list):
+            recommended_specs = [recommended_specs] if recommended_specs else []
+
+        # Limit to available capacity
+        available_slots = max_concurrent - running_jobs
+        recommended_specs = recommended_specs[:available_slots]
+
+        logger.info(
+            f"Received {len(recommended_specs)} recommendation(s) for {self.network} "
+            f"(running: {running_jobs}/{max_concurrent})"
+        )
+
         for spec in recommended_specs:
             logger.info("Recommendation received for %s", self.network)
             if type(spec) is dict:
                 # Save brain state and update current recommendation
                 self.hyperband_cancel_condition_seen = False
                 self.brain.save_state()
-                if self.automl_algorithm in ("hyperband", "h"):
+                if self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes", "pbt"):
                     self.automl_context.early_stop_epoch = self.brain.epoch_number
                 # update temp_rec
                 new_id = len(self.recommendations)
@@ -598,6 +990,16 @@ class Controller:
                 rec = Recommendation(new_id, spec, self.metric_key)
                 job_id = str(uuid.uuid4())  # Assign job_id for this recommendation
                 rec.assign_job_id(job_id)
+                logger.debug(f"[AUTOML-CONTROLLER] Assigned job_id: {job_id} to recommendation: {rec.id}")
+
+                # Store early_stop_epoch on the recommendation for later metric trimming
+                if self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes", "pbt"):
+                    rec.early_stop_epoch = self.brain.epoch_number
+                    logger.debug(
+                        f"[AUTOML-CONTROLLER] Set early_stop_epoch for new recommendation: "
+                        f"rec_id={rec.id}, early_stop_epoch={self.brain.epoch_number}"
+                    )
+
                 self.recommendations.append(rec)
                 self.save_state()
 
@@ -609,7 +1011,7 @@ class Controller:
             elif type(spec) is ResumeRecommendation:
                 logger.debug(
                     f"[AUTOML-CONTROLLER-RESUME] Resume recommendation received: "
-                    f"automl_job_id={self.automl_context.id}, rec_id={spec.id}"
+                    f"automl_job_id={self.automl_context.id}, rec_id={spec.id}, job_id={spec.job_id}"
                 )
                 self.hyperband_cancel_condition_seen = False
                 rec_id = spec.id
@@ -625,9 +1027,10 @@ class Controller:
                     f"[AUTOML-CONTROLLER-RESUME] Saved brain state: "
                     f"automl_job_id={self.automl_context.id}"
                 )
-
-                if self.automl_algorithm in ("hyperband", "h"):
+                if self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes", "pbt"):
                     self.automl_context.early_stop_epoch = self.brain.epoch_number
+                    # Store early_stop_epoch on the recommendation for later metric trimming
+                    self.recommendations[rec_id].early_stop_epoch = self.brain.epoch_number
                     logger.debug(
                         f"[AUTOML-CONTROLLER-RESUME] Set early_stop_epoch for Hyperband: "
                         f"automl_job_id={self.automl_context.id}, rec_id={rec_id}, "
@@ -645,11 +1048,28 @@ class Controller:
                     f"Recommendation ID mismatch: expected {rec_id} but got "
                     f"{self.recommendations[rec_id].id}"
                 )
+
+                # Store resume_from_job_id directly from ResumeRecommendation (PBT)
+                self.recommendations[rec_id].resume_from_job_id = spec.resume_from_job_id
+                if spec.resume_from_job_id:
+                    logger.info(
+                        f"[AUTOML-CONTROLLER-RESUME] PBT: Recommendation {rec_id} will resume "
+                        f"from checkpoint of job {spec.resume_from_job_id}"
+                    )
+
                 self.recommendations[rec_id].specs = spec.specs.copy()
                 self.recommendations[rec_id].update_status(JobStates.pending)
                 logger.debug(
                     f"[AUTOML-CONTROLLER-RESUME] Updated recommendation specs and status to pending: "
                     f"automl_job_id={self.automl_context.id}, rec_id={rec_id}"
+                )
+
+                # Save updated specs to MongoDB
+                save_job_specs(
+                    self.automl_context.id,
+                    self.recommendations[rec_id].specs,
+                    automl=True,
+                    automl_experiment_id=str(rec_id)
                 )
 
                 # Remove previous files (except checkpoints) from experiment folder.
@@ -693,9 +1113,10 @@ class Controller:
                     )
 
                 expt_name = "experiment_" + str(rec_id)
+                cloud_expt_path = self._get_experiment_results_path(self.recommendations[rec_id].job_id)
                 remove_files(
                     os.path.join(self.root, expt_name),
-                    os.path.join("/results", self.recommendations[rec_id].job_id),
+                    cloud_expt_path,
                     rec_id
                 )
                 logger.debug(
@@ -741,6 +1162,8 @@ class Controller:
             )
 
             old_status = rec.status
+            logger.info(f"old_status: {old_status}")
+            logger.info(f"rec: {rec.status}")
 
             job_name = rec.job_id
             if not job_name:
@@ -748,7 +1171,7 @@ class Controller:
 
             expt_name = "experiment_" + str(rec.id)
             local_expt_root = os.path.join(self.root, expt_name)
-            cloud_expt_root = os.path.join("/results", rec.job_id)
+            cloud_expt_root = self._get_experiment_results_path(rec.job_id)
 
             # If rec already changed to Success, no need to check
             if rec.status in [JobStates.success, JobStates.failure]:
@@ -771,21 +1194,55 @@ class Controller:
                     # Remove the checkpoints from not best model
                     brain_dict = get_automl_brain_info(self.automl_context.id)
                     if brain_dict:
-                        if (
-                            self.automl_algorithm in ("bayesian", "b") or
-                            self.old_bracket != brain_dict.get("bracket", "0")
-                        ):
+                        # Checkpoint deletion strategy by algorithm:
+                        # - Bayesian/BFBO: Delete immediately (experiments are independent)
+                        # - Hyperband/BOHB/DEHB: Delete when bracket changes AND all configs complete
+                        #   (prevents deletion before resume in next rung)
+                        # - PBT: NO intermediate deletion (ID reuse means checkpoints naturally overwrite)
+                        can_delete_checkpoints = False
+
+                        if self.automl_algorithm in ("bayesian", "b", "bfbo"):
+                            # Non-resuming algorithms: safe to delete as soon as we know it's not best
+                            can_delete_checkpoints = True
+                            logger.debug(
+                                f"AutoML ({self.automl_algorithm}): Non-resuming algorithm, "
+                                f"safe to delete non-best checkpoints"
+                            )
+                        elif self.automl_algorithm in ("hyperband", "h", "bohb", "dehb", "hyperband_es", "hes"):
+                            # Hyperband-based: Only delete when bracket changes AND all configs complete
+                            # This ensures configs needed for next rung's resume are preserved
+                            if self.old_bracket != brain_dict.get("bracket", "0"):
+                                all_complete = all(
+                                    r.status in [JobStates.success, JobStates.failure, JobStates.canceled]
+                                    for r in self.recommendations
+                                )
+                                if all_complete:
+                                    can_delete_checkpoints = True
+                                    logger.info(
+                                        f"AutoML ({self.automl_algorithm}): All configs complete in bracket "
+                                        f"{self.old_bracket}, safe to delete non-best checkpoints"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"AutoML ({self.automl_algorithm}): Bracket changed but not all configs "
+                                        f"complete yet, deferring checkpoint deletion to preserve resume capability"
+                                    )
+                        if can_delete_checkpoints:
                             flag = self.delete_not_best_model_checkpoints(cloud_expt_root, rec, flag)
                 continue
 
             status_parser = StatusParser(self.network, local_expt_root, self.first_epoch_number)
 
+            # Pass workspace_metadata and cloud_results_dir so StatusParser can sync SLURM status
             new_results = status_parser.update_results(
                 experiment_number=str(rec.id),
                 automl=True,
                 job_id=self.automl_context.id,
-                rec_job_id=rec.job_id
+                rec_job_id=rec.job_id,
+                workspace_metadata=self.decrypted_workspace_metadata,
+                cloud_results_dir=cloud_expt_root
             )
+            logger.info(f"new_results 0: {new_results}")
             report_health_beat(self.automl_context.id, f"Recieved updated results for experiment {rec.id}")
             self.calculate_eta(new_results, rec.job_id, rec.id)
             metadata = get_handler_job_metadata(self.automl_context.id)
@@ -804,6 +1261,7 @@ class Controller:
                 previous_result_metadata=results,
                 automl_brain=True
             )
+            logger.info(f"new_results 1: {new_results}")
             new_results = status_parser.update_results(
                 experiment_number=str(rec.id),
                 total_epochs=self.total_epochs,
@@ -813,6 +1271,7 @@ class Controller:
                 rec_job_id=rec.job_id,
                 previous_result_metadata=results
             )
+            logger.info(f"new_results 2: {new_results}")
             if status_parser.first_epoch_number != -1:
                 self.first_epoch_number = status_parser.first_epoch_number
             detailed_status_message = (
@@ -836,17 +1295,28 @@ class Controller:
                 status = JobStates.success
             elif new_results[rec.job_id].get("detailed_status"):
                 status = new_results[rec.job_id]["detailed_status"].get("status", JobStates.pending).lower()
+                logger.info(f"status updated from new_results: {status}")
             if not status:
                 status = JobStates.pending
             if status in [JobStates.success, JobStates.failure]:
                 logger.info("Post processing of job %s under automl algorithm %s", rec.job_id, self.automl_algorithm)
                 brain_epoch_number = self.brain_epoch_number
-                if self.automl_algorithm in ("bayesian", "b"):
+                if self.automl_algorithm in ("bayesian", "b", "bfbo"):
                     self.brain.num_epochs_per_experiment = get_total_epochs(
                         self.automl_context,
                         os.path.dirname(self.root),
                     )
                     brain_epoch_number = self.brain.num_epochs_per_experiment
+                elif self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes", "pbt"):
+                    # For resuming algorithms, use the early_stop_epoch that was set when this job launched
+                    # (not the current brain.epoch_number which points to the NEXT generation/rung)
+                    if rec.early_stop_epoch is not None:
+                        brain_epoch_number = rec.early_stop_epoch
+                        logger.info(
+                            f"AutoML ({self.automl_algorithm}): Using early_stop_epoch={rec.early_stop_epoch} "
+                            f"for experiment {rec.id} (job {rec.job_id}), not current brain.epoch_number="
+                            f"{self.brain_epoch_number}"
+                        )
                 report_health_beat(
                     self.automl_context.id,
                     f"Reading final metrics for experiment {rec.id}"
@@ -894,8 +1364,6 @@ class Controller:
                 self.save_state()
                 if status == JobStates.success:
                     container_log_file = f"{self.root}/{rec.job_id}/log.txt"
-                    if os.getenv("BACKEND") == "NVCF":
-                        overwrite_job_logs_from_bcp(container_log_file, rec.job_id)
                     if os.path.exists(container_log_file):
                         with open(container_log_file, "a", encoding='utf-8') as f:
                             f.write("\nEOF\n")
@@ -904,7 +1372,8 @@ class Controller:
                 # Retain the latest checkpoint and remove others in experiment folder
                 self.delete_checkpoint_files(cloud_expt_root, rec)
 
-        if self.automl_algorithm in ("hyperband", "h"):
+        if self.automl_algorithm in ("hyperband", "h", "bohb", "dehb", "hyperband_es", "hes"):
+            brain_dict = get_automl_brain_info(self.automl_context.id)
             if brain_dict:
                 self.old_bracket = brain_dict.get("bracket", "0")
 
@@ -915,9 +1384,16 @@ class Controller:
         global time_per_epoch  # pylint: disable=global-statement
         global time_per_epoch_counter  # pylint: disable=global-statement
         self.total_epochs = 0
-        if self.automl_algorithm in ("bayesian", "b"):
-            self.total_epochs = self.max_recommendations * self.brain.num_epochs_per_experiment
-        elif self.automl_algorithm in ("hyperband", "h"):
+        if self.automl_algorithm in ("bayesian", "b", "bfbo"):
+            max_recs = self.automl_algorithm_settings.automl_max_recommendations
+            self.total_epochs = max_recs * self.brain.num_epochs_per_experiment
+        elif self.automl_algorithm == "pbt":
+            # PBT: population_size * max_generations * eval_interval
+            population_size = getattr(self.brain, 'population_size', 10)
+            max_generations = getattr(self.brain, 'max_generations', 20)
+            eval_interval = getattr(self.brain, 'eval_interval', 10)
+            self.total_epochs = population_size * max_generations * eval_interval
+        elif self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes"):
             for key in self.brain.ni:
                 experiments = self.brain.ni[key]
                 epochs = self.brain.ri[key]
@@ -929,7 +1405,7 @@ class Controller:
             self.total_epochs *= self.brain.epoch_multiplier
 
         for result_key in new_results.get(rec_job_id, {}).keys():
-            if result_key in ("epoch", "cur_iter") and new_results[rec_job_id].get(result_key):
+            if result_key in ("epoch", "cur_iter") and new_results[rec_job_id].get(result_key) is not None:
                 current_epoch = new_results[rec_job_id].get(result_key)
                 if result_key == "cur_iter":
                     time_per_key = "time_per_iter"
@@ -948,7 +1424,7 @@ class Controller:
                 time_per_epoch_counter += 1
                 self.average_time_per_epoch = time_per_epoch / time_per_epoch_counter
 
-                if self.automl_algorithm in ("bayesian", "b"):
+                if self.automl_algorithm in ("bayesian", "b", "bfbo"):
                     current_experiment_epoch = get_total_epochs(
                         rec_job_id,
                         os.path.dirname(self.root),
@@ -958,39 +1434,66 @@ class Controller:
                     remaining_epochs = current_experiment_epoch - current_epoch
                     self.remaining_epochs_in_experiment = (
                         remaining_epochs +
-                        (self.max_recommendations - self.completed_recommendations) *
+                        (self.automl_algorithm_settings.automl_max_recommendations - self.completed_recommendations) *
                         (self.brain.num_epochs_per_experiment)
                     )
                     self.eta = self.remaining_epochs_in_experiment * self.average_time_per_epoch
 
-                elif self.automl_algorithm in ("hyperband", "h"):
+                elif self.automl_algorithm == "pbt":
+                    # PBT: Estimate based on population progress
+                    current_generation = getattr(self.brain, 'generation', 0)
+                    max_generations = getattr(self.brain, 'max_generations', 20)
+                    eval_interval = getattr(self.brain, 'eval_interval', 10)
+                    population_size = getattr(self.brain, 'population_size', 10)
+
+                    remaining_generations = max(0, max_generations - current_generation)
+                    self.remaining_epochs_in_experiment = (
+                        remaining_generations * eval_interval * population_size +
+                        (eval_interval - current_epoch % eval_interval if current_epoch % eval_interval != 0 else 0)
+                    )
+                    self.eta = self.remaining_epochs_in_experiment * self.average_time_per_epoch
+
+                elif self.automl_algorithm in ("hyperband", "h", "bohb", "asha", "dehb", "hyperband_es", "hes"):
                     # Calculate completed epochs for completed sh sessions
                     completed_epochs = 0
-                    for bracket in range(0, int(self.brain.bracket) + 1):
-                        local_sh_iter = len(self.brain.ni[str(bracket)])
+                    # Only iterate through brackets that actually exist in ni
+                    for bracket_str in sorted(self.brain.ni.keys(), key=int):
+                        bracket = int(bracket_str)
+                        # Skip future brackets beyond current
+                        if bracket > int(self.brain.bracket):
+                            continue
+                        local_sh_iter = len(self.brain.ni[bracket_str])
                         if bracket == int(self.brain.bracket):
                             local_sh_iter = self.brain.sh_iter
                         for sh in range(0, local_sh_iter):
                             if (sh == 0):
-                                completed_epochs += self.brain.ni[str(bracket)][sh] * self.brain.ri[str(bracket)][sh]
+                                completed_epochs += (
+                                    self.brain.ni[bracket_str][sh] *
+                                    self.brain.ri[bracket_str][sh]
+                                )
                             else:
                                 completed_epochs += (
-                                    self.brain.ni[str(bracket)][sh] *
-                                    (self.brain.ri[str(bracket)][sh] - self.brain.ri[str(bracket)][sh - 1])
+                                    self.brain.ni[bracket_str][sh] *
+                                    (self.brain.ri[bracket_str][sh] -
+                                     self.brain.ri[bracket_str][sh - 1])
                                 )
 
                     # Calculate completed epochs for current sh session
-                    current_sh_allowed_epochs = (
-                        self.brain.ri[self.brain.bracket][self.brain.sh_iter] *
-                        self.brain.epoch_multiplier
-                    )
-                    if self.brain.sh_iter > 0:
-                        current_sh_allowed_epochs = (
-                            (self.brain.ri[self.brain.bracket][self.brain.sh_iter] -
-                             self.brain.ri[self.brain.bracket][self.brain.sh_iter - 1]) *
-                            self.brain.epoch_multiplier
-                        )
-                    completed_epochs += self.brain.expt_iter * current_sh_allowed_epochs
+                    current_sh_allowed_epochs = 0
+                    # Only calculate if current bracket exists in ri
+                    if self.brain.bracket in self.brain.ri:
+                        if self.brain.sh_iter < len(self.brain.ri[self.brain.bracket]):
+                            current_sh_allowed_epochs = (
+                                self.brain.ri[self.brain.bracket][self.brain.sh_iter] *
+                                self.brain.epoch_multiplier
+                            )
+                            if self.brain.sh_iter > 0:
+                                current_sh_allowed_epochs = (
+                                    (self.brain.ri[self.brain.bracket][self.brain.sh_iter] -
+                                     self.brain.ri[self.brain.bracket][self.brain.sh_iter - 1]) *
+                                    self.brain.epoch_multiplier
+                                )
+                            completed_epochs += self.brain.expt_iter * current_sh_allowed_epochs
 
                     self.remaining_epochs_in_experiment = max(0, self.total_epochs - completed_epochs)
                     self.eta = self.remaining_epochs_in_experiment * self.average_time_per_epoch
@@ -1053,13 +1556,22 @@ class Controller:
 
         update_automl_stats(self.automl_context.id, result_dict)
 
+        # Update WandB table with current state
+        self._update_wandb_table()
+
     def find_best_model(self):
         """Find best model based on metric value chosen and move those artifacts to best_model folder"""
         report_health_beat(self.automl_context.id, "Finding best model")
 
         logger.info("Finding best recommendation config")
         try:
-            best_mAP = self.min_max(self.recommendations, key=lambda rec: rec.result).result
+            successful_recs = [
+                r for r in self.recommendations if r.status == JobStates.success
+            ]
+            if not successful_recs:
+                logger.warning("No successful experiments found for best model selection")
+                return -1
+            best_mAP = self.min_max(successful_recs, key=lambda rec: rec.result).result
         except Exception as e:
             logger.error("Exception thrown in find_best_model is %s", str(e))
             best_mAP = 0.0
@@ -1073,7 +1585,7 @@ class Controller:
             job_name = rec.job_id
             if not job_name:
                 continue
-            expt_folder = os.path.join("/results", rec.job_id)
+            expt_folder = self._get_experiment_results_path(rec.job_id)
             checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, expt_folder)
 
             # Use network config for filtering if available
@@ -1091,7 +1603,7 @@ class Controller:
             logger.info("Checkpoints in find best_model %s", checkpoint_files)
 
             if checkpoint_files and (rec.status == JobStates.success and rec.result == best_mAP):
-                cloud_best_model_folder = f"/results/{self.automl_context.id}"
+                cloud_best_model_folder = self._get_experiment_results_path(self.automl_context.id)
                 logger.info("cloud_best_model_folder %s chosen for rec %s", cloud_best_model_folder, rec.id)
 
                 # Clean up invalid checkpoint folders before moving
@@ -1101,36 +1613,58 @@ class Controller:
                     self.automl_context.id,
                     f"Moving best model folder for experiment {rec.id} to {cloud_best_model_folder}"
                 )
-                # Move folder but exclude log files - experiment logs should stay in experiment folder
-                # The brain job has its own logs, experiment logs should not be moved to brain folder
+                best_specs = get_job_specs(job_name, automl=True, automl_experiment_id=str(rec.id))
                 exclude_log_files = ['microservices_log.txt', 'log.txt']
                 logger.info(f"Moving best experiment folder excluding log files: {exclude_log_files}")
-                self.cs_instance.move_folder(
-                    expt_folder[1:],
-                    cloud_best_model_folder,
-                    job_id=self.automl_context.id,
-                    exclude_files=exclude_log_files
-                )
-                report_health_beat(
-                    self.automl_context.id,
-                    f"Completed moving best model folder for experiment {rec.id}"
-                )
-                best_specs = get_job_specs(job_name, automl=True, automl_experiment_id=str(rec.id))
-                save_automl_best_rec_info(self.automl_context.id, rec.id, rec.job_id)
-                save_job_specs(self.automl_context.id, specs=best_specs, automl=True, automl_experiment_id="-1")
-                (find_trained_tlt,
-                 find_trained_hdf5,
-                 find_trained_pth,
-                 _,
-                 find_trained_safetensors) = self.get_checkpoint_paths_matching_epoch_number(
-                    cloud_best_model_folder,
-                    rec.id
-                )
-                if find_trained_tlt or find_trained_hdf5 or find_trained_pth or find_trained_safetensors:
-                    self.best_model_copied = True
-                    return rec.id
-                logger.info("Best model checkpoints couldn't be moved")
-                return -1
+                try:
+                    self.cs_instance.move_folder(
+                        expt_folder[1:],
+                        cloud_best_model_folder,
+                        job_id=self.automl_context.id,
+                        exclude_files=exclude_log_files
+                    )
+                    report_health_beat(
+                        self.automl_context.id,
+                        f"Completed moving best model folder for experiment {rec.id}"
+                    )
+                    save_automl_best_rec_info(self.automl_context.id, rec.id, rec.job_id)
+                    save_job_specs(self.automl_context.id, specs=best_specs, automl=True, automl_experiment_id="-1")
+                    (find_trained_tlt,
+                     find_trained_hdf5,
+                     find_trained_pth,
+                     _,
+                     find_trained_safetensors) = self.get_checkpoint_paths_matching_epoch_number(
+                        cloud_best_model_folder,
+                        rec.id
+                    )
+                    if find_trained_tlt or find_trained_hdf5 or find_trained_pth or find_trained_safetensors:
+                        self.best_model_copied = True
+                        return rec.id
+                    logger.info("Best model checkpoints couldn't be moved")
+                    return -1
+                except Exception as move_err:
+                    logger.warning(
+                        "Move of best experiment folder to brain folder failed (%s); "
+                        "storing best_model_results_job_id=experiment so downstream use experiment folder: %s",
+                        rec.job_id, move_err
+                    )
+                    save_automl_best_rec_info(
+                        self.automl_context.id, rec.id, rec.job_id,
+                        best_model_results_job_id=rec.job_id
+                    )
+                    save_job_specs(self.automl_context.id, specs=best_specs, automl=True, automl_experiment_id="-1")
+                    (find_trained_tlt,
+                     find_trained_hdf5,
+                     find_trained_pth,
+                     _,
+                     find_trained_safetensors) = self.get_checkpoint_paths_matching_epoch_number(
+                        expt_folder, rec.id
+                    )
+                    if find_trained_tlt or find_trained_hdf5 or find_trained_pth or find_trained_safetensors:
+                        self.best_model_copied = False
+                        return rec.id
+                    logger.warning("Best model checkpoints not found in experiment folder after move failure")
+                    return -1
         return -1
 
     def get_checkpoint_paths_matching_epoch_number(self, path, rec_id):
@@ -1326,6 +1860,7 @@ class Controller:
             best_mAP = 0.0
 
         logger.info("delete_not_best_model_checkpoints function arguments %s %s %s", path, rec, flag)
+        logger.debug("rec.result %s best_mAP %s", rec.result, best_mAP)
         if rec.result != best_mAP or bool(flag):
             trained_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
             regex_pattern = r'.*(?:lightning_logs|events).*$|.*\.(tlt|hdf5|pth|ckzip|safetensors|resume)$'

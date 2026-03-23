@@ -22,6 +22,7 @@ from nvidia_tao_core.config.utils.types import (
 from nvidia_tao_core.config.common.common_config import (
     CommonExperimentConfig
 )
+from nvidia_tao_core.config.common.quantization import ModelQuantizationConfig
 
 from nvidia_tao_core.config.oneformer.dataset import OneFormerDatasetConfig
 from nvidia_tao_core.config.oneformer.model import OneFormerModelConfig
@@ -61,4 +62,8 @@ class ExperimentConfig(CommonExperimentConfig):
     gen_trt_engine: OneFormerGenTrtEngineExpConfig = DATACLASS_FIELD(
         OneFormerGenTrtEngineExpConfig(),
         description="Configurable parameters to construct the deployer for a OneFormer checkpoint.",
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters to run model quantization for a OneFormer experiment.",
     )

@@ -28,6 +28,7 @@ from nvidia_tao_core.config.common.common_config import (
     CommonExperimentConfig,
     EvaluateConfig,
     InferenceConfig)
+from nvidia_tao_core.config.common.quantization import ModelQuantizationConfig
 
 from nvidia_tao_core.config.mask2former.dataset import Mask2FormerDatasetConfig
 from nvidia_tao_core.config.mask2former.model import Mask2FormerModelConfig
@@ -149,6 +150,10 @@ class ExperimentConfig(CommonExperimentConfig):
     gen_trt_engine: Mask2FormerGenTrtEngineExpConfig = DATACLASS_FIELD(
         Mask2FormerGenTrtEngineExpConfig(),
         description="Configurable parameters to construct the TensorRT engine builder for a Mask2former experiment.",
+    )
+    quantize: ModelQuantizationConfig = DATACLASS_FIELD(
+        ModelQuantizationConfig(),
+        description="Configurable parameters to run model quantization for a Mask2Former experiment.",
     )
 
     def __post_init__(self):

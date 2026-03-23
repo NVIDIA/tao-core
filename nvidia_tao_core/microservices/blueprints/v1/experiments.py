@@ -52,7 +52,8 @@ from .schemas import (
     LstInt,
     PublishModel,
     BulkOpsRsp,
-    MessageOnly
+    MessageOnly,
+    JobEventsRsp
 )
 
 logger = logging.getLogger(__name__)
@@ -114,13 +115,6 @@ def experiment_list(org_name):
           type: string
           maxLength: 5000
           pattern: '.*'
-      - name: type
-        in: query
-        description: Optional type filter
-        required: false
-        schema:
-          type: string
-          enum: ["vision", "medical"]
       - name: network_arch
         in: query
         description: Optional network architecture filter
@@ -294,13 +288,6 @@ def base_experiment_list(org_name):
           type: string
           maxLength: 5000
           pattern: '.*'
-      - name: type
-        in: query
-        description: Optional type filter
-        required: false
-        schema:
-          type: string
-          enum: ["vision", "medical"]
       - name: network_arch
         in: query
         description: Optional network architecture filter
@@ -745,10 +732,7 @@ def experiment_create(org_name):
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
     if response.code != 200:
-        mdl_nw = request_dict.get("network_arch", None)
-        is_medical = isinstance(mdl_nw, str) and mdl_nw.startswith("monai_")
-        log_type = DataMonitorLogTypeEnum.medical_experiment if is_medical else DataMonitorLogTypeEnum.tao_experiment
-        log_api_error(user_id, org_name, schema_dict, log_type, action="creation")
+        log_api_error(user_id, org_name, schema_dict, DataMonitorLogTypeEnum.tao_experiment, action="creation")
 
     return make_response(jsonify(schema_dict), response.code)
 
@@ -1275,7 +1259,7 @@ def experiment_job_run(org_name, experiment_id):
     name = request_schema_data.get('name', '')
     description = request_schema_data.get('description', '')
     num_gpu = request_schema_data.get('num_gpu', -1)
-    platform_id = request_schema_data.get('platform_id', None)
+    backend_details = request_schema_data.get('backend_details', None)
     retain_checkpoints_for_resume = request_schema_data.get('retain_checkpoints_for_resume', None)
     early_stop_epoch = request_schema_data.get('early_stop_epoch', None)
     timeout_minutes = request_schema_data.get('timeout_minutes', 60)
@@ -1289,8 +1273,9 @@ def experiment_job_run(org_name, experiment_id):
     response = JobHandler.job_run(
         org_name, experiment_id, requested_job, requested_action, "experiment",
         specs=specs, name=name, description=description, num_gpu=num_gpu,
-        platform_id=platform_id, retain_checkpoints_for_resume=retain_checkpoints_for_resume,
-        early_stop_epoch=early_stop_epoch, timeout_minutes=timeout_minutes
+        retain_checkpoints_for_resume=retain_checkpoints_for_resume,
+        early_stop_epoch=early_stop_epoch, timeout_minutes=timeout_minutes,
+        backend_details=backend_details
     )
     # Get schema
     schema = None
@@ -1340,11 +1325,9 @@ def experiment_job_run(org_name, experiment_id):
     if response.code != 200:
         try:
             handler_metadata = resolve_metadata("experiment", experiment_id)
-            is_medical = handler_metadata.get("type").lower() == "medical"
             user_id = handler_metadata.get("user_id", None)
             if user_id:
-                log_type = DataMonitorLogTypeEnum.medical_job if is_medical else DataMonitorLogTypeEnum.tao_job
-                log_api_error(user_id, org_name, schema_dict, log_type, action="creation")
+                log_api_error(user_id, org_name, schema_dict, DataMonitorLogTypeEnum.tao_job, action="creation")
         except Exception as e:
             logger.error(f"Exception thrown in experiment_job_run is {str(e)}")
             log_monitor(DataMonitorLogTypeEnum.api, "Cannot parse experiment info for job.")
@@ -1762,11 +1745,9 @@ def experiment_job_retry(org_name, experiment_id, job_id):
     if response.code != 200:
         try:
             handler_metadata = resolve_metadata("experiment", experiment_id)
-            is_medical = handler_metadata.get("type").lower() == "medical"
             user_id = handler_metadata.get("user_id", None)
             if user_id:
-                log_type = DataMonitorLogTypeEnum.medical_job if is_medical else DataMonitorLogTypeEnum.tao_job
-                log_api_error(user_id, org_name, schema_dict, log_type, action="creation")
+                log_api_error(user_id, org_name, schema_dict, DataMonitorLogTypeEnum.tao_job, action="creation")
         except Exception as e:
             logger.error(f"Exception thrown in experiment_job_retry is {str(e)}")
             log_monitor(DataMonitorLogTypeEnum.api, "Cannot parse experiment info for job.")
@@ -2219,14 +2200,14 @@ def experiment_job_resume(org_name, experiment_id, job_id):
     name = request_schema_data.get('name', '')
     description = request_schema_data.get('description', '')
     num_gpu = request_schema_data.get('num_gpu', -1)
-    platform_id = request_schema_data.get('platform_id', None)
+    backend_details = request_schema_data.get('backend_details', None)
     timeout_minutes = request_schema_data.get('timeout_minutes', 60)
     if parent_job_id:
         parent_job_id = str(parent_job_id)
     specs = request_schema_data.get('specs', {})
     logger.debug(
         f"[BLUEPRINT-RESUME] Parsed request parameters: job_id={job_id}, name={name}, "
-        f"num_gpu={num_gpu}, platform_id={platform_id}, "
+        f"num_gpu={num_gpu}, backend_details={backend_details}, "
         f"timeout_minutes={timeout_minutes}, has_specs={bool(specs)}"
     )
     # Get response
@@ -2241,8 +2222,12 @@ def experiment_job_resume(org_name, experiment_id, job_id):
         name=name,
         description=description,
         num_gpu=num_gpu,
-        platform_id=platform_id,
-        timeout_minutes=timeout_minutes
+        timeout_minutes=timeout_minutes,
+        backend_details=backend_details
+    )
+    logger.debug(
+        f"[BLUEPRINT-RESUME] ExperimentHandler.resume_experiment_job completed: "
+        f"job_id={job_id}, response_code={response.code}"
     )
     logger.debug(
         f"[BLUEPRINT-RESUME] ExperimentHandler.resume_experiment_job completed: "
@@ -3537,6 +3522,111 @@ def experiment_job_log_update(org_name, experiment_id, job_id):
     schema = ErrorRsp()
     schema_dict = schema.dump(schema.load(response.data))
     return make_response(jsonify(schema_dict), response.code)
+
+
+@experiments_bp_v1.route('/orgs/<org_name>/experiments/<experiment_id>/jobs/<job_id>:events', methods=['GET'])
+def experiment_job_events(org_name, experiment_id, job_id):
+    """Get all job status events.
+
+    ---
+    get:
+      tags:
+      - EXPERIMENT
+      summary: Get all job status events
+      description: |
+        Returns all status event lines for a given job. This endpoint:
+        - Validates the experiment exists and user has access
+        - Validates the job exists
+        - Retrieves all status events from storage
+        - Returns the complete event history
+      parameters:
+      - name: org_name
+        in: path
+        description: Org Name
+        required: true
+        schema:
+          type: string
+          maxLength: 255
+          pattern: '^[a-zA-Z0-9_-]+$'
+      - name: experiment_id
+        in: path
+        description: ID of Experiment
+        required: true
+        schema:
+          type: string
+          format: uuid
+          maxLength: 36
+      - name: job_id
+        in: path
+        description: Job ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+          maxLength: 36
+      - name: automl_experiment_number
+        in: query
+        description: Optional filter to retrieve events from specific autoML experiment
+        required: false
+        schema:
+          type: string
+      responses:
+        200:
+          description: Returned Job Events
+          content:
+            application/json:
+              schema: JobEventsRsp
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/Access-Control-Allow-Origin'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+        400:
+          description: Invalid request (e.g. invalid experiment ID, job ID)
+          content:
+            application/json:
+              schema: ErrorRsp
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/Access-Control-Allow-Origin'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+        404:
+          description: Job not exist or events not found.
+          content:
+            application/json:
+              schema: ErrorRsp
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: '#/components/headers/Access-Control-Allow-Origin'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+    """
+    message = validate_uuid(experiment_id=experiment_id, job_id=job_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRsp()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    # Get response
+    response = JobHandler.get_job_events(
+        org_name,
+        experiment_id,
+        job_id,
+        "experiment",
+        request.args.get('automl_experiment_number', "0")
+    )
+    if response.code == 200:
+        schema = JobEventsRsp()
+        response_data = {
+            "job_id": job_id,
+            "events": response.data
+        }
+        return make_response(jsonify(schema.dump(schema.load(response_data))), 200)
+    # Handle errors
+    schema = ErrorRsp()
+    response = make_response(jsonify(schema.dump(schema.load(response.data))), response.code)
+    return response
 
 
 @experiments_bp_v1.route('/orgs/<org_name>/experiments/<experiment_id>/jobs/<job_id>:status_update', methods=['POST'])

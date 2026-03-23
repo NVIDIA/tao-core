@@ -23,8 +23,11 @@ from scipy.stats import norm
 from scipy.optimize import minimize
 
 from nvidia_tao_core.microservices.automl import network_utils
-from nvidia_tao_core.microservices.utils.automl_utils import JobStates, get_valid_range, clamp_value
-from nvidia_tao_core.microservices.automl.automl_algorithm_base import AutoMLAlgorithmBase
+from nvidia_tao_core.microservices.utils.automl_utils import (
+    JobStates, get_valid_range, clamp_value,
+    get_valid_options, get_option_weights, fix_input_dimension
+)
+from nvidia_tao_core.microservices.automl.automl_algorithm_base import AutoMLAlgorithmBase, is_nan_value
 from nvidia_tao_core.microservices.utils.handler_utils import get_total_epochs, get_flatten_specs
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import save_automl_brain_info, get_automl_brain_info
 
@@ -87,12 +90,97 @@ class Bayesian(AutoMLAlgorithmBase):
         if data_type == "float":
             v_min = parameter_config.get("valid_min", "")
             v_max = parameter_config.get("valid_max", "")
+
+            # If no valid range, generate values around default using suggestion
             if v_min == "" or v_max == "":
-                return float(default_value)
-            if (type(v_min) is not str and math.isnan(v_min)) or (type(v_max) is not str and math.isnan(v_max)):
-                return float(default_value)
+                if default_value is not None and default_value != "":
+                    default_val = float(default_value)
+                    # Use suggestion to vary around default
+                    if default_val > 0:
+                        v_min = default_val / 10.0
+                        v_max = default_val * 10.0
+                    elif default_val < 0:
+                        v_min = default_val * 10.0
+                        v_max = default_val / 10.0
+                    else:  # default is 0
+                        v_min = -1.0
+                        v_max = 1.0
+                    # Use suggestion to pick value in range
+                    quantized = suggestion * (v_max - v_min) + v_min
+                    logger.info(
+                        f"Generated float for {parameter_name} (no range): "
+                        f"{quantized} from suggestion {suggestion}"
+                    )
+                    return quantized
+                # No default, use suggestion in [0, 1]
+                return float(suggestion)
+
+            # Check for NaN ranges (skip if v_min/v_max are lists - handled by network-specific logic)
+            if is_nan_value(v_min) or is_nan_value(v_max):
+                # NaN ranges, use default-based range
+                if default_value is not None:
+                    default_val = float(default_value)
+                    if default_val > 0:
+                        v_min = default_val / 10.0
+                        v_max = default_val * 10.0
+                    else:
+                        v_min = 0.0
+                        v_max = 1.0
+                    quantized = suggestion * (v_max - v_min) + v_min
+                    return quantized
+                return float(suggestion)
+
+            # Handle list-based ranges (e.g., per-model-part learning rates)
+            # Generate a base value and let network-specific handler convert to list
+            if isinstance(v_min, list) or isinstance(v_max, list):
+                # Use first element of list for base range, or default if available
+                if isinstance(v_min, list) and isinstance(v_max, list):
+                    base_min = float(v_min[0]) if v_min else 0.0
+                    base_max = float(v_max[0]) if v_max else 1.0
+                elif isinstance(v_min, list):
+                    base_min = float(v_min[0]) if v_min else 0.0
+                    base_max = float(v_max) if v_max not in (None, '', "") else base_min * 10
+                else:
+                    base_min = float(v_min) if v_min not in (None, '', "") else 0.0
+                    base_max = float(v_max[0]) if v_max else 1.0
+
+                # Generate base value using log-uniform sampling (better for LR)
+                if base_min > 0 and base_max > 0:
+                    log_min = np.log10(base_min)
+                    log_max = np.log10(base_max)
+                    base_value = float(10 ** (suggestion * (log_max - log_min) + log_min))
+                else:
+                    base_value = float(suggestion * (base_max - base_min) + base_min)
+
+                # Check for disable_list option - if True, skip network-specific logic
+                # and return pure float value for Bayesian optimization
+                disable_list = parameter_config.get("disable_list", False)
+                if disable_list:
+                    logger.info(
+                        f"disable_list=True for {parameter_name}: "
+                        f"returning pure float {base_value} (skipping network-specific logic)"
+                    )
+                    return base_value
+
+                # Let network-specific handler convert to list format
+                return network_utils.apply_network_specific_param_logic(
+                    network=self.network,
+                    data_type=data_type,
+                    parameter_name=parameter_name,
+                    value=base_value,
+                    v_max=v_max,
+                    default_train_spec=self.default_train_spec,
+                    parent_params=self.parent_params
+                )
 
             v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
+
+            # Check for disable_list option early - log the parameter config for debugging
+            disable_list = parameter_config.get("disable_list", False)
+            logger.debug(
+                f"[BAYESIAN] Parameter {parameter_name}: v_min={v_min}, v_max={v_max}, "
+                f"disable_list={disable_list}, parameter_config keys={list(parameter_config.keys())}"
+            )
 
             # Apply math condition if specified
             # Skip relational constraints (like "> depends_on") as they're handled in base class
@@ -111,6 +199,10 @@ class Bayesian(AutoMLAlgorithmBase):
                         # Regular sampling for non-power constraints
                         normalized = suggestion * (v_max - v_min) + v_min
                         quantized = clamp_value(normalized, v_min, v_max)
+                else:
+                    # Invalid math condition format, fall back to regular sampling
+                    normalized = suggestion * (v_max - v_min) + v_min
+                    quantized = clamp_value(normalized, v_min, v_max)
             else:
                 # No math condition, regular sampling
                 normalized = suggestion * (v_max - v_min) + v_min
@@ -122,6 +214,15 @@ class Bayesian(AutoMLAlgorithmBase):
                 ):
                     self.parent_params[parameter_name] = quantized
 
+            # Check for disable_list option - if True, skip network-specific logic
+            # and return pure float value (works for both scalar and list ranges)
+            if disable_list:
+                logger.info(
+                    f"disable_list=True for {parameter_name}: "
+                    f"returning pure float {quantized} (skipping network-specific logic)"
+                )
+                return quantized
+
             # Apply network-specific parameter logic
             return network_utils.apply_network_specific_param_logic(
                 network=self.network,
@@ -132,6 +233,119 @@ class Bayesian(AutoMLAlgorithmBase):
                 default_train_spec=self.default_train_spec,
                 parent_params=self.parent_params
             )
+
+        if data_type in ("int", "integer"):
+            v_min = parameter_config.get("valid_min", "")
+            v_max = parameter_config.get("valid_max", "")
+
+            # If no valid range, generate values around default using suggestion
+            if v_min == "" or v_max == "":
+                if default_value is not None and default_value != "":
+                    default_val = int(default_value)
+                    # Use suggestion to vary around default
+                    if default_val > 0:
+                        v_min = max(1, default_val // 2)
+                        v_max = default_val * 2
+                    else:
+                        v_min = 1
+                        v_max = 100
+                    # Use suggestion to pick value in range
+                    continuous_value = suggestion * (v_max - v_min) + v_min
+                    quantized_int = int(round(continuous_value))
+                    logger.info(
+                        f"Generated int for {parameter_name} (no range): "
+                        f"{quantized_int} from suggestion {suggestion}"
+                    )
+                    return quantized_int
+                # No default, use suggestion in [1, 100]
+                return int(round(suggestion * 99 + 1))
+
+            if is_nan_value(v_min) or is_nan_value(v_max):
+                # NaN ranges, use default-based range
+                if default_value is not None:
+                    default_val = int(default_value)
+                    v_min = max(1, default_val // 2)
+                    v_max = default_val * 2
+                    continuous_value = suggestion * (v_max - v_min) + v_min
+                    return int(round(continuous_value))
+                return int(round(suggestion * 99 + 1))
+
+            v_min, v_max = get_valid_range(parameter_config, self.parent_params, self.custom_ranges)
+
+            # Map GP suggestion to discrete integer
+            continuous_value = suggestion * (v_max - v_min) + v_min
+            quantized_int = int(round(continuous_value))
+
+            # Apply math condition if specified
+            # Skip relational constraints (like "> depends_on") as they're handled later
+            if math_cond and type(math_cond) is str and "depends_on" not in math_cond:
+                parts = math_cond.split(" ")
+                if len(parts) >= 2:
+                    operator = parts[0]
+                    factor = int(float(parts[1]))
+                    if operator == "^":
+                        quantized_int = int(self._apply_power_constraint_with_equal_priority(
+                            v_min, v_max, factor, quantized_int))
+                    elif operator == "/":
+                        quantized_int = fix_input_dimension(quantized_int, factor)
+
+            if not (type(parent_param) is float and math.isnan(parent_param)):
+                if ((type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or
+                        (type(parent_param) is bool and parent_param)):
+                    self.parent_params[parameter_name] = quantized_int
+
+            return network_utils.apply_network_specific_param_logic(
+                network=self.network,
+                data_type=data_type,
+                parameter_name=parameter_name,
+                value=quantized_int,
+                default_train_spec=self.default_train_spec,
+                parent_params=self.parent_params
+            )
+
+        if data_type in ("categorical", "ordered"):
+            valid_options = get_valid_options(parameter_config, self.custom_ranges)
+            if not valid_options or valid_options == "":
+                return default_value
+
+            # Map GP suggestion to discrete index
+            idx = int(suggestion * len(valid_options))
+            idx = min(idx, len(valid_options) - 1)
+
+            # Handle weighted options
+            weights = get_option_weights(parameter_config, self.custom_ranges)
+            if weights and len(weights) == len(valid_options):
+                sorted_pairs = sorted(zip(valid_options, weights), key=lambda x: x[1], reverse=True)
+                cumulative = 0
+                total_weight = sum(weights)
+                for option, weight in sorted_pairs:
+                    cumulative += weight / total_weight
+                    if suggestion <= cumulative:
+                        return option
+                return sorted_pairs[0][0]
+
+            return valid_options[idx]
+
+        if data_type == "ordered_int":
+            valid_options = get_valid_options(parameter_config, self.custom_ranges)
+            if not valid_options or valid_options == "":
+                return int(default_value) if default_value else 0
+
+            idx = int(suggestion * len(valid_options))
+            idx = min(idx, len(valid_options) - 1)
+
+            weights = get_option_weights(parameter_config, self.custom_ranges)
+            if weights and len(weights) == len(valid_options):
+                sorted_pairs = sorted(zip(valid_options, weights), key=lambda x: x[1], reverse=True)
+                cumulative = 0
+                total_weight = sum(weights)
+                for option, weight in sorted_pairs:
+                    cumulative += weight / total_weight
+                    if suggestion <= cumulative:
+                        return int(option)
+                return int(sorted_pairs[0][0])
+
+            return int(valid_options[idx])
 
         return super().generate_automl_param_rec_value(parameter_config)
 

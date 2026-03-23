@@ -50,6 +50,8 @@ class OptimConfig:
     )
     lr: float = FLOAT_FIELD(
         value=2e-4,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="learning rate",
         description="The initial learning rate for training the model.",
@@ -57,6 +59,8 @@ class OptimConfig:
     )
     backbone_multiplier: float = FLOAT_FIELD(
         value=0.1,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="backbone learning rate multiplier",
         description="A multiplier for backbone learning rate.",
@@ -65,6 +69,8 @@ class OptimConfig:
     )
     momentum: float = FLOAT_FIELD(
         value=0.9,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="momentum - AdamW",
         description="The momentum for the AdamW optimizer.",
@@ -73,6 +79,8 @@ class OptimConfig:
     )
     weight_decay: float = FLOAT_FIELD(
         value=0.05,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="weight decay",
         description="The weight decay coefficient.",
@@ -166,11 +174,18 @@ class Mask2FormerTrainExpConfig(TrainConfig):
         DDP (Distributed Data Parallel) and Fully Sharded DDP are supported.""",
     )
     activation_checkpoint: bool = BOOL_FIELD(
-        value=True,
+        value=False,
         display_name="enable activation checkpointing",
         description="""
         A True value instructs train to recompute in backward pass to save GPU memory,
-        rather than storing activations.""",
+        rather than storing activations. Note: activation checkpointing is incompatible
+        with find_unused_parameters in DDP and may cause errors if the model has unused
+        parameters.""",
+    )
+    use_distributed_sampler: bool = BOOL_FIELD(
+        value=False,
+        display_name="use distributed sampler",
+        description="Use distributed sampler for multi-GPU training.",
     )
     iters_per_epoch: Optional[int] = INT_FIELD(
         value=None,  # 20210, 118272

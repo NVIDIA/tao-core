@@ -18,7 +18,7 @@ import math
 import re
 import sys
 from datetime import datetime
-from marshmallow import Schema, fields, EXCLUDE, validates_schema, ValidationError, validate
+from marshmallow import Schema, fields, EXCLUDE, RAISE, validates_schema, ValidationError, validate
 from marshmallow_enum import EnumField, Enum
 
 from nvidia_tao_core.microservices.enum_constants import (
@@ -142,6 +142,7 @@ class JobStatusEnum(Enum):
     """Class defining job status enum"""
 
     Done = 'Done'
+    Started = 'Started'
     Running = 'Running'
     Error = 'Error'
     Pending = 'Pending'
@@ -187,7 +188,6 @@ class AllowedDockerEnvVariables(Enum):
     CLEARML_API_SECRET_KEY = "CLEARML_API_SECRET_KEY"
 
     CLOUD_BASED = "CLOUD_BASED"
-    NVCF_HELM = "NVCF_HELM"
     TELEMETRY_OPT_OUT = "TELEMETRY_OPT_OUT"
     TAO_API_KEY = "TAO_API_KEY"
     TAO_USER_KEY = "TAO_USER_KEY"
@@ -200,50 +200,17 @@ class AllowedDockerEnvVariables(Enum):
     TAO_EXECUTION_BACKEND = "TAO_EXECUTION_BACKEND"
     AUTOML_EXPERIMENT_NUMBER = "AUTOML_EXPERIMENT_NUMBER"
     JOB_ID = "JOB_ID"
+    TAO_API_RESULTS_DIR = "TAO_API_RESULTS_DIR"
     TAO_API_JOB_ID = "TAO_API_JOB_ID"  # Automl brain job id
     RETAIN_CHECKPOINTS_FOR_RESUME = "RETAIN_CHECKPOINTS_FOR_RESUME"
     EARLY_STOP_EPOCH = "EARLY_STOP_EPOCH"
 
+    DEBUG_ENABLED = "DEBUG_ENABLED"
+
     TAO_TELEMETRY_SERVER = "TAO_TELEMETRY_SERVER"
     TAO_CLIENT_TYPE = "TAO_CLIENT_TYPE"  # Client type: container, api, cli, sdk, ui, etc.
     TAO_AUTOML_TRIGGERED = "TAO_AUTOML_TRIGGERED"  # Whether job is triggered by AutoML
-
-
-class NVCFEndpoint(Enum):
-    """Class defining action type enum"""
-
-    login = 'login'
-    org_gpu_types = 'org_gpu_types'
-    workspace_retrieve_datasets = 'workspace_retrieve_datasets'
-    list = 'list'
-    retrieve = 'retrieve'
-    delete = 'delete'
-    bulk_delete = 'bulk_delete'
-    create = 'create'
-    update = 'update'
-    partial_update = 'partial_update'
-    specs_schema = 'specs_schema'
-    job_run = 'job_run'
-    job_retry = 'job_retry'
-    job_list = 'job_list'
-    job_retrieve = 'job_retrieve'
-    job_schema = 'job_schema'
-    job_logs = 'job_logs'
-    job_cancel = 'job_cancel'
-    job_delete = 'job_delete'
-    job_download = 'job_download'
-    job_pause = 'job_pause'
-    jobs_cancel = 'jobs_cancel'
-    bulk_cancel = 'bulk_cancel'
-    job_resume = 'job_resume'
-    automl_details = 'automl_details'
-    get_epoch_numbers = 'get_epoch_numbers'
-    model_publish = 'model_publish'
-    remove_published_model = 'remove_published_model'
-    status_update = 'status_update'
-    log_update = 'log_update'
-    container_job_run = 'container_job_run'
-    container_job_status = 'container_job_status'
+    TAO_LOG_LEVEL = "TAO_LOG_LEVEL"  # Log level passed from brain to train jobs (e.g. INFO, DEBUG)
 
 
 class CloudPullTypesEnum(Enum):
@@ -269,6 +236,7 @@ class DatasetIntentEnum(Enum):
     training = 'training'
     evaluation = 'evaluation'
     testing = 'testing'
+    calibration = 'calibration'
 
 
 class CheckpointChooseMethodEnum(Enum):
@@ -279,19 +247,10 @@ class CheckpointChooseMethodEnum(Enum):
     from_epoch_number = 'from_epoch_number'
 
 
-class ExperimentTypeEnum(Enum):
-    """Class defining type of experiment"""
-
-    vision = 'vision'
-    medical = 'medical'
-    maxine = 'maxine'
-
-
 class ExperimentExportTypeEnum(Enum):
     """Class defining model export type"""
 
     tao = 'tao'
-    monai_bundle = 'monai_bundle'
 
 
 class AutoMLAlgorithm(Enum):
@@ -299,6 +258,12 @@ class AutoMLAlgorithm(Enum):
 
     bayesian = "bayesian"
     hyperband = "hyperband"
+    bohb = "bohb"
+    bfbo = "bfbo"
+    asha = "asha"
+    pbt = "pbt"
+    dehb = "dehb"
+    hyperband_es = "hyperband_es"
 
 
 class SourceType(Enum):
@@ -317,6 +282,19 @@ class MessageOnly(Schema):
     """Class defining dataset upload schema"""
 
     message = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+
+
+class JobEventsRsp(Schema):
+    """Class defining job events response schema"""
+
+    class Meta:
+        """Class enabling sorting field values by the order in which they are declared"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    events = fields.List(fields.Dict(), validate=validate.Length(max=sys.maxsize))
 
 
 class MissingFile(Schema):
@@ -640,28 +618,8 @@ class LoginRsp(Schema):
     user_email = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
 
 
-class NVCFReq(Schema):
-    """Class defining login response schema"""
-
-    class Meta:
-        """Class enabling sorting field values by the order in which they are declared"""
-
-        ordered = True
-    ngc_org_name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
-    api_endpoint = EnumField(NVCFEndpoint)
-    kind = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
-    handler_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    is_base_experiment = fields.Bool()
-    is_job = fields.Bool()
-    job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    action = EnumField(ActionEnum)
-    request_body = fields.Raw()
-    ngc_key = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
-    is_json_request = fields.Bool()
-
-
 class ContainerJob(Schema):
-    """Class defining NVCF request schema"""
+    """Class defining job request schema"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
@@ -720,6 +678,8 @@ class GpuDetails(Schema):
     max_limit = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     current_used = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     current_available = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    node_type = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    backend_type = fields.Str(validate=validate.Length(max=2048), allow_none=True)
 
 
 class TelemetryReq(Schema):
@@ -850,10 +810,10 @@ class WorkspaceListRsp(Schema):
     pagination_info = fields.Nested(PaginationInfo, allow_none=True)
 
 
-class DatasetPathLst(Schema):
+class DatasetUriLst(Schema):
     """Class defining dataset actions schema"""
 
-    dataset_paths = fields.List(
+    dataset_uris = fields.List(
         fields.Str(
             format="regex",
             regex=r'.*',
@@ -862,6 +822,37 @@ class DatasetPathLst(Schema):
         ),
         validate=validate.Length(max=sys.maxsize)
     )
+
+
+class LocalBackendDetails(Schema):
+    """Backend details for local execution - no additional parameters"""
+
+    backend_type = fields.Constant("local")
+
+
+class SlurmBackendDetails(Schema):
+    """Backend details for Slurm execution"""
+
+    backend_type = fields.Constant("slurm")
+    partition = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    cluster_name = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+
+
+class LeptonBackendDetails(Schema):
+    """Backend details for Lepton execution"""
+
+    backend_type = fields.Constant("lepton")
+    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+
+
+class BackendDetails(Schema):
+    """Class defining polymorphic backend execution details schema (v1 - simplified)"""
+
+    backend_type = fields.Str(validate=validate.Length(max=50), allow_none=True)
+    partition = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    cluster_name = fields.Str(validate=validate.Length(max=2048), allow_none=True)
+    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    slurm_metadata = fields.Dict(allow_none=True)  # For storing slurm_job_id and other runtime metadata
 
 
 class DatasetActions(Schema):
@@ -873,7 +864,7 @@ class DatasetActions(Schema):
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     retain_checkpoints_for_resume = fields.Bool(allow_none=True)
     early_stop_epoch = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     timeout_minutes = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True)
@@ -894,7 +885,7 @@ class LstStr(Schema):
     accepted_dataset_intents = fields.List(
         EnumField(DatasetIntentEnum),
         allow_none=True,
-        validate=validate.Length(max=3)
+        validate=validate.Length(max=4)
     )
 
 
@@ -936,7 +927,7 @@ class DatasetReq(Schema):
     client_secret = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     filters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     status = EnumField(PullStatus)
-    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=3))
+    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=4))
     base_experiment_pull_complete = EnumField(PullStatus)
     base_experiment_ids = fields.List(
         fields.Str(format="uuid", validate=fields.validate.Length(max=36)),
@@ -974,7 +965,7 @@ class DatasetJob(Schema):
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     dataset_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
 
 
@@ -1027,7 +1018,7 @@ class DatasetRsp(Schema):
     client_secret = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     filters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
     status = EnumField(PullStatus)
-    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=3))
+    use_for = fields.List(EnumField(DatasetIntentEnum), allow_none=True, validate=validate.Length(max=4))
     base_experiment_pull_complete = EnumField(PullStatus)
     base_experiment_ids = fields.List(
         fields.Str(format="uuid", validate=fields.validate.Length(max=36)),
@@ -1089,7 +1080,7 @@ class ExperimentActions(Schema):
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     retain_checkpoints_for_resume = fields.Bool(allow_none=True)
     early_stop_epoch = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     timeout_minutes = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True)
@@ -1111,32 +1102,141 @@ class JobResume(Schema):
     specs = fields.Raw(allow_none=True)
 
 
+# Algorithm-specific parameter schemas (nested structure)
+class AutoMLBayesianParams(Schema):
+    """Schema for Bayesian and BFBO algorithm parameters"""
+
+    class Meta:
+        """Marshmallow schema configuration"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    automl_max_recommendations = fields.Int(
+        format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True
+    )
+
+
+class AutoMLHyperbandParams(Schema):
+    """Schema for Hyperband algorithm parameters"""
+
+    class Meta:
+        """Marshmallow schema configuration"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    automl_max_epochs = fields.Int(format="int64", validate=validate.Range(min=2, max=sys.maxsize), required=True)
+    automl_reduction_factor = fields.Int(format="int64", validate=validate.Range(min=2, max=sys.maxsize), required=True)
+    epoch_multiplier = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+
+
+class AutoMLBOHBParams(AutoMLHyperbandParams):
+    """Schema for BOHB algorithm parameters"""
+
+    automl_kde_samples = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True)
+    automl_top_n_percent = fields.Float(validate=validate.Range(min=0.0, max=100.0), allow_none=True)
+    automl_min_points_in_model = fields.Int(
+        format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True
+    )
+
+
+class AutoMLASHAParams(AutoMLHyperbandParams):
+    """Schema for ASHA algorithm parameters"""
+
+    automl_max_concurrent = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+    automl_max_trials = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True)
+
+
+class AutoMLDEHBParams(AutoMLHyperbandParams):
+    """Schema for DEHB algorithm parameters"""
+
+    automl_mutation_factor = fields.Float(validate=validate.Range(min=0.0, max=2.0), allow_none=True)
+    automl_crossover_prob = fields.Float(validate=validate.Range(min=0.0, max=1.0), allow_none=True)
+
+
+class AutoMLHyperBandESParams(AutoMLHyperbandParams):
+    """Schema for HyperBand with Early Stopping algorithm parameters"""
+
+    automl_early_stop_threshold = fields.Float(validate=validate.Range(min=0.0, max=1.0), allow_none=True)
+    automl_min_early_stop_epochs = fields.Int(
+        format="int64", validate=validate.Range(min=1, max=sys.maxsize), allow_none=True
+    )
+
+
+class AutoMLPBTParams(Schema):
+    """Schema for Population-Based Training algorithm parameters"""
+
+    class Meta:
+        """Marshmallow schema configuration"""
+
+        ordered = True
+        unknown = EXCLUDE
+
+    automl_population_size = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+    automl_eval_interval = fields.Int(format="int64", validate=validate.Range(min=1, max=sys.maxsize), required=True)
+    automl_perturbation_factor = fields.Float(validate=validate.Range(min=1.0, max=10.0), allow_none=True)
+
+
 class AutoML(Schema):
-    """Class defining automl parameters in a schema"""
+    """AutoML schema with nested algorithm-specific parameters"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-        unknown = EXCLUDE
+        unknown = RAISE
+
     automl_enabled = fields.Bool(allow_none=True)
     automl_algorithm = EnumField(AutoMLAlgorithm, allow_none=True)
-    automl_max_recommendations = fields.Int(
-        format="int64",
-        validate=validate.Range(min=0, max=sys.maxsize),
-        allow_none=True
-    )
     automl_delete_intermediate_ckpt = fields.Bool(allow_none=True)
     override_automl_disabled_params = fields.Bool(allow_none=True)
-    automl_R = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    automl_nu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    epoch_multiplier = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     automl_hyperparameters = fields.Str(
-        format="regex",
-        regex=r'\[.*\]',
-        validate=fields.validate.Length(max=5000),
-        allow_none=True
+        format="regex", regex=r'\[.*\]', validate=fields.validate.Length(max=5000), allow_none=True
     )
+    # Nested algorithm-specific parameters
+    algorithm_specific_params = fields.Field(allow_none=True)
+    metric = fields.Str(allow_none=True)
+
+    @validates_schema
+    def validate_algorithm_specific_params(self, data, **kwargs):
+        """Validate algorithm-specific parameters based on algorithm type"""
+        if not data.get('automl_enabled', False):
+            return
+
+        algorithm = data.get('automl_algorithm')
+        if not algorithm:
+            raise ValidationError('automl_algorithm is required when automl_enabled is True')
+
+        # Convert enum to string if needed
+        algo_str = algorithm.value if hasattr(algorithm, 'value') else str(algorithm)
+
+        # Select appropriate schema based on algorithm
+        if algo_str in ('bayesian', 'b', 'bfbo'):
+            schema = AutoMLBayesianParams()
+        elif algo_str in ('hyperband', 'h'):
+            schema = AutoMLHyperbandParams()
+        elif algo_str == 'bohb':
+            schema = AutoMLBOHBParams()
+        elif algo_str == 'asha':
+            schema = AutoMLASHAParams()
+        elif algo_str == 'dehb':
+            schema = AutoMLDEHBParams()
+        elif algo_str in ('hyperband_es', 'hes'):
+            schema = AutoMLHyperBandESParams()
+        elif algo_str == 'pbt':
+            schema = AutoMLPBTParams()
+        else:
+            raise ValidationError(f'Unknown automl_algorithm: {algo_str}')
+
+        # Always validate algorithm-specific parameters (required fields will error if missing)
+        params = data.get('algorithm_specific_params') or {}
+        try:
+            schema.load(params, unknown=EXCLUDE)
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise fields.ValidationError(str(e))
 
 
 class BaseExperimentMetadata(Schema):
@@ -1256,15 +1356,7 @@ class ExperimentReq(Schema):
     public = fields.Bool()
     automl_settings = fields.Nested(AutoML, allow_none=True)
     metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
-    type = EnumField(ExperimentTypeEnum, default=ExperimentTypeEnum.vision)
-    realtime_infer = fields.Bool(default=False)
     model_params = fields.Dict(allow_none=True)
-    bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
-    realtime_infer_request_timeout = fields.Int(
-        format="int64",
-        validate=validate.Range(min=0, max=sys.maxsize),
-        allow_none=True
-    )
     experiment_actions = fields.List(
         fields.Nested(ExperimentActions, allow_none=True),
         validate=validate.Length(max=sys.maxsize)
@@ -1285,6 +1377,7 @@ class ExperimentReq(Schema):
         validate=fields.validate.Length(max=2048),
         allow_none=True
     )
+    skip_dataset_validation = fields.Bool(allow_none=True)
 
 
 class ExperimentJob(Schema):
@@ -1314,7 +1407,7 @@ class ExperimentJob(Schema):
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     num_gpu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    platform_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    backend_details = fields.Nested(BackendDetails, allow_none=True)
     experiment_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
 
 
@@ -1325,7 +1418,7 @@ class ExperimentRsp(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-        load_only = ("user_id", "docker_env_vars", "realtime_infer_endpoint", "realtime_infer_model_name")
+        load_only = ("user_id", "docker_env_vars")
         unknown = EXCLUDE
 
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
@@ -1425,28 +1518,7 @@ class ExperimentRsp(Schema):
     all_jobs_cancel_status = EnumField(JobStatusEnum, allow_none=True)
     automl_settings = fields.Nested(AutoML)
     metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
-    type = EnumField(ExperimentTypeEnum, default=ExperimentTypeEnum.vision, allow_none=True)
-    realtime_infer = fields.Bool(allow_none=True)
-    realtime_infer_support = fields.Bool()
-    realtime_infer_endpoint = fields.Str(
-        format="regex",
-        regex=r'.*',
-        validate=fields.validate.Length(max=1000),
-        allow_none=True
-    )
-    realtime_infer_model_name = fields.Str(
-        format="regex",
-        regex=r'.*',
-        validate=fields.validate.Length(max=1000),
-        allow_none=True
-    )
     model_params = fields.Dict(allow_none=True)
-    realtime_infer_request_timeout = fields.Int(
-        format="int64",
-        validate=validate.Range(min=0, max=86400),
-        allow_none=True
-    )
-    bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     base_experiment_metadata = fields.Nested(BaseExperimentMetadata, allow_none=True)
     source_type = EnumField(SourceType, allow_none=True)
     experiment_actions = fields.List(
@@ -1566,25 +1638,6 @@ class LoadAirgappedExperimentsRsp(Schema):
     )
 
 
-class ParameterDetailsReqSchema(Schema):
-    """Class defining request schema for getting parameter details"""
-
-    class Meta:
-        """Class enabling sorting field values by the order in which they are declared"""
-
-        ordered = True
-        unknown = EXCLUDE
-    parameters = fields.List(
-        fields.Str(
-            format="regex",
-            regex=r'.*',
-            validate=fields.validate.Length(max=500)
-        ),
-        validate=validate.Length(min=1, max=sys.maxsize),
-        required=True
-    )
-
-
 class ParameterRangeSchema(Schema):
     """Schema for parameter attributes (used for both default and custom)"""
 
@@ -1608,6 +1661,8 @@ class ParameterRangeSchema(Schema):
     math_cond = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
     depends_on = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
     parent_param = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
+    # When True, skip network-specific logic and treat as pure float for optimization
+    disable_list = fields.Bool(allow_none=True)
 
 
 class AutoMLParameterDetail(Schema):

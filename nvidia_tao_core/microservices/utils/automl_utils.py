@@ -29,6 +29,7 @@ from .stateless_handler_utils import (
     get_automl_best_rec_info,
     update_job_metadata
 )
+from nvidia_tao_core.microservices.enum_constants import Backend
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -84,9 +85,16 @@ def get_valid_range(parameter_config, parent_params, custom_ranges=None):
         Tuple of (v_min, v_max)
     """
     parameter_name = parameter_config.get("parameter", "")
-    v_min = float(parameter_config.get("valid_min"))
-    v_max = float(parameter_config.get("valid_max"))
-    default_value = float(parameter_config.get("default_value"))
+
+    # Handle empty strings and None values for numeric parameters
+    valid_min = parameter_config.get("valid_min")
+    valid_max = parameter_config.get("valid_max")
+    default_val = parameter_config.get("default_value")
+
+    # Convert to float, handling empty strings and None
+    v_min = float(valid_min) if valid_min not in (None, '', "") else 0.0
+    v_max = float(valid_max) if valid_max not in (None, '', "") else float('inf')
+    default_value = float(default_val) if default_val not in (None, '', "") else 0.0
     if math.isinf(v_min):
         v_min = default_value
     if math.isinf(v_max):
@@ -108,25 +116,36 @@ def get_valid_range(parameter_config, parent_params, custom_ranges=None):
         if custom_depends_on is not None:
             dependent_on_param = custom_depends_on
     if type(dependent_on_param) is str and dependent_on_param:
-        dependent_on_param_op = dependent_on_param.split(" ")[0]
-        dependent_on_param_name = dependent_on_param.split(" ")[1]
-        if dependent_on_param_name in parent_params.keys():
-            limit_value = parent_params[dependent_on_param_name]
+        parts = dependent_on_param.split(" ")
+        if len(parts) >= 2:
+            dependent_on_param_op = parts[0]
+            dependent_on_param_name = parts[1]
         else:
-            limit_value = default_value
+            dependent_on_param_name = parts[0]
+            math_cond = parameter_config.get("math_cond", "")
+            if type(math_cond) is str and "depends_on" in math_cond:
+                dependent_on_param_op = math_cond.strip().split()[0]
+            else:
+                dependent_on_param_op = None
 
-        epsilon = 0.000001
-        if limit_value == epsilon:
-            epsilon /= 10
+        if dependent_on_param_op is not None:
+            if dependent_on_param_name in parent_params.keys():
+                limit_value = parent_params[dependent_on_param_name]
+            else:
+                limit_value = default_value
 
-        if dependent_on_param_op == ">":
-            v_min = limit_value + epsilon
-        elif dependent_on_param_op == ">=":
-            v_min = limit_value
-        elif dependent_on_param_op == "<":
-            v_max = limit_value - epsilon
-        elif dependent_on_param_op == "<=":
-            v_max = limit_value
+            epsilon = 0.000001
+            if limit_value == epsilon:
+                epsilon /= 10
+
+            if dependent_on_param_op == ">":
+                v_min = limit_value + epsilon
+            elif dependent_on_param_op == ">=":
+                v_min = limit_value
+            elif dependent_on_param_op == "<":
+                v_max = limit_value - epsilon
+            elif dependent_on_param_op == "<=":
+                v_max = limit_value
 
     return v_min, v_max
 
@@ -186,8 +205,8 @@ def report_healthy(path, message, clear=False):
 
 def wait_for_job_completion(job_id):
     """Check if the provided job_id is actively running and wait until completion"""
-    if BACKEND == "local-docker":
-        from nvidia_tao_core.microservices.handlers.docker_handler import DockerHandler
+    if BACKEND == Backend.LOCAL_DOCKER:
+        from nvidia_tao_core.microservices.handlers.execution_handlers.docker_handler import DockerHandler
         while True:
             handler = DockerHandler.get_handler_for_container(job_id)
             if not handler:
@@ -196,19 +215,8 @@ def wait_for_job_completion(job_id):
 
     config.load_incluster_config()
     while True:
-        dgx_active_jobs = []
-        if BACKEND == "NVCF":
-            custom_api = client.CustomObjectsApi()
-            crd_group = 'nvcf-job-manager.nvidia.io'
-            crd_version = 'v1alpha1'
-            crd_plural = 'nvcfjobs'
-            # List all instances of the Custom Resource across all namespaces
-            custom_resources = custom_api.list_cluster_custom_object(crd_group, crd_version, crd_plural)
-            dgx_active_jobs = [dgx_cr["spec"].get("job_id") for dgx_cr in custom_resources['items']]
-
         ret = client.BatchV1Api().list_job_for_all_namespaces()
-        active_jobs = dgx_active_jobs + [job.metadata.name for job in ret.items]
-        active_jobs = list(set(active_jobs))
+        active_jobs = [job.metadata.name for job in ret.items]
         if job_id not in active_jobs:
             break
         time.sleep(5)
@@ -252,6 +260,13 @@ class Recommendation:
         self.result = 0.0
         self.best_epoch_number = ""
         self.metric = metric
+        self.resume_from_job_id = None  # For PBT: job ID to resume checkpoint from
+        self.early_stop_epoch = None  # For PBT/Hyperband: epoch limit when this rec was launched
+
+        # Add timestamps for timeout tracking
+        current_time = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        self.created_on = current_time
+        self.last_modified = current_time
 
         # Add timestamps for timeout tracking
         current_time = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
@@ -296,15 +311,19 @@ class Recommendation:
 class ResumeRecommendation:
     """Recommendation class for Hyperband resume experiments"""
 
-    def __init__(self, identity, specs):
+    def __init__(self, identity, specs, job_id, resume_from_job_id=None):
         """Initialize the ResumeRecommendation class
 
         Args:
             identity: the id of the recommendation
             specs: the specs/config of the recommendation
+            job_id: the job id of the recommendation
+            resume_from_job_id: (PBT) the job id to resume checkpoint from if member was replaced
         """
         self.id = identity
         self.specs = specs
+        self.job_id = job_id
+        self.resume_from_job_id = resume_from_job_id
 
 
 class JobStates():
@@ -355,7 +374,7 @@ def update_automl_details_metadata(brain_job_id, handler_id, handler_kind="exper
             automl_interpretable_result["experiments"][exp_id_str]["specs"] = experiment_details.get("specs", {})
 
         # Get the best experiment id from the automl_jobs table
-        best_rec_number, _ = get_automl_best_rec_info(brain_job_id)
+        best_rec_number, _, _ = get_automl_best_rec_info(brain_job_id)
         if best_rec_number and best_rec_number != "-1":
             automl_interpretable_result["best_experiment_id"] = int(best_rec_number)
 
@@ -432,6 +451,7 @@ def apply_automl_custom_param_ranges(job_id, network_arch, automl_range_override
             custom_depends_on = param_range.get("depends_on")
             custom_math_cond = param_range.get("math_cond")
             custom_parent_param = param_range.get("parent_param")
+            disable_list = param_range.get("disable_list", False)
 
             # Check if parameter exists in schema
             if param_name not in format_json_schema:
@@ -558,8 +578,15 @@ def apply_automl_custom_param_ranges(job_id, network_arch, automl_range_override
                 "option_weights": custom_weights,
                 "depends_on": custom_depends_on,
                 "math_cond": custom_math_cond,
-                "parent_param": custom_parent_param
+                "parent_param": custom_parent_param,
+                "disable_list": disable_list
             }
+            # Debug: Log when disable_list is True
+            if disable_list:
+                logger.info(
+                    f"[AUTOML-CUSTOM-RANGE] Parameter '{param_name}': disable_list=True, "
+                    f"valid_min={custom_min}, valid_max={custom_max}"
+                )
 
         if errors:
             error_msg = f"Validation errors: {'; '.join(errors)}"
